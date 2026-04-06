@@ -46,7 +46,11 @@ gate-agent/
 ├── rust-toolchain.toml
 ├── .gitignore
 ├── .secrets.example
+├── docker-compose.yml
 ├── README.md
+├── dev/
+│   └── upstream-dummy/
+│       └── server.mjs
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
@@ -148,20 +152,16 @@ audience = "gate-agent-clients"
 shared_secret = "replace-me"
 
 [apis.projects]
-base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
-timeout_ms = 5000
-
-[apis.billing]
-base_url = "https://billing.internal.example"
+base_url = "http://127.0.0.1:18081/api"
 auth_header = "authorization"
 auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
+auth_value = "local-upstream-token"
 timeout_ms = 5000
 ```
 
 MVP decision: keep routing metadata and credentials together in one `.secrets` TOML file because the feature is still small and local-first.
+
+For local development, the committed sample should point to a local dummy upstream served through Docker Compose rather than placeholder external URLs.
 
 ### 3. Auth model
 
@@ -257,6 +257,37 @@ Response shape:
 - enforce upstream timeouts
 - keep `curl-payload` documented as a local testing helper only
 
+### 6.5 Local dummy upstream for development
+
+The project should include a local dummy upstream service for manual smoke testing.
+
+Implementation direction:
+
+- add a root `docker-compose.yml`
+- run one small Node container named `dummy-upstream`
+- expose it on `127.0.0.1:18081`
+- keep the upstream mock separate from the Rust proxy process
+
+Dummy upstream behavior:
+
+- leave `/healthz` unauthenticated for simple container and local sanity checks
+- require `Authorization: Bearer local-upstream-token` for `/api/...` routes
+- serve fixed JSON directly from a tiny Node HTTP server without external dependencies
+- expose only a small endpoint set for local testing:
+  - `GET /healthz`
+  - `GET /api/v1/projects/1/tasks`
+  - `POST /api/v1/projects/1/tasks`
+  - `GET /api/v1/projects/1/tasks/stream` with streaming NDJSON chunks
+  - `401` JSON for missing or wrong upstream bearer token
+  - `404` JSON for unknown `/api/*` paths
+
+Intentional simplifications:
+
+- no billing dummy endpoint
+- no stateful behavior
+- no dynamic templating
+- no attempt to simulate production complexity beyond static auth plus fixed JSON and one streaming path
+
 ### 7. Streaming behavior for MVP
 
 Streaming should be part of the MVP.
@@ -286,6 +317,7 @@ Complexity assessment:
 - observability: Prometheus metrics, OpenTelemetry traces
 - TLS/mTLS for local listener when needed
 - richer auth policies only if they become necessary later
+- replace the local dummy service with a richer mock service only if request matching or stateful behavior becomes necessary
 
 ---
 
@@ -368,6 +400,8 @@ curl \
 - upstream timeout returns `504`
 - client `Authorization` header is not forwarded upstream
 
+Manual local smoke tests should also cover the Docker Compose dummy upstream flow.
+
 ### Manual smoke test
 
 - run local mock upstream
@@ -424,20 +458,25 @@ Tooling expectations:
 ## Dependency graph
 
 ```text
-Batch 1 (parallel): 1.1, 1.2, 1.3, 1.4, 1.5 [foundation]
-Batch 2 (parallel): 2.1, 2.2, 2.2b, 2.3, 2.4 [core - depends on batch 1]
-Batch 3 (parallel): 3.1, 3.2, 3.3, 3.4 [proxy app - depends on batch 2]
-Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3]
+Step 1: 1.1, 1.2, 1.5 [bootstrap CLI surface and docs skeleton]
+Step 2: 1.3, 1.4 [config, errors, telemetry foundation]
+Step 3: 2.1, 2.2, 2.2b [JWT claims, validation, and local signing]
+Step 4: 2.3, 2.4 [request and response mapping, including streaming]
+Step 5: 3.1, 3.2, 3.3, 3.4 [application wiring and live proxy server]
+Step 6: finalize `curl-payload` behavior and tests on top of the wired auth/config stack
+Step 7: 4.1, 4.2, 4.3 [integration hardening, CI, and README polish]
 ```
+
+Reason for this sequencing: the original batch notation implied parallel work, but several tasks share the same source files and test files. The implementation should therefore proceed as dependency-safe sequential steps instead of parallel batches.
 
 ---
 
 ## Phased task breakdown
 
-### Batch 1: Foundation
+### Step 1: Bootstrap and CLI shell
 
 #### Task 1.1: Bootstrap crate and dependencies
-- **Files:** `Cargo.toml`, `rust-toolchain.toml`, `.tool-versions`, `.gitignore`
+- **Files:** `Cargo.toml`, `rust-toolchain.toml`, `.tool-versions`, `.gitignore`, `docker-compose.yml`
 - **Depends:** none
 - Define binary + library targets and add the crate stack above.
 - Add `.secrets` and `target/` to `.gitignore`.
@@ -447,6 +486,21 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 - **Tests:** `tests/cli_start.rs`, `tests/cli_curl_payload.rs`
 - **Depends:** none
 - Implement `start` and `curl-payload` subcommands, argument parsing, and command dispatch.
+
+#### Task 1.5: Example operator docs
+- **Files:** `.secrets.example`, `README.md`
+- **Depends:** none
+- Document a concise summary, quickstart, development workflow, Docker Compose dummy-upstream flow, command examples, `curl -K -` testing flow, JWT expectations, and `.secrets` format.
+
+#### Task 1.6: Local dummy upstream definition
+- **Files:** `docker-compose.yml`, `dev/upstream-dummy/server.mjs`
+- **Depends:** none
+- Add a local authenticated Node-based dummy upstream for manual testing on `127.0.0.1:18081`.
+- Hardcode the small JSON response set and one streaming path directly in the server.
+
+### Step 2: Config, errors, and telemetry foundation
+
+This step completes the validated configuration and shared error/logging surfaces needed by all later code.
 
 #### Task 1.3: Runtime config and secrets loading
 - **Files:** `src/config/mod.rs`, `src/config/app_config.rs`, `src/config/secrets.rs`
@@ -461,12 +515,7 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 - **Depends:** none
 - Add `AppError`, HTTP-safe error payload helpers, tracing subscriber setup, and public module exports.
 
-#### Task 1.5: Example operator docs
-- **Files:** `.secrets.example`, `README.md`
-- **Depends:** none
-- Document a concise summary, quickstart, development workflow, command examples, `curl -K -` testing flow, JWT expectations, and `.secrets` format.
-
-### Batch 2: Auth and core proxy primitives
+### Step 3: Auth primitives
 
 #### Task 2.1: JWT claims model
 - **Files:** `src/auth/mod.rs`, `src/auth/claims.rs`
@@ -487,6 +536,10 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 - Add a small signer path used by `curl-payload` to mint short-lived local test JWTs.
 - Default token TTL should be short-lived; use 5 minutes unless implementation constraints force a minor change.
 
+### Step 4: Request and response proxy primitives
+
+This step focuses on request/response transformation and streaming-safe proxy plumbing before full server wiring.
+
 #### Task 2.3: Request mapping and header filtering
 - **Files:** `src/proxy/request.rs`
 - **Tests:** `tests/proxy_request_mapping.rs`
@@ -501,7 +554,7 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 - **Depends:** 1.4
 - Translate Reqwest upstream response into Axum response while filtering unsafe headers and preserving streaming behavior.
 
-### Batch 3: Application wiring and live proxying
+### Step 5: Application wiring and live proxying
 
 #### Task 3.1: Shared app state
 - **Files:** `src/app/mod.rs`, `src/app/state.rs`
@@ -527,7 +580,17 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 - **Depends:** 1.2, 3.1, 3.3
 - Wire config loading, telemetry setup, app state creation, and Axum server startup.
 
-### Batch 4: Delivery hardening
+### Step 6: `curl-payload` completion
+
+At this point the auth/config stack and local listener behavior already exist, so `curl-payload` can be finalized against the real application defaults rather than mocked assumptions.
+
+#### Task 3.5: Finalize `curl-payload`
+- **Files:** `src/commands/curl_payload.rs`, `tests/cli_curl_payload.rs`
+- **Depends:** 1.2, 1.3, 2.2b, 3.4
+- Finalize emitted `curl -K -` config against real listener defaults and validated JWT signing configuration.
+- Verify output contains the resolved local proxy URL and a valid bearer token header.
+
+### Step 7: Delivery hardening
 
 #### Task 4.1: End-to-end integration harness
 - **Files:** `tests/support/mod.rs`, `tests/proxy_end_to_end.rs`
@@ -542,7 +605,7 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 #### Task 4.3: MVP polish and operator docs
 - **Files:** `README.md`
 - **Depends:** 4.1, 4.2
-- Finalize concise summary, quickstart, development section, command examples, security notes, and known limitations.
+- Finalize concise summary, quickstart, development section, Docker Compose local testing instructions, command examples, security notes, and known limitations.
 
 ---
 
@@ -560,6 +623,7 @@ Batch 4 (parallel): 4.1, 4.2, 4.3 [integration and delivery - depends on batch 3
 8. Listener default remains localhost-only.
 9. `README.md` should stay concise: short summary, quickstart, development section, and command examples.
 10. No `/tools` endpoint is included in MVP.
+11. Local development should include a Docker Compose Node dummy upstream with one static bearer token, project-focused endpoints, and one streaming test path.
 
 ---
 
