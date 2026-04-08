@@ -4,17 +4,18 @@ use std::path::PathBuf;
 use crate::cli::StartArgs;
 
 use super::ConfigError;
+use super::path::{LOCAL_CONFIG_FILE, resolve_config_path};
 use super::secrets::SecretsConfig;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8787";
-pub const DEFAULT_SECRETS_FILE: &str = ".secrets";
+pub const DEFAULT_CONFIG_FILE: &str = LOCAL_CONFIG_FILE;
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub bind: SocketAddr,
     pub log_level: String,
-    pub secrets_file: PathBuf,
+    pub config_file: PathBuf,
     pub secrets: SecretsConfig,
 }
 
@@ -26,12 +27,13 @@ impl AppConfig {
             return Err(ConfigError::new("log level cannot be empty"));
         }
 
-        let secrets = SecretsConfig::load_from_file(&args.secrets_file)?;
+        let config_path = resolve_config_path(args.config.as_deref())?.path;
+        let secrets = SecretsConfig::load_from_file(&config_path)?;
 
         Ok(Self {
             bind: args.bind,
             log_level: log_level.to_owned(),
-            secrets_file: args.secrets_file.clone(),
+            config_file: config_path,
             secrets,
         })
     }

@@ -12,10 +12,11 @@ use super::{connection_bound_header_names, is_hop_by_hop_header};
 
 pub fn map_request(
     request: Request<Body>,
+    api_slug: &str,
     api_config: &ApiConfig,
 ) -> Result<reqwest::Request, AppError> {
     let (parts, body) = request.into_parts();
-    let raw_suffix = raw_proxy_suffix(&parts.uri)?;
+    let raw_suffix = raw_proxy_suffix(&parts.uri, api_slug)?;
     let url = build_upstream_url(&api_config.base_url, &raw_suffix)?;
     let mut outbound_request = reqwest::Request::new(parts.method, url);
 
@@ -26,26 +27,28 @@ pub fn map_request(
     Ok(outbound_request)
 }
 
-fn raw_proxy_suffix(uri: &Uri) -> Result<String, AppError> {
+fn raw_proxy_suffix(uri: &Uri, api_slug: &str) -> Result<String, AppError> {
     let Some(path_and_query) = uri.path_and_query().map(|value| value.as_str()) else {
         return Err(AppError::BadProxyPath(
             "proxy request is missing path and query".to_owned(),
         ));
     };
 
-    path_and_query
-        .strip_prefix("/proxy")
-        .map(str::to_owned)
-        .ok_or_else(|| AppError::BadProxyPath("request path must start with /proxy".to_owned()))
+    let proxy_prefix = format!("/proxy/{api_slug}");
+    let raw_suffix = path_and_query.strip_prefix(&proxy_prefix).ok_or_else(|| {
+        AppError::BadProxyPath(format!("request path must start with {proxy_prefix}"))
+    })?;
+
+    if raw_suffix.is_empty() || raw_suffix.starts_with('/') || raw_suffix.starts_with('?') {
+        return Ok(raw_suffix.to_owned());
+    }
+
+    Err(AppError::BadProxyPath(format!(
+        "request path must start with {proxy_prefix}/ or {proxy_prefix}?"
+    )))
 }
 
 fn build_upstream_url(base_url: &Url, raw_suffix: &str) -> Result<Url, AppError> {
-    if raw_suffix.is_empty() {
-        return Err(AppError::BadProxyPath(
-            "captured proxy path cannot be empty".to_owned(),
-        ));
-    }
-
     let (raw_path, query) = match raw_suffix.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (raw_suffix, None),

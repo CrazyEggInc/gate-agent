@@ -1,25 +1,28 @@
-use assert_cmd::Command;
-use gate_agent::{
-    auth::jwt::validate_token,
-    config::{
-        app_config::{DEFAULT_BIND, DEFAULT_SECRETS_FILE},
-        secrets::SecretsConfig,
-    },
-};
+use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
+use gate_agent::{cli::CurlArgs, commands::curl::render};
 use tempfile::tempdir;
 
-fn write_secrets_file()
--> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+fn write_config_file() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>>
+{
     let temp_dir = tempdir()?;
-    let secrets_file = temp_dir.path().join(DEFAULT_SECRETS_FILE);
+    let config_file = temp_dir.path().join(".secrets.test");
     std::fs::write(
-        &secrets_file,
+        &config_file,
         r#"
-[jwt]
-algorithm = "HS256"
-issuer = "gate-agent-dev"
+[auth]
+issuer = "gate-agent"
 audience = "gate-agent-clients"
-shared_secret = "replace-me"
+signing_secret = "replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects"]
+
+[clients.partner]
+api_key = "partner-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = []
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -29,132 +32,169 @@ timeout_ms = 5000
 "#,
     )?;
 
-    Ok((temp_dir, secrets_file))
-}
-
-fn output_line<'a>(stdout: &'a str, prefix: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
-    stdout
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .ok_or_else(|| {
-            Box::<dyn std::error::Error>::from(format!("missing output line with prefix: {prefix}"))
-        })
-}
-
-fn quoted_value<'a>(line: &'a str, prefix: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
-    let value = line
-        .strip_prefix(prefix)
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| {
-            Box::<dyn std::error::Error>::from(format!("invalid output line: {line}"))
-        })?;
-
-    Ok(value)
+    Ok((temp_dir, config_file))
 }
 
 #[test]
-fn curl_payload_help_lists_required_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::cargo_bin("gate-agent")?
-        .args(["curl-payload", "--help"])
-        .output()?;
-
-    assert!(output.status.success());
-
-    let stdout = String::from_utf8(output.stdout)?;
-
-    assert!(stdout.contains("--api"));
-    assert!(stdout.contains("--path"));
-    assert!(stdout.contains("--bind"));
-    assert!(stdout.contains("--secrets-file"));
-
-    Ok(())
-}
-
-#[test]
-fn curl_payload_uses_explicit_bind_and_secrets_file() -> Result<(), Box<dyn std::error::Error>> {
-    let (temp_dir, secrets_file) = write_secrets_file()?;
-    let output = Command::cargo_bin("gate-agent")?
-        .current_dir(temp_dir.path())
-        .args([
-            "curl-payload",
-            "--bind",
-            "127.0.0.1:9999",
-            "--secrets-file",
-            secrets_file.to_str().expect("secrets path should be utf-8"),
-            "--api",
-            "projects",
-            "--path",
-            "/v1/projects/1/tasks",
-        ])
-        .output()?;
-
-    assert!(output.status.success());
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let url = quoted_value(output_line(&stdout, "url = \"")?, "url = \"")?;
-
-    assert_eq!(url, "http://127.0.0.1:9999/proxy/v1/projects/1/tasks");
-
-    Ok(())
-}
-
-#[test]
-fn curl_payload_emits_local_proxy_url_and_signed_bearer_token()
+fn curl_auth_mode_renders_exchange_request_for_default_client()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (temp_dir, secrets_file) = write_secrets_file()?;
-    let output = Command::cargo_bin("gate-agent")?
-        .current_dir(temp_dir.path())
-        .args([
-            "curl-payload",
-            "--api",
-            "projects",
-            "--path",
-            "/v1/projects/1/tasks",
-        ])
-        .output()?;
+    let (_temp_dir, config_file) = write_config_file()?;
 
-    assert!(output.status.success());
+    let payload = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: true,
+        proxy: false,
+        jwt: None,
+        api: None,
+        path: None,
+    })?;
 
-    let stdout = String::from_utf8(output.stdout)?;
-    let url = quoted_value(output_line(&stdout, "url = \"")?, "url = \"")?;
-    let header = quoted_value(output_line(&stdout, "header = \"")?, "header = \"")?;
-    let token = header
-        .strip_prefix("Authorization: Bearer ")
-        .ok_or_else(|| format!("missing bearer token header: {header}"))?;
-    let secrets = SecretsConfig::load_from_file(&secrets_file)?;
-    let claims = validate_token(token, &secrets)?;
+    assert!(payload.contains("url = \"http://127.0.0.1:8787/auth/exchange\""));
+    assert!(payload.contains("request = \"POST\""));
+    assert!(payload.contains("header = \"x-api-key: default-client-key\""));
+    assert!(payload.contains("header = \"content-type: application/json\""));
+    assert!(payload.contains("data = \"{\\\"apis\\\":[\\\"projects\\\"]}\""));
+
+    Ok(())
+}
+
+#[test]
+fn curl_proxy_mode_renders_proxy_request() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
+
+    let payload = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: false,
+        proxy: false,
+        jwt: Some("jwt-token-value".to_owned()),
+        api: Some("projects".to_owned()),
+        path: Some("/v1/projects/1/tasks".to_owned()),
+    })?;
+
+    assert!(payload.contains("url = \"http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks\""));
+    assert!(payload.contains("header = \"Authorization: Bearer jwt-token-value\""));
+
+    Ok(())
+}
+
+#[test]
+fn curl_auth_mode_rejects_proxy_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
+
+    let error = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: true,
+        proxy: true,
+        jwt: None,
+        api: Some("projects".to_owned()),
+        path: None,
+    })
+    .unwrap_err();
 
     assert_eq!(
-        url,
-        &format!("http://{DEFAULT_BIND}/proxy/v1/projects/1/tasks")
+        error.to_string(),
+        "--auth cannot be combined with --proxy, --jwt, --api, or --path"
     );
-    assert_eq!(claims.api, "projects");
-    assert_eq!(claims.iss, "gate-agent-dev");
-    assert_eq!(claims.aud, "gate-agent-clients");
-    assert!(claims.exp > claims.iat);
 
     Ok(())
 }
 
 #[test]
-fn curl_payload_rejects_unknown_api_slug() -> Result<(), Box<dyn std::error::Error>> {
-    let (temp_dir, _secrets_file) = write_secrets_file()?;
-    let output = Command::cargo_bin("gate-agent")?
-        .current_dir(temp_dir.path())
-        .args([
-            "curl-payload",
-            "--api",
-            "billing",
-            "--path",
-            "/v1/projects/1/tasks",
-        ])
-        .output()?;
+fn curl_proxy_mode_requires_path() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
 
-    assert!(!output.status.success());
+    let error = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: false,
+        proxy: false,
+        jwt: Some("jwt-token-value".to_owned()),
+        api: Some("projects".to_owned()),
+        path: None,
+    })
+    .unwrap_err();
 
-    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(error.to_string(), "--path is required when using --jwt");
 
-    assert!(stderr.contains("api is not allowed: billing"));
+    Ok(())
+}
+
+#[test]
+fn curl_auth_mode_rejects_client_without_allowed_apis() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
+
+    let error = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "partner".to_owned(),
+        auth: true,
+        proxy: false,
+        jwt: None,
+        api: None,
+        path: None,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "client 'partner' has no allowed_apis configured"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn curl_explicit_proxy_mode_renders_proxy_request() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
+
+    let payload = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: false,
+        proxy: true,
+        jwt: Some("jwt-token-value".to_owned()),
+        api: Some("projects".to_owned()),
+        path: Some("/v1/projects/1/tasks".to_owned()),
+    })?;
+
+    assert!(payload.contains("url = \"http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks\""));
+    assert!(payload.contains("header = \"Authorization: Bearer jwt-token-value\""));
+
+    Ok(())
+}
+
+#[test]
+fn curl_proxy_mode_requires_jwt() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_config_file()?;
+
+    let error = render(CurlArgs {
+        bind: "127.0.0.1:8787".parse()?,
+        config: Some(config_file),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        client: "default".to_owned(),
+        auth: false,
+        proxy: true,
+        jwt: None,
+        api: Some("projects".to_owned()),
+        path: Some("/v1/projects/1/tasks".to_owned()),
+    })
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "--jwt is required in proxy mode");
 
     Ok(())
 }

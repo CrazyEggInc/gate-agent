@@ -1,12 +1,12 @@
 use axum::Router;
 use tokio::net::TcpListener;
+use tracing::info;
 
 use crate::app::AppState;
 use crate::cli::StartArgs;
 use crate::config::app_config::AppConfig;
 use crate::error::AppError;
 use crate::proxy::router::build_router;
-use crate::telemetry::init_tracing;
 
 use super::CommandError;
 
@@ -20,8 +20,6 @@ pub struct PreparedStart {
 pub fn prepare(args: &StartArgs) -> Result<PreparedStart, AppError> {
     let config = AppConfig::from_start_args(args)
         .map_err(|error| AppError::ConfigLoad(error.to_string()))?;
-
-    init_tracing(&config.log_level)?;
 
     let state = AppState::from_config(&config)?;
     let app = build_router(state.clone());
@@ -48,6 +46,8 @@ pub fn run(args: StartArgs) -> Result<(), CommandError> {
     runtime.block_on(async move {
         let prepared = prepare(&args)?;
         let listener = bind_listener(prepared.config.bind).await?;
+
+        info!(bind = %prepared.config.bind, "gate-agent listening");
 
         serve(listener, prepared.app).await
     })?;

@@ -38,11 +38,15 @@ fn write_secrets_file(
 fn load_test_secrets(base_url: &str) -> Result<SecretsConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(&format!(
         r#"
-[jwt]
-algorithm = "HS256"
+[auth]
 issuer = "gate-agent-dev"
 audience = "gate-agent-clients"
-shared_secret = "replace-me"
+signing_secret = "replace-me"
+
+[clients.default]
+api_key = "default-client-api-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects", "billing"]
 
 [apis.projects]
 base_url = "{base_url}"
@@ -118,7 +122,7 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
 
     let request = Request::builder()
         .method("POST")
-        .uri("/proxy/v1/projects/1/tasks?expand=1")
+        .uri("/proxy/billing/v1/projects/1/tasks?expand=1")
         .header("authorization", "Bearer client-jwt")
         .header("connection", "keep-alive, x-remove-me")
         .header("host", "localhost:8787")
@@ -128,7 +132,7 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
         .header("content-type", "application/json")
         .body(Body::from(r#"{"name":"New task"}"#))?;
 
-    let outbound = map_request(request, api)?;
+    let outbound = map_request(request, "billing", api)?;
 
     assert_eq!(outbound.method().as_str(), "POST");
     assert_eq!(
@@ -203,14 +207,14 @@ async fn request_mapping_preserves_encoded_path_and_query_bytes()
 
     let request = Request::builder()
         .method("GET")
-        .uri("/proxy/v1/files/a%2Fb?expand=%2F")
+        .uri("/proxy/billing/files/a%2Fb?expand=%2F")
         .body(Body::empty())?;
 
-    let outbound = map_request(request, api)?;
+    let outbound = map_request(request, "billing", api)?;
 
     assert_eq!(
         outbound.url().as_str(),
-        format!("{base_url}/api/v1/files/a%2Fb?expand=%2F")
+        format!("{base_url}/api/files/a%2Fb?expand=%2F")
     );
 
     Ok(())
@@ -226,11 +230,11 @@ async fn request_mapping_sets_raw_upstream_auth_header_when_scheme_is_not_config
 
     let request = Request::builder()
         .method("GET")
-        .uri("/proxy/v1/projects")
+        .uri("/proxy/projects")
         .header("authorization", "Bearer client-jwt")
         .body(Body::empty())?;
 
-    let outbound = map_request(request, api)?;
+    let outbound = map_request(request, "projects", api)?;
 
     assert_eq!(
         outbound
@@ -254,10 +258,10 @@ async fn request_mapping_preserves_trailing_proxy_slash() -> Result<(), Box<dyn 
 
     let request = Request::builder()
         .method("GET")
-        .uri("/proxy/")
+        .uri("/proxy/billing/")
         .body(Body::empty())?;
 
-    let outbound = map_request(request, api)?;
+    let outbound = map_request(request, "billing", api)?;
 
     assert_eq!(outbound.url().as_str(), format!("{base_url}/api/"));
 
@@ -274,10 +278,10 @@ async fn request_mapping_preserves_double_slash_segments() -> Result<(), Box<dyn
 
     let request = Request::builder()
         .method("GET")
-        .uri("/proxy//double")
+        .uri("/proxy/billing//double")
         .body(Body::empty())?;
 
-    let outbound = map_request(request, api)?;
+    let outbound = map_request(request, "billing", api)?;
 
     assert_eq!(outbound.url().as_str(), format!("{base_url}/api//double"));
 
@@ -299,7 +303,7 @@ fn request_mapping_rejects_missing_proxy_suffix() -> Result<(), Box<dyn std::err
         .uri("/proxy")
         .body(Body::empty())?;
 
-    let error = map_request(request, api).unwrap_err();
+    let error = map_request(request, "projects", api).unwrap_err();
 
     assert!(matches!(
         error,
