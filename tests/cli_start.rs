@@ -58,6 +58,29 @@ fn start_help_lists_runtime_flags() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+fn start_invalid_log_level_emits_human_readable_error_on_stderr()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::cargo_bin("gate-agent")?
+        .args(["start", "--log-level", "trace"])
+        .output()?;
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(
+        stderr.contains("invalid log level 'trace'"),
+        "expected invalid log level text in stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("internal error: internal error:"),
+        "error output should not be double-prefixed: {stderr}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn start_prepare_loads_runtime_state_and_binds_listener()
 -> Result<(), Box<dyn std::error::Error>> {
