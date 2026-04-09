@@ -64,6 +64,15 @@ cat .secrets.example | cargo run -- start --log-level info
 ```
 
 When local debugging needs proxy telemetry, rerun the server with `--log-level debug`. Runtime telemetry is emitted as newline-delimited JSON, with one JSON object per log line. For local inspection with `jq`, prefer `cargo run --quiet -- start ... 2>&1 | jq` or invoke the built binary directly. Plain `cargo run -- start ... 2>&1 | jq` is fragile because Cargo writes its own non-JSON status lines to stderr, which can break `jq`. Debug logging should stay free of noisy `reqwest` or `hyper` connection chatter, while the normal proxy completion info log includes the authenticated `client`, request metadata, and safe upstream request details.
+Encrypted local config is also supported:
+
+```sh
+cargo run -- config init --encrypted --config .secrets.encrypted
+GATE_AGENT_PASSWORD='correct horse battery staple' \
+  cargo run -- start --config .secrets.encrypted --log-level info
+```
+
+Request completion logs also include `client_id` on every request. Successful auth and proxy requests record the authenticated client slug; unauthenticated failures log `client_id = "<unknown>"`.
 
 ## `curl` helper
 
@@ -130,6 +139,34 @@ Expected behavior:
 - valid config prints `config is valid`
 - invalid config prints a JSON error payload to stderr and exits non-zero
 - validation uses the same strict parser and source-resolution behavior as `start`
+
+## Direct config inspection and editing
+
+Operators may inspect the current config with:
+
+```sh
+cargo run -- config show --config .secrets
+```
+
+For encrypted config:
+
+```sh
+GATE_AGENT_PASSWORD='correct horse battery staple' \
+  cargo run -- config show --config .secrets.encrypted
+```
+
+Operators may edit the current config with:
+
+```sh
+VISUAL=nvim cargo run -- config edit --config .secrets
+```
+
+For encrypted config:
+
+```sh
+VISUAL=nvim GATE_AGENT_PASSWORD='correct horse battery staple' \
+  cargo run -- config edit --config .secrets.encrypted
+```
 
 ## Recommended local smoke test
 

@@ -26,6 +26,16 @@ CLI failure output must match the current command behavior:
 - `config validate` exits non-zero and prints a JSON error payload to stderr when config validation fails
 - other CLI failures print a human-readable error and exit non-zero
 
+When the selected config file is encrypted, runtime startup may pause before state construction to obtain a password. Runtime password lookup order is CLI flag, environment, system keyring entry for the selected config path, then interactive prompt.
+
+Startup should pause only after flag, environment, and keyring lookup all fail. Failure to obtain or use that password is a startup failure.
+
+Keyring backend policy is platform-specific but explicit:
+
+- Linux uses the native keyutils backend from the `keyring` crate
+- macOS uses the native Keychain backend
+- Windows uses the native Credential Manager backend
+
 ## App state
 
 Runtime state must contain:

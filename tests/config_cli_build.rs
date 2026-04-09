@@ -29,6 +29,14 @@ fn dependency_features(dependencies: &Table, name: &str) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+fn dependency_bool(dependencies: &Table, name: &str, key: &str) -> Option<bool> {
+    dependencies
+        .get(name)
+        .and_then(Value::as_table)
+        .and_then(|entry| entry.get(key))
+        .and_then(Value::as_bool)
+}
+
 #[test]
 fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
     let dependencies = dependencies_table();
@@ -53,6 +61,22 @@ fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
         dependencies.contains_key("jsonwebtoken"),
         "expected jsonwebtoken for auth exchange JWT issuance"
     );
+    assert!(
+        dependencies.contains_key("age"),
+        "expected age for encrypted config support"
+    );
+    assert!(
+        dependencies.contains_key("rpassword"),
+        "expected rpassword for interactive password prompts"
+    );
+    assert!(
+        dependencies.contains_key("keyring"),
+        "expected keyring for encrypted config password persistence"
+    );
+    assert!(
+        dependencies.contains_key("tempfile"),
+        "expected tempfile for safe config editing and atomic writes"
+    );
 
     let time_features = dependency_features(&dependencies, "time");
     assert!(
@@ -74,10 +98,30 @@ fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
         "expected jsonwebtoken to use rust_crypto"
     );
 
+    let keyring_features = dependency_features(&dependencies, "keyring");
+    assert_eq!(
+        dependency_bool(&dependencies, "keyring", "default-features"),
+        Some(false),
+        "expected keyring default features to be disabled so backend selection stays explicit"
+    );
+    for feature in ["apple-native", "windows-native", "linux-native"] {
+        assert!(
+            keyring_features.contains(feature),
+            "expected keyring feature {feature}"
+        );
+    }
+
     for unexpected_dep in ["chrono", "ring", "openssl"] {
         assert!(
             !dependencies.contains_key(unexpected_dep),
             "did not expect auth dependency {unexpected_dep}"
+        );
+    }
+
+    for unexpected_dep in ["secret-service", "keyutils", "security-framework"] {
+        assert!(
+            !dependencies.contains_key(unexpected_dep),
+            "did not expect direct secret-store dependency {unexpected_dep}"
         );
     }
 }

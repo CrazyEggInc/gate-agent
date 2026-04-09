@@ -4,7 +4,14 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use secrecy::SecretString;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+use super::ConfigError;
+use super::crypto::{
+    ConfigFileFormat, LoadedConfigText, detect_format, load_config_text, serialize_for_format,
+    write_config_file_atomic,
+};
 
 pub const DEFAULT_AUTH_ISSUER: &str = "gate-agent";
 pub const DEFAULT_AUTH_AUDIENCE: &str = "gate-agent-clients";
@@ -50,28 +57,36 @@ impl Display for WriteConfigError {
 
 impl std::error::Error for WriteConfigError {}
 
-pub fn init_config(path: &Path) -> Result<(), WriteConfigError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            WriteConfigError::new(format!(
-                "failed to create config directory '{}': {error}",
-                parent.display()
-            ))
-        })?;
+impl From<ConfigError> for WriteConfigError {
+    fn from(error: ConfigError) -> Self {
+        Self::new(error.to_string())
     }
-
-    let config = render_initial_config()?;
-    fs::write(path, config).map_err(|error| {
-        WriteConfigError::new(format!(
-            "failed to write config file '{}': {error}",
-            path.display()
-        ))
-    })
 }
 
-pub fn upsert_api(path: &Path, api: &ApiUpsert) -> Result<(), WriteConfigError> {
-    let contents = read_config(path)?;
-    let mut document = parse_config(path, &contents)?;
+pub fn init_config(
+    path: &Path,
+    encrypted: bool,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let config = render_initial_config()?;
+    let format = if encrypted {
+        ConfigFileFormat::AgeEncryptedToml
+    } else {
+        ConfigFileFormat::PlaintextToml
+    };
+
+    let serialized = serialize_for_format(&format, &config, password)?;
+    write_config_file_atomic(path, &serialized)?;
+    Ok(())
+}
+
+pub fn upsert_api(
+    path: &Path,
+    api: &ApiUpsert,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let loaded = load_editable_config(path, password)?;
+    let mut document = parse_config(path, &loaded.toml)?;
     let apis = get_or_insert_table(document.as_table_mut(), "apis")?;
     let api_table = get_or_insert_table(apis, &api.name)?;
 
@@ -92,12 +107,16 @@ pub fn upsert_api(path: &Path, api: &ApiUpsert) -> Result<(), WriteConfigError> 
     set_string(api_table, "auth_value", &api.auth_value);
     set_integer(api_table, "timeout_ms", api.timeout_ms)?;
 
-    write_config(path, &document.to_string())
+    write_loaded_config(path, &loaded, &document.to_string(), password)
 }
 
-pub fn upsert_client(path: &Path, client: &ClientUpsert) -> Result<(), WriteConfigError> {
-    let contents = read_config(path)?;
-    let mut document = parse_config(path, &contents)?;
+pub fn upsert_client(
+    path: &Path,
+    client: &ClientUpsert,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let loaded = load_editable_config(path, password)?;
+    let mut document = parse_config(path, &loaded.toml)?;
     let existing_client = find_table(document.as_table(), &["clients", &client.name]);
 
     let api_key = match client
@@ -131,7 +150,49 @@ pub fn upsert_client(path: &Path, client: &ClientUpsert) -> Result<(), WriteConf
     set_string(client_table, "api_key_expires_at", &api_key_expires_at);
     set_string_array(client_table, "allowed_apis", &client.allowed_apis);
 
-    write_config(path, &document.to_string())
+    write_loaded_config(path, &loaded, &document.to_string(), password)
+}
+
+pub fn load_display_text(
+    path: &Path,
+    password: Option<&SecretString>,
+) -> Result<LoadedConfigText, WriteConfigError> {
+    load_config_text(path, password).map_err(WriteConfigError::from)
+}
+
+pub fn replace_config_contents(
+    path: &Path,
+    contents: &str,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let raw_contents = fs::read_to_string(path).map_err(|error| {
+        WriteConfigError::new(format!(
+            "failed to read config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let format = detect_format(&raw_contents);
+    let serialized = serialize_for_format(&format, contents, password)?;
+    write_config_file_atomic(path, &serialized)?;
+    Ok(())
+}
+
+fn load_editable_config(
+    path: &Path,
+    password: Option<&SecretString>,
+) -> Result<LoadedConfigText, WriteConfigError> {
+    load_config_text(path, password).map_err(WriteConfigError::from)
+}
+
+fn write_loaded_config(
+    path: &Path,
+    loaded: &LoadedConfigText,
+    plaintext: &str,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let serialized = serialize_for_format(&loaded.format, plaintext, password)?;
+    write_config_file_atomic(path, &serialized)?;
+    Ok(())
 }
 
 fn render_initial_config() -> Result<String, WriteConfigError> {
@@ -144,37 +205,10 @@ fn render_initial_config() -> Result<String, WriteConfigError> {
     ))
 }
 
-fn read_config(path: &Path) -> Result<String, WriteConfigError> {
-    fs::read_to_string(path).map_err(|error| {
-        WriteConfigError::new(format!(
-            "failed to read config file '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
 fn parse_config(path: &Path, contents: &str) -> Result<DocumentMut, WriteConfigError> {
     contents.parse::<DocumentMut>().map_err(|error| {
         WriteConfigError::new(format!(
             "failed to parse config file '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-fn write_config(path: &Path, contents: &str) -> Result<(), WriteConfigError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            WriteConfigError::new(format!(
-                "failed to create config directory '{}': {error}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    fs::write(path, contents).map_err(|error| {
-        WriteConfigError::new(format!(
-            "failed to write config file '{}': {error}",
             path.display()
         ))
     })

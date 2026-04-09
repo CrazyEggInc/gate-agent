@@ -66,6 +66,7 @@ fn curl_auth_mode_renders_exchange_request_for_default_client()
     let payload = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: true,
@@ -91,6 +92,7 @@ fn curl_proxy_mode_renders_proxy_request() -> Result<(), Box<dyn std::error::Err
     let payload = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: false,
@@ -113,6 +115,7 @@ fn curl_auth_mode_rejects_proxy_flags() -> Result<(), Box<dyn std::error::Error>
     let error = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: true,
@@ -138,6 +141,7 @@ fn curl_proxy_mode_requires_path() -> Result<(), Box<dyn std::error::Error>> {
     let error = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: false,
@@ -160,6 +164,7 @@ fn curl_auth_mode_rejects_client_without_allowed_apis() -> Result<(), Box<dyn st
     let error = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "partner".to_owned(),
         auth: true,
@@ -185,6 +190,7 @@ fn curl_explicit_proxy_mode_renders_proxy_request() -> Result<(), Box<dyn std::e
     let payload = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: false,
@@ -207,6 +213,7 @@ fn curl_proxy_mode_requires_jwt() -> Result<(), Box<dyn std::error::Error>> {
     let error = render(CurlArgs {
         bind: "127.0.0.1:8787".parse()?,
         config: Some(config_file),
+        password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         client: "default".to_owned(),
         auth: false,

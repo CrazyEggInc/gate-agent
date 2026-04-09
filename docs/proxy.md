@@ -87,7 +87,7 @@ The proxy does not pass client-supplied topology headers upstream.
 
 ## Upstream execution
 
-Each configured API must carry its own `timeout_ms`.
+Each configured API carries a `timeout_ms`. When omitted in config, it defaults to `5000`.
 
 Behavior:
 

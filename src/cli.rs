@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::commands;
 use crate::config::app_config::{DEFAULT_BIND, DEFAULT_LOG_LEVEL};
+use crate::config::secrets::DEFAULT_API_TIMEOUT_MS;
 
 #[derive(Debug, Parser)]
 #[command(name = "gate-agent")]
@@ -35,6 +36,9 @@ pub struct StartArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
 
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
+
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for server output")]
     pub log_level: String,
 }
@@ -46,6 +50,9 @@ pub struct CurlArgs {
 
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
 
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
     pub log_level: String,
@@ -90,6 +97,10 @@ pub enum ConfigCommand {
     Init(ConfigInitArgs),
     #[command(about = "Validate config from stdin or file")]
     Validate(ConfigValidateArgs),
+    #[command(about = "Print the current config contents")]
+    Show(ConfigShowArgs),
+    #[command(about = "Open the config in your editor")]
+    Edit(ConfigEditArgs),
     #[command(name = "add-api")]
     #[command(about = "Add an upstream API entry")]
     AddApi(ConfigAddApiArgs),
@@ -102,6 +113,36 @@ pub enum ConfigCommand {
 pub struct ConfigInitArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
+
+    #[arg(long, help = "Write the new config encrypted at rest")]
+    pub encrypted: bool,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
+
+    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ConfigShowArgs {
+    #[arg(long, help = "Path to the config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
+
+    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ConfigEditArgs {
+    #[arg(long, help = "Path to the config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
 
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
     pub log_level: String,
@@ -121,6 +162,9 @@ pub struct ConfigAddApiArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
 
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
+
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
     pub log_level: String,
 
@@ -139,7 +183,7 @@ pub struct ConfigAddApiArgs {
     #[arg(long, help = "Secret or token sent upstream")]
     pub auth_value: String,
 
-    #[arg(long, help = "Upstream timeout in milliseconds")]
+    #[arg(long, default_value_t = DEFAULT_API_TIMEOUT_MS, help = "Upstream timeout in milliseconds")]
     pub timeout_ms: u64,
 }
 
@@ -147,6 +191,9 @@ pub struct ConfigAddApiArgs {
 pub struct ConfigAddClientArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
 
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
     pub log_level: String,
@@ -177,6 +224,8 @@ impl Command {
             Self::Config(args) => match &args.command {
                 ConfigCommand::Init(args) => &args.log_level,
                 ConfigCommand::Validate(args) => &args.log_level,
+                ConfigCommand::Show(args) => &args.log_level,
+                ConfigCommand::Edit(args) => &args.log_level,
                 ConfigCommand::AddApi(args) => &args.log_level,
                 ConfigCommand::AddClient(args) => &args.log_level,
             },

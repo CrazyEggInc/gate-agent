@@ -31,6 +31,7 @@ fn load_local_config(args: &CurlArgs) -> Result<AppConfig, CommandError> {
     let start_args = StartArgs {
         bind: args.bind,
         config: args.config.clone(),
+        password: args.password.clone(),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     };
 

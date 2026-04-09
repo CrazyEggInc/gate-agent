@@ -88,6 +88,7 @@ async fn start_prepare_loads_runtime_state_and_binds_listener()
     let args = StartArgs {
         bind: "127.0.0.1:0".parse()?,
         config: Some(config_file.clone()),
+        password: None,
         log_level: "debug".to_owned(),
     };
     let prepared = start::prepare(&args)?;
@@ -111,6 +112,7 @@ async fn start_prepare_accepts_stdin_backed_config_source() -> Result<(), Box<dy
     let args = StartArgs {
         bind: "127.0.0.1:0".parse()?,
         config: None,
+        password: None,
         log_level: "debug".to_owned(),
     };
     let config =
