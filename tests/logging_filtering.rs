@@ -120,7 +120,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/proxy/billing/v1/projects/1/tasks?expand=1")
+                    .uri("/proxy/billing/v1/projects/1/tasks?expand=1&jwt=query-secret")
                     .header("x-request-id", "req-success")
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())?,
@@ -153,9 +153,54 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     assert!(logs.contains("timeout_ms=5000"), "logs were: {logs}");
     assert!(!logs.contains("error_code="), "logs were: {logs}");
     assert!(
+        logs.contains("uri=/proxy/billing/v1/projects/1/tasks"),
+        "logs were: {logs}"
+    );
+    assert!(
+        logs.contains("/api/v1/projects/1/tasks"),
+        "logs were: {logs}"
+    );
+    assert!(!logs.contains("expand=1"), "logs were: {logs}");
+    assert!(!logs.contains("jwt=query-secret"), "logs were: {logs}");
+    assert!(!logs.contains(&token), "logs were: {logs}");
+    assert!(
         !logs.contains("proxy upstream call finished"),
         "logs were: {logs}"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auth_exchange_logs_do_not_leak_api_key_or_query_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/exchange?token=query-secret")
+                    .header("x-request-id", "req-auth-log")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "default-client-key")
+                    .body(Body::from(r#"{"apis":["billing"]}"#))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        Ok(())
+    })
+    .await?;
+
+    assert!(logs.contains("uri=/auth/exchange"), "logs were: {logs}");
+    assert!(!logs.contains("token=query-secret"), "logs were: {logs}");
+    assert!(!logs.contains("default-client-key"), "logs were: {logs}");
 
     Ok(())
 }

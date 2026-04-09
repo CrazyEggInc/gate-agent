@@ -51,3 +51,27 @@ Whenever a feature is added, removed, or materially changed, the relevant files 
 ## README policy
 
 Keep `README.md` concise and human-oriented. Put durable implementation details in `docs/`.
+
+## Verification after changes
+
+After completing implementation work:
+
+- run the changed tests that cover the modified behavior
+- run `cargo fmt`
+- run `cargo clippy --all-targets --all-features -- -D warnings`
+- fix any issues found before considering the work complete
+
+Prefer the narrowest relevant test command first, then broaden only if needed.
+
+## Commit format
+
+Use conventional-style commit subjects:
+
+- `feat(scope): description`
+- `fix(scope): description`
+- `refactor(scope): description`
+- `docs(scope): description`
+- `test(scope): description`
+- `chore(scope): description`
+
+Commit messages should be concise and describe the intent of the change. When a plan file exists for the work, reference it in the commit body.

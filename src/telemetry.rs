@@ -1,10 +1,28 @@
 use std::sync::OnceLock;
 
+use axum::http::Uri;
+use reqwest::Url;
 use tracing_subscriber::EnvFilter;
 
 use crate::error::AppError;
 
 static TRACING_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+pub fn sanitize_request_uri_for_logs(uri: &Uri) -> String {
+    uri.path().to_owned()
+}
+
+pub fn sanitize_url_for_logs(raw_url: &str) -> String {
+    if let Ok(url) = Url::parse(raw_url) {
+        return format_url_without_sensitive_parts(&url);
+    }
+
+    raw_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(raw_url)
+        .to_owned()
+}
 
 pub fn init_tracing(log_filter: &str) -> Result<(), AppError> {
     init_tracing_with_state(&TRACING_INIT_RESULT, log_filter)
@@ -61,11 +79,33 @@ fn map_init_result(init_result: &Result<(), String>) -> Result<(), AppError> {
     }
 }
 
+fn format_url_without_sensitive_parts(url: &Url) -> String {
+    let Some(host) = url.host_str() else {
+        return url.path().to_owned();
+    };
+
+    let mut sanitized = format!("{}://{host}", url.scheme());
+
+    if let Some(port) = url.port() {
+        sanitized.push(':');
+        sanitized.push_str(&port.to_string());
+    }
+
+    sanitized.push_str(url.path());
+
+    sanitized
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
 
-    use super::{build_env_filter, init_tracing_with_state};
+    use axum::http::Uri;
+
+    use super::{
+        build_env_filter, init_tracing_with_state, sanitize_request_uri_for_logs,
+        sanitize_url_for_logs,
+    };
 
     #[test]
     fn debug_filter_is_scoped_to_the_crate() {
@@ -107,5 +147,22 @@ mod tests {
         let result = init_tracing_with_state(&init_result, "debug");
 
         assert!(result.is_ok(), "repeat init should be a no-op");
+    }
+
+    #[test]
+    fn request_uri_sanitizer_removes_query_string() {
+        let uri: Uri = "/proxy/projects/items?token=secret&expand=1"
+            .parse()
+            .expect("uri should parse");
+
+        assert_eq!(sanitize_request_uri_for_logs(&uri), "/proxy/projects/items");
+    }
+
+    #[test]
+    fn url_sanitizer_removes_userinfo_query_and_fragment() {
+        let sanitized =
+            sanitize_url_for_logs("https://user:pass@example.com:8443/api/tasks?token=secret#frag");
+
+        assert_eq!(sanitized, "https://example.com:8443/api/tasks");
     }
 }

@@ -1,9 +1,5 @@
-use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, dangerous::insecure_decode, decode,
-    decode_header, encode,
-};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
-use serde::Deserialize;
 
 use crate::config::secrets::{ClientConfig, SecretsConfig, is_valid_slug};
 use crate::error::AppError;
@@ -17,12 +13,6 @@ pub const DEFAULT_LOCAL_TOKEN_TTL_SECS: u64 = 10 * 60;
 pub struct AuthorizedRequest {
     pub client_slug: String,
     pub claims: JwtClaims,
-}
-
-#[derive(Debug, Deserialize)]
-struct UnverifiedRoutingClaims {
-    sub: String,
-    apis: Vec<String>,
 }
 
 pub fn validate_bearer_token(
@@ -63,26 +53,13 @@ pub fn validate_authorized_request(
         return Err(AppError::InvalidToken);
     }
 
-    let header = decode_header(token).map_err(|_| AppError::InvalidToken)?;
-
-    if header.alg != Algorithm::HS256 {
-        return Err(AppError::InvalidToken);
-    }
-
-    let routing =
-        insecure_decode::<UnverifiedRoutingClaims>(token).map_err(|_| AppError::InvalidToken)?;
-    let client_slug = validate_slug_claim(routing.claims.sub)?;
-    let routing_api_slugs = validate_api_slugs(&routing.claims.apis)?;
+    let claims = decode_verified_claims(token, secrets)?;
+    let client_slug = validate_slug_claim(claims.sub.clone())?;
+    let claims_api_slugs = validate_api_slugs(&claims.apis())?;
     let client = secrets
         .clients
         .get(&client_slug)
         .ok_or(AppError::InvalidToken)?;
-    let claims = decode_verified_claims(token, secrets)?;
-    let claims_api_slugs = claims.apis();
-
-    if claims.sub != client_slug || claims_api_slugs != routing_api_slugs {
-        return Err(AppError::InvalidToken);
-    }
 
     for api_slug in &claims_api_slugs {
         if !client.allowed_apis.contains(api_slug) {

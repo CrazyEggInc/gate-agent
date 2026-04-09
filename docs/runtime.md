@@ -88,3 +88,4 @@ Expected logging behavior:
 - proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
 - completion logs must include `error_code` only when the response came from an application error
 - logs must not include API keys, bearer tokens, JWTs, or upstream secret values
+- logged request URIs and upstream URLs must exclude query strings, fragments, and userinfo

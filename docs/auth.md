@@ -33,6 +33,7 @@ The system must expose:
 The request must:
 
 - require `x-api-key`
+- reject missing, blank, non-UTF8, or repeated `x-api-key` headers
 - require a JSON body
 - accept a body shaped like:
 
@@ -69,7 +70,7 @@ The feature must fail closed.
 Expected classes of failures:
 
 - missing or invalid `x-api-key` yields `401 invalid_api_key`
-- malformed JSON or empty API list yields `400 bad_request`
+- malformed JSON, malformed API slugs, oversized exchange bodies, or empty API list yield `400 bad_request`
 - requesting unknown or unauthorized APIs yields `403 forbidden_api`
 - internal failures yield `500 internal`
 
@@ -116,7 +117,7 @@ Before issuing a token, the system must ensure:
 
 Bearer-token validation must:
 
-- authorization header must be `Bearer <token>` with exactly two parts
+- authorization header must be exactly one `Bearer <token>` header with exactly two parts
 - JWT header algorithm must be HS256
 - `sub` must be a valid slug
 - `apis` must be a non-empty list of valid slugs

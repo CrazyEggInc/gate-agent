@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header::HeaderValue},
 };
 use gate_agent::{
     app::AppState,
@@ -247,6 +247,150 @@ timeout_ms = 5000
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
     assert_eq!(payload["error"]["code"], "invalid_api_key");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_duplicate_x_api_key_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/auth/exchange")
+        .header("content-type", "application/json")
+        .header("x-request-id", "req-duplicate-key")
+        .body(Body::from(r#"{"apis":["projects"]}"#))?;
+    request
+        .headers_mut()
+        .append("x-api-key", HeaderValue::from_static("default-client-key"));
+    request
+        .headers_mut()
+        .append("x-api-key", HeaderValue::from_static("default-client-key"));
+
+    let response = app.oneshot(request).await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "req-duplicate-key"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "invalid_api_key");
+    assert_eq!(payload["error"]["request_id"], "req-duplicate-key");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_blank_x_api_key_header() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "   ")
+                .body(Body::from(r#"{"apis":["projects"]}"#))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "invalid_api_key");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_api_slug_with_slash_as_bad_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "default-client-key")
+                .body(Body::from(r#"{"apis":["projects/api"]}"#))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "bad_request");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_api_slug_with_trailing_space_as_bad_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "default-client-key")
+                .body(Body::from(r#"{"apis":["projects "]}"#))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "bad_request");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_oversized_body_as_bad_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+    let oversized_api = "a".repeat(20_000);
+    let payload = serde_json::json!({ "apis": [oversized_api] }).to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "default-client-key")
+                .body(Body::from(payload))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "bad_request");
 
     Ok(())
 }

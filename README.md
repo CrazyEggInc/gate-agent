@@ -1,6 +1,16 @@
 # gate-agent
 
-`gate-agent` is a local Rust proxy for internal upstream APIs. It authenticates clients, authorizes access to configured API slugs, injects upstream credentials, and forwards requests to the configured upstream.
+`gate-agent` is a small proxy for calling internal upstream APIs through a single local interface.
+
+## Why this exists
+
+It is meant to stay boring and easy to operate:
+
+- clients authenticate to `gate-agent`, not directly to upstream APIs
+- upstream API secrets stay in server-side config
+- the CLI is simple and usable for local development and operator workflows
+- it works both on a local machine and on servers
+- configuration is intentionally simple and file-based
 
 ## Quick local flow
 
