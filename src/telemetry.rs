@@ -1,12 +1,54 @@
-use std::sync::OnceLock;
+use std::{fmt::Display, io, sync::OnceLock};
 
 use axum::http::Uri;
 use reqwest::Url;
-use tracing_subscriber::EnvFilter;
+use serde::Serialize;
+use tracing_subscriber::{EnvFilter, fmt::MakeWriter, prelude::*};
 
 use crate::error::AppError;
 
 static TRACING_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoggedClient(pub String);
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoggedRequestContext {
+    pub request_id: String,
+    pub method: String,
+    pub uri: String,
+}
+
+#[derive(Serialize)]
+struct FatalErrorLogRecord {
+    level: &'static str,
+    event: &'static str,
+    error_code: &'static str,
+    error_message: String,
+}
+
+impl From<&AppError> for FatalErrorLogRecord {
+    fn from(error: &AppError) -> Self {
+        Self {
+            level: "ERROR",
+            event: "fatal_error",
+            error_code: error.code(),
+            error_message: error.to_string(),
+        }
+    }
+}
+
+fn fatal_error_log_record(
+    error_code: &'static str,
+    error_message: impl Display,
+) -> FatalErrorLogRecord {
+    FatalErrorLogRecord {
+        level: "ERROR",
+        event: "fatal_error",
+        error_code,
+        error_message: error_message.to_string(),
+    }
+}
 
 pub fn sanitize_request_uri_for_logs(uri: &Uri) -> String {
     uri.path().to_owned()
@@ -26,6 +68,60 @@ pub fn sanitize_url_for_logs(raw_url: &str) -> String {
 
 pub fn init_tracing(log_filter: &str) -> Result<(), AppError> {
     init_tracing_with_state(&TRACING_INIT_RESULT, log_filter)
+}
+
+pub fn emit_fatal_error_json(error: &AppError) -> io::Result<()> {
+    write_fatal_error_json(std::io::stderr(), error)
+}
+
+pub fn emit_fatal_json_message(
+    error_code: &'static str,
+    error_message: impl Display,
+) -> io::Result<()> {
+    write_fatal_json_message(std::io::stderr(), error_code, error_message)
+}
+
+pub fn write_fatal_error_json<W>(mut writer: W, error: &AppError) -> io::Result<()>
+where
+    W: io::Write,
+{
+    write_fatal_json_message(&mut writer, error.code(), error)
+}
+
+pub fn write_fatal_json_message<W>(
+    mut writer: W,
+    error_code: &'static str,
+    error_message: impl Display,
+) -> io::Result<()>
+where
+    W: io::Write,
+{
+    serde_json::to_writer(
+        &mut writer,
+        &fatal_error_log_record(error_code, error_message),
+    )
+    .map_err(io::Error::other)?;
+    writer.write_all(b"\n")
+}
+
+pub fn build_json_subscriber<W>(
+    log_level: &str,
+    writer: W,
+) -> Result<impl tracing::Subscriber + Send + Sync, AppError>
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    let env_filter = build_env_filter(log_level)?;
+
+    Ok(tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_target(false)
+        .with_env_filter(env_filter)
+        .with_writer(writer)
+        .finish())
 }
 
 pub fn build_env_filter(log_level: &str) -> Result<EnvFilter, AppError> {
@@ -57,12 +153,9 @@ fn init_tracing_with_state(
         return map_init_result(existing_result);
     }
 
-    let env_filter = build_env_filter(log_filter)?;
-
     let init_result = init_result.get_or_init(|| {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_target(false)
+        build_json_subscriber(log_filter, std::io::stderr)
+            .map_err(|error| error.to_string())?
             .try_init()
             .map_err(|error| error.to_string())
     });
@@ -98,14 +191,62 @@ fn format_url_without_sensitive_parts(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::{
+        io,
+        io::Write,
+        sync::{Arc, Mutex, OnceLock},
+    };
 
     use axum::http::Uri;
+    use serde_json::{Value, json};
+
+    use crate::error::AppError;
 
     use super::{
-        build_env_filter, init_tracing_with_state, sanitize_request_uri_for_logs,
-        sanitize_url_for_logs,
+        build_env_filter, build_json_subscriber, init_tracing_with_state,
+        sanitize_request_uri_for_logs, sanitize_url_for_logs, write_fatal_error_json,
+        write_fatal_json_message,
     };
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.bytes.lock().expect("shared log buffer lock").clone())
+                .expect("log output should be valid utf-8")
+        }
+    }
+
+    struct SharedBufferWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("shared log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBufferWriter {
+                bytes: self.bytes.clone(),
+            }
+        }
+    }
 
     #[test]
     fn debug_filter_is_scoped_to_the_crate() {
@@ -147,6 +288,107 @@ mod tests {
         let result = init_tracing_with_state(&init_result, "debug");
 
         assert!(result.is_ok(), "repeat init should be a no-op");
+    }
+
+    #[test]
+    fn fatal_error_json_writer_emits_one_newline_delimited_record() {
+        let mut buffer = Vec::new();
+
+        write_fatal_error_json(
+            &mut buffer,
+            &AppError::BadRequest("missing token".to_owned()),
+        )
+        .expect("fatal error json should write");
+
+        let output = String::from_utf8(buffer).expect("fatal error log should be valid utf-8");
+        let payload: Value =
+            serde_json::from_str(output.trim_end()).expect("fatal error log should be json");
+
+        assert!(output.ends_with('\n'), "output was: {output:?}");
+        assert_eq!(output.lines().count(), 1, "output was: {output}");
+        assert_eq!(
+            payload,
+            json!({
+                "level": "ERROR",
+                "event": "fatal_error",
+                "error_code": "bad_request",
+                "error_message": "bad request: missing token"
+            })
+        );
+    }
+
+    #[test]
+    fn fatal_json_message_writer_uses_rendered_message_without_app_error_prefix() {
+        let mut buffer = Vec::new();
+
+        write_fatal_json_message(
+            &mut buffer,
+            "internal",
+            "failed to bind server listener: boom",
+        )
+        .expect("fatal error json should write");
+
+        let output = String::from_utf8(buffer).expect("fatal error log should be valid utf-8");
+        let payload: Value =
+            serde_json::from_str(output.trim_end()).expect("fatal error log should be json");
+
+        assert!(output.ends_with('\n'), "output was: {output:?}");
+        assert_eq!(output.lines().count(), 1, "output was: {output}");
+        assert_eq!(
+            payload,
+            json!({
+                "level": "ERROR",
+                "event": "fatal_error",
+                "error_code": "internal",
+                "error_message": "failed to bind server listener: boom"
+            })
+        );
+    }
+
+    #[test]
+    fn json_subscriber_emits_newline_delimited_json_without_span_metadata() {
+        let buffer = SharedBuffer::default();
+        let subscriber =
+            build_json_subscriber("debug", buffer.clone()).expect("json subscriber should build");
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let span = tracing::info_span!(
+            "http_request",
+            request_id = "req-123",
+            method = "GET",
+            uri = "/proxy/billing/v1/projects/1/tasks"
+        );
+        let _enter = span.enter();
+
+        tracing::info!(
+            status = "201 Created",
+            latency_ms = 12,
+            api = "billing",
+            upstream_method = "GET",
+            upstream_url = "https://example.com/api/v1/projects/1/tasks",
+            upstream_status = "201 Created",
+            timeout_ms = 5000
+        );
+
+        let logs = buffer.contents();
+        let line = logs.trim();
+
+        assert_eq!(logs.lines().count(), 1, "logs were: {logs}");
+
+        let payload: Value = serde_json::from_str(line).expect("log line should be valid json");
+        assert_eq!(payload.get("level").and_then(Value::as_str), Some("INFO"));
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("201 Created")
+        );
+        assert_eq!(payload.get("api").and_then(Value::as_str), Some("billing"));
+        assert_eq!(
+            payload.get("timeout_ms").and_then(Value::as_u64),
+            Some(5000)
+        );
+        assert!(payload.get("fields").is_none(), "payload was: {payload}");
+        assert!(payload.get("span").is_none(), "payload was: {payload}");
+        assert!(payload.get("spans").is_none(), "payload was: {payload}");
     }
 
     #[test]

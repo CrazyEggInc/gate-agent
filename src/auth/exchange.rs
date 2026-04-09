@@ -12,7 +12,7 @@ use crate::{
     app::AppState,
     config::secrets::{ClientConfig, is_valid_slug},
     error::AppError,
-    proxy::router::{LoggedClientId, UNKNOWN_CLIENT_ID},
+    telemetry::{LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs},
     time::unix_timestamp_secs,
 };
 
@@ -20,12 +20,6 @@ use super::jwt::sign_access_token_for_client;
 
 pub const EXCHANGE_TOKEN_TTL_SECS: u64 = 10 * 60;
 const MAX_EXCHANGE_BODY_BYTES: usize = 16 * 1024;
-
-#[derive(Debug)]
-struct ExchangeResponseError {
-    error: AppError,
-    client_id: Option<String>,
-}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ExchangeRequest {
@@ -41,23 +35,16 @@ pub struct ExchangeResponse {
 
 pub async fn exchange_handler(State(state): State<AppState>, request: Request<Body>) -> Response {
     let request_id = request_id_from_request(&request);
+    let request_context = LoggedRequestContext {
+        request_id: request_id.clone().unwrap_or_else(|| "-".to_owned()),
+        method: request.method().to_string(),
+        uri: sanitize_request_uri_for_logs(request.uri()),
+    };
 
     let mut response = match handle_exchange_request(state, request).await {
         Ok(response) => response,
-        Err(error) => {
-            let mut response = error.error.response(request_id.as_deref());
-
-            if let Some(client_id) = error.client_id {
-                response.extensions_mut().insert(LoggedClientId(client_id));
-            }
-
-            response
-        }
+        Err(error) => error.response(request_id.as_deref()),
     };
-
-    response
-        .extensions_mut()
-        .get_or_insert_with(|| LoggedClientId(UNKNOWN_CLIENT_ID.to_owned()));
 
     if let Some(request_id) = request_id {
         response.headers_mut().insert(
@@ -67,67 +54,39 @@ pub async fn exchange_handler(State(state): State<AppState>, request: Request<Bo
         );
     }
 
+    response.extensions_mut().insert(request_context);
+
     response
 }
 
 async fn handle_exchange_request(
     state: AppState,
     request: Request<Body>,
-) -> Result<Response, ExchangeResponseError> {
+) -> Result<Response, AppError> {
     let (parts, body) = request.into_parts();
-    let api_key = extract_api_key(&parts.headers).map_err(|error| ExchangeResponseError {
-        error,
-        client_id: None,
-    })?;
+    let api_key = extract_api_key(&parts.headers)?;
     let client = state
         .client_for_api_key(api_key)
-        .map_err(remap_api_key_error)
-        .map_err(|error| ExchangeResponseError {
-            error,
-            client_id: None,
-        })?;
-    let client_id = client.slug.clone();
+        .map_err(remap_api_key_error)?;
     let body = Limited::new(body, MAX_EXCHANGE_BODY_BYTES)
         .collect()
         .await
-        .map_err(|_| ExchangeResponseError {
-            error: AppError::BadRequest("request body is too large or invalid".to_owned()),
-            client_id: Some(client_id.clone()),
-        })?
+        .map_err(|_| AppError::BadRequest("request body is too large or invalid".to_owned()))?
         .to_bytes();
-    let payload: ExchangeRequest =
-        serde_json::from_slice(&body).map_err(|_| ExchangeResponseError {
-            error: AppError::BadRequest("request body must be valid JSON".to_owned()),
-            client_id: Some(client_id.clone()),
-        })?;
-    let requested_apis =
-        normalize_requested_apis(payload.apis).map_err(|error| ExchangeResponseError {
-            error,
-            client_id: Some(client_id.clone()),
-        })?;
+    let payload: ExchangeRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("request body must be valid JSON".to_owned()))?;
+    let requested_apis = normalize_requested_apis(payload.apis)?;
 
-    validate_requested_apis(client, &requested_apis, &state).map_err(|error| {
-        ExchangeResponseError {
-            error,
-            client_id: Some(client_id.clone()),
-        }
-    })?;
+    validate_requested_apis(client, &requested_apis, &state)?;
 
-    let issued_at = unix_timestamp_secs().map_err(|error| ExchangeResponseError {
-        error,
-        client_id: Some(client_id.clone()),
-    })?;
+    let issued_at = unix_timestamp_secs()?;
     let access_token = sign_access_token_for_client(
         client,
         &requested_apis,
         state.secrets(),
         issued_at,
         EXCHANGE_TOKEN_TTL_SECS,
-    )
-    .map_err(|error| ExchangeResponseError {
-        error,
-        client_id: Some(client_id.clone()),
-    })?;
+    )?;
 
     let mut response = (
         StatusCode::OK,
@@ -138,7 +97,9 @@ async fn handle_exchange_request(
         }),
     )
         .into_response();
-    response.extensions_mut().insert(LoggedClientId(client_id));
+    response
+        .extensions_mut()
+        .insert(LoggedClient(client.slug.clone()));
 
     Ok(response)
 }

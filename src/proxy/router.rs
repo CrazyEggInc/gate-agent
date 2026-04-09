@@ -19,21 +19,13 @@ use crate::app::AppState;
 use crate::auth::exchange::exchange_handler;
 use crate::auth::jwt::validate_bearer_authorized_request;
 use crate::error::{AppError, LoggedErrorCode};
-use crate::telemetry::{sanitize_request_uri_for_logs, sanitize_url_for_logs};
+use crate::telemetry::{
+    LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs, sanitize_url_for_logs,
+};
 
 use super::{request::map_request, response::map_response, upstream::execute_request};
 
 const ROUTER_TIMEOUT_SECS: u64 = 60;
-pub(crate) const UNKNOWN_CLIENT_ID: &str = "<unknown>";
-
-#[derive(Clone, Debug)]
-pub(crate) struct LoggedClientId(pub String);
-
-#[derive(Debug)]
-struct ProxyResponseError {
-    error: AppError,
-    client_id: Option<String>,
-}
 
 #[derive(Clone, Debug)]
 struct LoggedUpstreamRequest {
@@ -42,6 +34,12 @@ struct LoggedUpstreamRequest {
     upstream_url: String,
     upstream_status: String,
     timeout_ms: u64,
+}
+
+#[derive(Debug)]
+struct ProxyResponseError {
+    error: AppError,
+    client: Option<String>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -67,20 +65,30 @@ pub fn build_router(state: AppState) -> Router {
                 })
                 .on_response(|response: &Response, latency: Duration, span: &tracing::Span| {
                     let _enter = span.enter();
-                    let client_id = response
-                        .extensions()
-                        .get::<LoggedClientId>()
-                        .map(|value| value.0.as_str())
-                        .unwrap_or(UNKNOWN_CLIENT_ID);
+                    let request_context = response.extensions().get::<LoggedRequestContext>();
                     let error_code = response
                         .extensions()
                         .get::<LoggedErrorCode>()
                         .map(|value| value.0);
+                    let client = response.extensions().get::<LoggedClient>().map(|value| &value.0);
                     let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
 
-                    match (error_code, upstream_request) {
-                        (Some(error_code), Some(upstream_request)) => info!(
-                            client_id = %client_id,
+                    let request_id = request_context
+                        .map(|value| value.request_id.as_str())
+                        .unwrap_or("-");
+                    let method = request_context
+                        .map(|value| value.method.as_str())
+                        .unwrap_or("-");
+                    let uri = request_context
+                        .map(|value| value.uri.as_str())
+                        .unwrap_or("-");
+
+                    match (error_code, client, upstream_request) {
+                        (Some(error_code), Some(client), Some(upstream_request)) => info!(
+                            client = %client,
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
                             status = %response.status(),
                             latency_ms = latency.as_millis(),
                             error_code,
@@ -90,14 +98,20 @@ pub fn build_router(state: AppState) -> Router {
                             upstream_status = %upstream_request.upstream_status,
                             timeout_ms = upstream_request.timeout_ms,
                         ),
-                        (Some(error_code), None) => info!(
-                            client_id = %client_id,
+                        (Some(error_code), Some(client), None) => info!(
+                            client = %client,
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
                             status = %response.status(),
                             latency_ms = latency.as_millis(),
                             error_code,
                         ),
-                        (None, Some(upstream_request)) => info!(
-                            client_id = %client_id,
+                        (None, Some(client), Some(upstream_request)) => info!(
+                            client = %client,
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
                             status = %response.status(),
                             latency_ms = latency.as_millis(),
                             api = %upstream_request.api,
@@ -106,8 +120,51 @@ pub fn build_router(state: AppState) -> Router {
                             upstream_status = %upstream_request.upstream_status,
                             timeout_ms = upstream_request.timeout_ms,
                         ),
-                        (None, None) => info!(
-                            client_id = %client_id,
+                        (None, Some(client), None) => info!(
+                            client = %client,
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                        ),
+                        (Some(error_code), None, Some(upstream_request)) => info!(
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            error_code,
+                            api = %upstream_request.api,
+                            upstream_method = %upstream_request.upstream_method,
+                            upstream_url = %upstream_request.upstream_url,
+                            upstream_status = %upstream_request.upstream_status,
+                            timeout_ms = upstream_request.timeout_ms,
+                        ),
+                        (Some(error_code), None, None) => info!(
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            error_code,
+                        ),
+                        (None, None, Some(upstream_request)) => info!(
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            api = %upstream_request.api,
+                            upstream_method = %upstream_request.upstream_method,
+                            upstream_url = %upstream_request.upstream_url,
+                            upstream_status = %upstream_request.upstream_status,
+                            timeout_ms = upstream_request.timeout_ms,
+                        ),
+                        (None, None, None) => info!(
+                            request_id = %request_id,
+                            method = %method,
+                            uri = %uri,
                             status = %response.status(),
                             latency_ms = latency.as_millis(),
                         ),
@@ -137,23 +194,22 @@ async fn proxy_handler_with_path(
 
 async fn proxy_response(state: AppState, api_slug: String, request: Request<Body>) -> Response {
     let request_id = request_id_from_request(&request);
+    let request_context = LoggedRequestContext {
+        request_id: request_id.clone().unwrap_or_else(|| "-".to_owned()),
+        method: request.method().to_string(),
+        uri: sanitize_request_uri_for_logs(request.uri()),
+    };
 
     let mut response = match handle_proxy_request(state, api_slug, request).await {
         Ok(response) => response,
-        Err(error) => {
-            let mut response = error.error.response(request_id.as_deref());
-
-            if let Some(client_id) = error.client_id {
-                response.extensions_mut().insert(LoggedClientId(client_id));
+        Err(proxy_error) => {
+            let mut response = proxy_error.error.response(request_id.as_deref());
+            if let Some(client) = proxy_error.client {
+                response.extensions_mut().insert(LoggedClient(client));
             }
-
             response
         }
     };
-
-    response
-        .extensions_mut()
-        .get_or_insert_with(|| LoggedClientId(UNKNOWN_CLIENT_ID.to_owned()));
 
     if let Some(request_id) = request_id {
         response.headers_mut().insert(
@@ -162,6 +218,8 @@ async fn proxy_response(state: AppState, api_slug: String, request: Request<Body
                 .expect("request id should always be a valid header value"),
         );
     }
+
+    response.extensions_mut().insert(request_context);
 
     response
 }
@@ -173,50 +231,34 @@ async fn handle_proxy_request(
 ) -> Result<Response, ProxyResponseError> {
     let authorization_header = request.headers();
     let authorization_header =
-        extract_authorization_header(authorization_header).map_err(|error| ProxyResponseError {
-            error,
-            client_id: None,
-        })?;
+        extract_authorization_header(authorization_header).map_err(proxy_error_without_client)?;
 
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())
-        .map_err(|error| ProxyResponseError {
-            error,
-            client_id: None,
-        })?;
-    let client_id = authorized.client_slug.clone();
+        .map_err(proxy_error_without_client)?;
     if !authorized.claims.apis().contains(&api_slug) {
-        return Err(ProxyResponseError {
-            error: AppError::ForbiddenApi { api: api_slug },
-            client_id: Some(client_id),
-        });
+        return Err(proxy_error_with_client(
+            AppError::ForbiddenApi { api: api_slug },
+            authorized.client_slug,
+        ));
     }
+
+    let client_slug = authorized.client_slug;
 
     let api_config = state
         .api_config(&api_slug)
-        .map_err(|error| ProxyResponseError {
-            error,
-            client_id: Some(client_id.clone()),
-        })?;
-    let outbound_request =
-        map_request(request, &api_slug, api_config).map_err(|error| ProxyResponseError {
-            error,
-            client_id: Some(client_id.clone()),
-        })?;
+        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
+    let outbound_request = map_request(request, &api_slug, api_config)
+        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
     let upstream_method = outbound_request.method().clone();
     let upstream_url = sanitize_url_for_logs(outbound_request.url().as_ref());
     let timeout_ms = api_config.timeout_ms;
     let upstream_response = execute_request(state.client(), outbound_request, timeout_ms)
         .await
-        .map_err(|error| ProxyResponseError {
-            error,
-            client_id: Some(client_id.clone()),
-        })?;
+        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
     let upstream_status = upstream_response.status().to_string();
-    let mut response = map_response(upstream_response).map_err(|error| ProxyResponseError {
-        error,
-        client_id: Some(client_id.clone()),
-    })?;
-    response.extensions_mut().insert(LoggedClientId(client_id));
+    let mut response = map_response(upstream_response)
+        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
+    response.extensions_mut().insert(LoggedClient(client_slug));
     response.extensions_mut().insert(LoggedUpstreamRequest {
         api: api_slug,
         upstream_method: upstream_method.to_string(),
@@ -226,6 +268,20 @@ async fn handle_proxy_request(
     });
 
     Ok(response)
+}
+
+fn proxy_error_without_client(error: AppError) -> ProxyResponseError {
+    ProxyResponseError {
+        error,
+        client: None,
+    }
+}
+
+fn proxy_error_with_client(error: AppError, client: String) -> ProxyResponseError {
+    ProxyResponseError {
+        error,
+        client: Some(client),
+    }
 }
 
 fn extract_authorization_header(headers: &http::HeaderMap) -> Result<&str, AppError> {

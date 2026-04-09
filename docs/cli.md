@@ -123,7 +123,7 @@ Behavior:
 - the selected level applies to `gate-agent` application logs
 - dependency targets stay at warning and error output only
 - the flag is not raw tracing filter syntax
-- invalid values fail command startup instead of silently falling back
+- invalid values fail command startup and do not silently fall back
 
 ## `--help`
 

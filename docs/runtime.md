@@ -81,6 +81,15 @@ This keeps auth behavior consistent and reduces duplicated time logic.
 
 The runtime must carry a configurable log level and attach request IDs so logs and error responses can be correlated with incoming requests.
 
+All runtime logging must use newline-delimited JSON. Each emitted line must be a complete JSON object that can be shipped, filtered, or parsed without depending on terminal formatting.
+
+This JSON policy applies consistently to:
+
+- startup logs
+- per-request completion logs
+
+The schema should stay vendor-neutral and portable. Consumers may rely on stable business fields such as client, request ID, method, URI, status, latency, API slug, upstream metadata, error code, and error message, but they must not depend on formatter-specific field ordering or nesting details.
+
 Expected logging behavior:
 
 - tracing must be initialized during startup using the configured log level
@@ -89,9 +98,14 @@ Expected logging behavior:
 - invalid `--log-level` input must fail startup with a clear human-readable error instead of silently falling back
 - the selected level applies only to `gate-agent` targets
 - dependency targets must remain limited to warning and error output even when the application runs at `debug`
-- each HTTP request must emit a completion log with method, URI, status, latency, request ID, and `client_id`
-- `client_id` is the authenticated client slug when the request authenticates successfully, otherwise `<unknown>`
+- startup logs must use the same newline-delimited JSON policy as request logs
+- each HTTP request must emit a completion log with method, URI, status, latency, and request ID
+- authenticated auth-exchange and proxy completion logs must include the authorized client slug as the top-level `client` field
 - proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
 - completion logs must include `error_code` only when the response came from an application error
+- when a top-level `status` field is present for an HTTP completion log, it represents the HTTP response status and may be rendered as a standard status line string such as `201 Created`; consumers that need only the numeric code should read that value portably rather than depend on formatter-specific duplicate fields
+- logs must not include formatter-added `span` or `spans` metadata
+- logs must include only sanitized, safe-to-ship values
 - logs must not include API keys, bearer tokens, JWTs, or upstream secret values
 - logged request URIs and upstream URLs must exclude query strings, fragments, and userinfo
+- redaction and sanitization rules apply equally to startup and request-completion logs

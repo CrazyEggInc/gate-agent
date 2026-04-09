@@ -63,9 +63,7 @@ Stdin-backed startup is also supported. When stdin contains non-whitespace confi
 cat .secrets.example | cargo run -- start --log-level info
 ```
 
-When local debugging needs proxy telemetry, rerun the server with `--log-level debug`. Debug logging should stay free of noisy `reqwest` or `hyper` connection chatter, while the normal proxy completion info log includes safe upstream request details.
-
-Request completion logs also include `client_id` on every request. Successful auth and proxy requests record the authenticated client slug; unauthenticated failures log `client_id = "<unknown>"`.
+When local debugging needs proxy telemetry, rerun the server with `--log-level debug`. Runtime telemetry is emitted as newline-delimited JSON, with one JSON object per log line. For local inspection with `jq`, prefer `cargo run --quiet -- start ... 2>&1 | jq` or invoke the built binary directly. Plain `cargo run -- start ... 2>&1 | jq` is fragile because Cargo writes its own non-JSON status lines to stderr, which can break `jq`. Debug logging should stay free of noisy `reqwest` or `hyper` connection chatter, while the normal proxy completion info log includes the authenticated `client`, request metadata, and safe upstream request details.
 
 ## `curl` helper
 
@@ -158,7 +156,7 @@ This verifies:
 - upstream auth injection is working
 - proxy path forwarding is working
 
-For telemetry-focused debugging, rerun the server as `cargo run -- start --config .secrets --log-level debug` and repeat the proxy request. Confirm the proxy completion info log includes the safe upstream fields and that dependency debug chatter from `reqwest` or `hyper` does not appear.
+For telemetry-focused debugging, launch the server with `cargo run --quiet -- start --config .secrets --log-level debug 2>&1 | jq` or use the built binary directly, then repeat the proxy request. Avoid plain `cargo run -- start ... 2>&1 | jq`, because Cargo writes non-JSON status lines to stderr and can break `jq`. Confirm the newline-delimited JSON completion log includes the authenticated `client`, the safe upstream fields, and no `span` or `spans` formatter metadata, and that dependency debug chatter from `reqwest` or `hyper` does not appear.
 
 ## Direct upstream comparison
 
