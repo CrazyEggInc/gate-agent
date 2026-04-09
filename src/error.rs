@@ -9,12 +9,19 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
+#[derive(Clone, Debug)]
+pub struct LoggedErrorCode(pub &'static str);
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("config load failed: {0}")]
     ConfigLoad(String),
     #[error("secrets load failed: {0}")]
     SecretsLoad(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    #[error("api key validation failed")]
+    InvalidApiKey,
     #[error("token validation failed")]
     InvalidToken,
     #[error("api is not allowed: {api}")]
@@ -48,6 +55,8 @@ pub struct ErrorPayloadBody {
 impl AppError {
     pub fn status_code(&self) -> StatusCode {
         match self {
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidApiKey => StatusCode::UNAUTHORIZED,
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::ForbiddenApi { .. } => StatusCode::FORBIDDEN,
             Self::BadProxyPath(_) => StatusCode::BAD_REQUEST,
@@ -65,6 +74,8 @@ impl AppError {
         match self {
             Self::ConfigLoad(_) => "config_load",
             Self::SecretsLoad(_) => "secrets_load",
+            Self::BadRequest(_) => "bad_request",
+            Self::InvalidApiKey => "invalid_api_key",
             Self::InvalidToken => "invalid_token",
             Self::ForbiddenApi { .. } => "forbidden_api",
             Self::BadProxyPath(_) => "bad_proxy_path",
@@ -81,6 +92,8 @@ impl AppError {
             Self::ConfigLoad(_) | Self::SecretsLoad(_) | Self::Internal(_) => {
                 "internal server error"
             }
+            Self::BadRequest(_) => "request is invalid",
+            Self::InvalidApiKey => "authentication failed",
             Self::InvalidToken => "authentication failed",
             Self::ForbiddenApi { .. } => "api access is forbidden",
             Self::BadProxyPath(_) => "request path is invalid",
@@ -103,8 +116,11 @@ impl AppError {
 
     pub fn response(&self, request_id: Option<&str>) -> Response {
         let mut response = (self.status_code(), Json(self.payload(request_id))).into_response();
+        response
+            .extensions_mut()
+            .insert(LoggedErrorCode(self.code()));
 
-        if self.status_code() == StatusCode::UNAUTHORIZED {
+        if matches!(self, Self::InvalidToken) {
             response
                 .headers_mut()
                 .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));

@@ -1,12 +1,17 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::cli::{Command, StartArgs};
+use crate::cli::{
+    Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
+    CurlArgs, StartArgs,
+};
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
 use crate::error::AppError;
+use crate::telemetry::init_tracing;
 
-pub mod curl_payload;
+pub mod config;
+pub mod curl;
 pub mod start;
 
 #[derive(Debug)]
@@ -43,13 +48,70 @@ impl From<AppError> for CommandError {
 }
 
 pub fn run(command: Command) -> Result<(), CommandError> {
+    init_tracing(command.log_level())?;
+
     match command {
         Command::Start(args) => run_start(args),
-        Command::CurlPayload(args) => curl_payload::run(args),
+        Command::Curl(args) => run_curl(args),
+        Command::Config(args) => run_config(args),
     }
+}
+
+fn run_curl(args: CurlArgs) -> Result<(), CommandError> {
+    curl::run(args)
+}
+
+fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
+    match args.command {
+        ConfigCommand::Init(args) => {
+            config::init(map_config_init_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+        }
+        ConfigCommand::AddApi(args) => {
+            config::add_api(map_config_add_api_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+        }
+        ConfigCommand::AddClient(args) => {
+            config::add_client(map_config_add_client_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+        }
+    }
+
+    Ok(())
 }
 
 fn run_start(args: StartArgs) -> Result<(), CommandError> {
     let _ = AppConfig::from_start_args(&args)?;
     start::run(args)
+}
+
+fn map_config_init_args(args: ConfigInitArgs) -> config::ConfigInitArgs {
+    config::ConfigInitArgs {
+        config: args.config,
+        log_level: args.log_level,
+    }
+}
+
+fn map_config_add_api_args(args: ConfigAddApiArgs) -> config::ConfigAddApiArgs {
+    config::ConfigAddApiArgs {
+        config: args.config,
+        log_level: args.log_level,
+        name: args.name,
+        base_url: args.base_url,
+        auth_header: args.auth_header,
+        auth_scheme: args.auth_scheme,
+        auth_value: args.auth_value,
+        timeout_ms: args.timeout_ms,
+    }
+}
+
+fn map_config_add_client_args(args: ConfigAddClientArgs) -> config::ConfigAddClientArgs {
+    config::ConfigAddClientArgs {
+        config: args.config,
+        log_level: args.log_level,
+        name: args.name,
+        api_key: args.api_key,
+        api_key_expires_at: args.api_key_expires_at,
+        allowed_apis: args.allowed_api,
+    }
 }

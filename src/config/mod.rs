@@ -2,7 +2,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 pub mod app_config;
+pub mod path;
 pub mod secrets;
+pub mod write;
 
 #[derive(Debug)]
 pub struct ConfigError {
@@ -10,7 +12,7 @@ pub struct ConfigError {
 }
 
 impl ConfigError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

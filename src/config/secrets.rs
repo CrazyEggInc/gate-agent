@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 use http::header::HeaderName;
 use secrecy::SecretString;
@@ -9,23 +10,40 @@ use url::Url;
 
 use super::ConfigError;
 
+pub(crate) fn is_valid_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 #[derive(Clone, Debug)]
 pub struct SecretsConfig {
-    pub jwt: JwtConfig,
+    pub auth: AuthConfig,
+    pub clients: BTreeMap<String, ClientConfig>,
     pub apis: BTreeMap<String, ApiConfig>,
 }
 
 #[derive(Clone, Debug)]
-pub struct JwtConfig {
-    pub algorithm: JwtAlgorithm,
+pub struct AuthConfig {
     pub issuer: String,
     pub audience: String,
-    pub shared_secret: SecretString,
+    pub signing_secret: SecretString,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClientConfig {
+    pub slug: String,
+    pub api_key: SecretString,
+    pub api_key_expires_at: UtcTimestamp,
+    pub allowed_apis: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JwtAlgorithm {
-    Hs256,
+pub struct UtcTimestamp {
+    raw: String,
+    unix_timestamp: i64,
+    nanosecond: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -41,18 +59,27 @@ pub struct ApiConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSecretsConfig {
-    jwt: Option<RawJwtConfig>,
+    auth: RawAuthConfig,
+    #[serde(default)]
+    clients: BTreeMap<String, RawClientConfig>,
     #[serde(default)]
     apis: BTreeMap<String, RawApiConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawJwtConfig {
-    algorithm: String,
+struct RawClientConfig {
+    api_key: String,
+    api_key_expires_at: String,
+    allowed_apis: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthConfig {
     issuer: String,
     audience: String,
-    shared_secret: String,
+    signing_secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,14 +96,14 @@ impl SecretsConfig {
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let contents = fs::read_to_string(path).map_err(|error| {
             ConfigError::new(format!(
-                "failed to read secrets file '{}': {error}",
+                "failed to read config file '{}': {error}",
                 path.display()
             ))
         })?;
 
         let raw_config: RawSecretsConfig = toml::from_str(&contents).map_err(|error| {
             ConfigError::new(format!(
-                "failed to parse secrets file '{}': {error}",
+                "failed to parse config file '{}': {error}",
                 path.display()
             ))
         })?;
@@ -85,14 +112,12 @@ impl SecretsConfig {
     }
 
     fn try_from_raw(raw_config: RawSecretsConfig) -> Result<Self, ConfigError> {
-        let jwt = JwtConfig::try_from_raw(
-            raw_config
-                .jwt
-                .ok_or_else(|| ConfigError::new("missing [jwt] section"))?,
-        )?;
+        let auth = AuthConfig::try_from_raw(raw_config.auth)?;
 
-        if raw_config.apis.is_empty() {
-            return Err(ConfigError::new("at least one [apis.*] entry is required"));
+        if raw_config.clients.is_empty() {
+            return Err(ConfigError::new(
+                "at least one [clients.*] entry is required",
+            ));
         }
 
         let mut apis = BTreeMap::new();
@@ -102,46 +127,194 @@ impl SecretsConfig {
             apis.insert(slug, api);
         }
 
-        Ok(Self { jwt, apis })
+        let mut clients = BTreeMap::new();
+
+        for (slug, raw_client) in raw_config.clients {
+            let client = ClientConfig::try_from_raw(&slug, raw_client, &apis)?;
+            clients.insert(slug, client);
+        }
+
+        Ok(Self {
+            auth,
+            clients,
+            apis,
+        })
+    }
+
+    pub fn default_client(&self) -> Result<&ClientConfig, ConfigError> {
+        self.clients
+            .get("default")
+            .ok_or_else(|| ConfigError::new("missing required [clients.default] entry"))
     }
 }
 
-impl JwtConfig {
-    fn try_from_raw(raw_config: RawJwtConfig) -> Result<Self, ConfigError> {
-        let algorithm = match raw_config.algorithm.trim() {
-            "HS256" => JwtAlgorithm::Hs256,
-            algorithm => {
+impl AuthConfig {
+    fn try_from_raw(raw_config: RawAuthConfig) -> Result<Self, ConfigError> {
+        Ok(Self {
+            issuer: required_string("auth.issuer", raw_config.issuer)?,
+            audience: required_string("auth.audience", raw_config.audience)?,
+            signing_secret: SecretString::from(required_string(
+                "auth.signing_secret",
+                raw_config.signing_secret,
+            )?),
+        })
+    }
+}
+
+impl ClientConfig {
+    fn try_from_raw(
+        slug: &str,
+        raw_config: RawClientConfig,
+        apis: &BTreeMap<String, ApiConfig>,
+    ) -> Result<Self, ConfigError> {
+        if slug.is_empty() {
+            return Err(ConfigError::new("client slug cannot be empty"));
+        }
+
+        if slug != slug.to_ascii_lowercase() {
+            return Err(ConfigError::new(format!(
+                "client slug '{slug}' must be lowercase"
+            )));
+        }
+
+        if !is_valid_slug(slug) {
+            return Err(ConfigError::new(format!(
+                "client slug '{slug}' must contain only lowercase letters, digits, or hyphen"
+            )));
+        }
+
+        let api_key = SecretString::from(required_string(
+            &format!("clients.{slug}.api_key"),
+            raw_config.api_key,
+        )?);
+        let api_key_expires_at = UtcTimestamp::parse(
+            &format!("clients.{slug}.api_key_expires_at"),
+            raw_config.api_key_expires_at,
+        )?;
+
+        let mut allowed_apis = BTreeSet::new();
+
+        for (index, allowed_api) in raw_config.allowed_apis.into_iter().enumerate() {
+            let field = format!("clients.{slug}.allowed_apis[{index}]");
+            if allowed_api.is_empty() {
+                return Err(ConfigError::new(format!("{field} cannot be empty")));
+            }
+
+            if allowed_api != allowed_api.to_ascii_lowercase() {
+                return Err(ConfigError::new(format!("{field} must be lowercase")));
+            }
+
+            if !is_valid_slug(&allowed_api) {
                 return Err(ConfigError::new(format!(
-                    "jwt.algorithm must be HS256, got '{algorithm}'"
+                    "{field} must contain only lowercase letters, digits, or hyphen"
                 )));
             }
-        };
 
-        let issuer = required_string("jwt.issuer", raw_config.issuer)?;
-        let audience = required_string("jwt.audience", raw_config.audience)?;
-        let shared_secret = SecretString::from(required_string(
-            "jwt.shared_secret",
-            raw_config.shared_secret,
-        )?);
+            if !allowed_apis.insert(allowed_api.clone()) {
+                return Err(ConfigError::new(format!(
+                    "clients.{slug}.allowed_apis contains duplicate api '{allowed_api}'"
+                )));
+            }
+
+            if !apis.contains_key(&allowed_api) {
+                return Err(ConfigError::new(format!(
+                    "clients.{slug}.allowed_apis contains unknown api '{allowed_api}'"
+                )));
+            }
+        }
 
         Ok(Self {
-            algorithm,
-            issuer,
-            audience,
-            shared_secret,
+            slug: slug.to_owned(),
+            api_key,
+            api_key_expires_at,
+            allowed_apis,
+        })
+    }
+}
+
+impl UtcTimestamp {
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    pub fn unix_timestamp(&self) -> i64 {
+        self.unix_timestamp
+    }
+
+    pub fn nanosecond(&self) -> u32 {
+        self.nanosecond
+    }
+
+    fn parse(field: &str, value: String) -> Result<Self, ConfigError> {
+        let raw = required_string(field, value)?;
+
+        if !raw.contains('T') || !raw.ends_with('Z') {
+            return Err(ConfigError::new(format!(
+                "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+            )));
+        }
+
+        let parsed = toml::value::Datetime::from_str(&raw).map_err(|_| {
+            ConfigError::new(format!(
+                "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+            ))
+        })?;
+
+        let Some(date) = parsed.date else {
+            return Err(ConfigError::new(format!(
+                "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+            )));
+        };
+        let Some(time) = parsed.time else {
+            return Err(ConfigError::new(format!(
+                "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+            )));
+        };
+
+        match parsed.offset {
+            Some(toml::value::Offset::Z) => {}
+            _ => {
+                return Err(ConfigError::new(format!(
+                    "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+                )));
+            }
+        }
+
+        validate_date(field, date.year as i32, date.month, date.day)?;
+
+        let unix_timestamp = unix_timestamp_from_utc(
+            field,
+            date.year as i32,
+            date.month,
+            date.day,
+            time.hour,
+            time.minute,
+            time.second,
+        )?;
+
+        Ok(Self {
+            raw,
+            unix_timestamp,
+            nanosecond: time.nanosecond,
         })
     }
 }
 
 impl ApiConfig {
     fn try_from_raw(slug: &str, raw_config: RawApiConfig) -> Result<Self, ConfigError> {
-        if slug.trim().is_empty() {
+        if slug.is_empty() {
             return Err(ConfigError::new("api slug cannot be empty"));
         }
 
         if slug != slug.to_ascii_lowercase() {
             return Err(ConfigError::new(format!(
                 "api slug '{slug}' must be lowercase"
+            )));
+        }
+
+        if !is_valid_slug(slug) {
+            return Err(ConfigError::new(format!(
+                "api slug '{slug}' must contain only lowercase letters, digits, or hyphen"
             )));
         }
 
@@ -201,4 +374,69 @@ fn required_string(field: &str, value: String) -> Result<String, ConfigError> {
 
 fn optional_string(field: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {
     value.map(|value| required_string(field, value)).transpose()
+}
+
+fn validate_date(field: &str, year: i32, month: u8, day: u8) -> Result<(), ConfigError> {
+    if !(1..=12).contains(&month) {
+        return Err(ConfigError::new(format!(
+            "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+        )));
+    }
+
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => unreachable!(),
+    };
+
+    if day == 0 || day > max_day {
+        return Err(ConfigError::new(format!(
+            "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn unix_timestamp_from_utc(
+    field: &str,
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> Result<i64, ConfigError> {
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(ConfigError::new(format!(
+            "{field} must be an RFC3339 UTC timestamp like 2026-10-08T12:00:00Z"
+        )));
+    }
+
+    let year = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let hour = i64::from(hour);
+    let minute = i64::from(minute);
+    let second = i64::from(second);
+
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        (adjusted_year - 399) / 400
+    };
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days_since_epoch = era * 146_097 + day_of_era - 719_468;
+
+    Ok(days_since_epoch * 86_400 + hour * 3_600 + minute * 60 + second)
 }

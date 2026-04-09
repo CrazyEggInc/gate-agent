@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,10 +11,14 @@ use axum::{
     http::{Request, StatusCode},
 };
 use gate_agent::{
-    auth::jwt::sign_local_test_token_at,
+    auth::{
+        claims::JwtClaims,
+        jwt::{sign_local_test_token_at, sign_local_test_token_for_client_at},
+    },
     config::{app_config::AppConfig, secrets::SecretsConfig},
 };
 use http_body_util::BodyExt;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -71,17 +77,67 @@ pub fn load_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error:
     load_test_config_with_billing_timeout(base_url, 5_000)
 }
 
+pub fn load_multi_api_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_secrets_file(&format!(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "replace-me"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects", "billing"]
+
+[clients.partner]
+api_key = "partner-client-key"
+api_key_expires_at = "2030-01-03T03:04:05Z"
+allowed_apis = ["projects"]
+
+[apis.projects]
+base_url = "{base_url}"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+
+[apis.billing]
+base_url = "{base_url}/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#
+    ))?;
+
+    Ok(AppConfig {
+        bind: "127.0.0.1:0".parse()?,
+        log_level: "debug".to_owned(),
+        config_file: config_file.clone(),
+        secrets: SecretsConfig::load_from_file(&config_file)?,
+    })
+}
+
 pub fn load_test_config_with_billing_timeout(
     base_url: &str,
     billing_timeout_ms: u64,
 ) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let (_temp_dir, secrets_file) = write_secrets_file(&format!(
+    let (_temp_dir, config_file) = write_secrets_file(&format!(
         r#"
-[jwt]
-algorithm = "HS256"
+[auth]
 issuer = "gate-agent-dev"
 audience = "gate-agent-clients"
-shared_secret = "replace-me"
+signing_secret = "replace-me"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["billing"]
+
+[clients.partner]
+api_key = "partner-client-key"
+api_key_expires_at = "2030-01-03T03:04:05Z"
+allowed_apis = ["projects"]
 
 [apis.projects]
 base_url = "{base_url}"
@@ -101,8 +157,8 @@ timeout_ms = {billing_timeout_ms}
     Ok(AppConfig {
         bind: "127.0.0.1:0".parse()?,
         log_level: "debug".to_owned(),
-        secrets_file: secrets_file.clone(),
-        secrets: SecretsConfig::load_from_file(&secrets_file)?,
+        config_file: config_file.clone(),
+        secrets: SecretsConfig::load_from_file(&config_file)?,
     })
 }
 
@@ -110,7 +166,52 @@ pub fn signed_token(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(sign_local_test_token_at(api, secrets, 4_000_000_000, 300)?)
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    Ok(sign_local_test_token_at(api, secrets, issued_at, 600)?)
+}
+
+pub fn signed_token_for_client(
+    client_slug: &str,
+    api: &str,
+    secrets: &SecretsConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    Ok(sign_local_test_token_for_client_at(
+        client_slug,
+        api,
+        secrets,
+        issued_at,
+        600,
+    )?)
+}
+
+pub fn signed_token_with_subject_and_secret(
+    subject_client_slug: &str,
+    api: &str,
+    signing_secret: &str,
+    secrets: &SecretsConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let claims = JwtClaims::new(
+        subject_client_slug.to_owned(),
+        [api.to_owned()],
+        secrets.auth.issuer.clone(),
+        secrets.auth.audience.clone(),
+        issued_at,
+        issued_at + 600,
+    );
+
+    Ok(encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(signing_secret.as_bytes()),
+    )?)
 }
 
 pub async fn spawn_chunked_upstream(

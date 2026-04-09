@@ -3,46 +3,122 @@ use std::time::Duration;
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{Request, StatusCode, header},
     response::Response,
-    routing::any,
+    routing::{any, post},
 };
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
+    trace::TraceLayer,
 };
+use tracing::{Level, info};
 
 use crate::app::AppState;
-use crate::auth::jwt::validate_bearer_token;
-use crate::error::AppError;
+use crate::auth::exchange::exchange_handler;
+use crate::auth::jwt::validate_bearer_authorized_request;
+use crate::error::{AppError, LoggedErrorCode};
 
 use super::{request::map_request, response::map_response, upstream::execute_request};
 
 const ROUTER_TIMEOUT_SECS: u64 = 60;
 
+#[derive(Clone, Debug)]
+struct LoggedUpstreamRequest {
+    api: String,
+    upstream_method: String,
+    upstream_url: String,
+    upstream_status: String,
+    timeout_ms: u64,
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/proxy", any(proxy_handler))
-        .route("/proxy/", any(proxy_handler))
-        .route("/proxy/{*path}", any(proxy_handler))
+        .route("/auth/exchange", post(exchange_handler))
+        .route("/proxy/{api}", any(proxy_handler))
+        .route("/proxy/{api}/", any(proxy_handler))
+        .route("/proxy/{api}/{*path}", any(proxy_handler_with_path))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(ROUTER_TIMEOUT_SECS),
         ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    tracing::span!(
+                        Level::INFO,
+                        "http_request",
+                        request_id = %request_id_from_request(request).unwrap_or_else(|| "-".to_owned()),
+                        method = %request.method(),
+                        uri = %request.uri(),
+                    )
+                })
+                .on_response(|response: &Response, latency: Duration, span: &tracing::Span| {
+                    let _enter = span.enter();
+                    let error_code = response
+                        .extensions()
+                        .get::<LoggedErrorCode>()
+                        .map(|value| value.0);
+                    let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
+
+                    match (error_code, upstream_request) {
+                        (Some(error_code), Some(upstream_request)) => info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            error_code,
+                            api = %upstream_request.api,
+                            upstream_method = %upstream_request.upstream_method,
+                            upstream_url = %upstream_request.upstream_url,
+                            upstream_status = %upstream_request.upstream_status,
+                            timeout_ms = upstream_request.timeout_ms,
+                        ),
+                        (Some(error_code), None) => info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            error_code,
+                        ),
+                        (None, Some(upstream_request)) => info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            api = %upstream_request.api,
+                            upstream_method = %upstream_request.upstream_method,
+                            upstream_url = %upstream_request.upstream_url,
+                            upstream_status = %upstream_request.upstream_status,
+                            timeout_ms = upstream_request.timeout_ms,
+                        ),
+                        (None, None) => info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                        ),
+                    }
+                })
+        )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
         .with_state(state)
 }
 
-async fn proxy_handler(State(state): State<AppState>, request: Request<Body>) -> Response {
-    proxy_response(state, request).await
+async fn proxy_handler(
+    State(state): State<AppState>,
+    Path(api_slug): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    proxy_response(state, api_slug, request).await
 }
 
-async fn proxy_response(state: AppState, request: Request<Body>) -> Response {
+async fn proxy_handler_with_path(
+    State(state): State<AppState>,
+    Path((api_slug, _path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Response {
+    proxy_response(state, api_slug, request).await
+}
+
+async fn proxy_response(state: AppState, api_slug: String, request: Request<Body>) -> Response {
     let request_id = request_id_from_request(&request);
 
-    let mut response = match handle_proxy_request(state, request).await {
+    let mut response = match handle_proxy_request(state, api_slug, request).await {
         Ok(response) => response,
         Err(error) => error.response(request_id.as_deref()),
     };
@@ -60,6 +136,7 @@ async fn proxy_response(state: AppState, request: Request<Body>) -> Response {
 
 async fn handle_proxy_request(
     state: AppState,
+    api_slug: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let authorization_header = request
@@ -68,12 +145,28 @@ async fn handle_proxy_request(
         .and_then(|value| value.to_str().ok())
         .ok_or(AppError::InvalidToken)?;
 
-    let claims = validate_bearer_token(authorization_header, state.secrets())?;
-    let api_config = state.api_config(&claims.api)?;
-    let outbound_request = map_request(request, api_config)?;
-    let upstream_response = execute_request(state.client(), outbound_request, api_config).await?;
+    let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())?;
+    if !authorized.claims.apis().contains(&api_slug) {
+        return Err(AppError::ForbiddenApi { api: api_slug });
+    }
 
-    map_response(upstream_response)
+    let api_config = state.api_config(&api_slug)?;
+    let outbound_request = map_request(request, &api_slug, api_config)?;
+    let upstream_method = outbound_request.method().clone();
+    let upstream_url = outbound_request.url().to_string();
+    let timeout_ms = api_config.timeout_ms;
+    let upstream_response = execute_request(state.client(), outbound_request, timeout_ms).await?;
+    let upstream_status = upstream_response.status().to_string();
+    let mut response = map_response(upstream_response)?;
+    response.extensions_mut().insert(LoggedUpstreamRequest {
+        api: api_slug,
+        upstream_method: upstream_method.to_string(),
+        upstream_url,
+        upstream_status,
+        timeout_ms,
+    });
+
+    Ok(response)
 }
 
 fn request_id_from_request(request: &Request<Body>) -> Option<String> {
