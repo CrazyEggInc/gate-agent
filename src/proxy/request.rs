@@ -1,7 +1,7 @@
 use axum::body::Body;
 use http::{
     HeaderMap, Request, Uri,
-    header::{self, HeaderValue},
+    header::{self, HeaderName, HeaderValue},
 };
 use secrecy::ExposeSecret;
 use url::{Position, Url};
@@ -77,6 +77,7 @@ fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
     for (name, value) in headers {
         if name == header::AUTHORIZATION
             || name == header::HOST
+            || is_client_forwarding_header(name)
             || is_hop_by_hop_header(name, &connection_bound_names)
         {
             continue;
@@ -86,6 +87,20 @@ fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
     }
 
     filtered_headers
+}
+
+fn is_client_forwarding_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "forwarded"
+            | "x-forwarded-for"
+            | "x-forwarded-host"
+            | "x-forwarded-proto"
+            | "x-forwarded-port"
+            | "x-forwarded-prefix"
+            | "x-real-ip"
+            | "via"
+    )
 }
 
 fn inject_upstream_auth_header(

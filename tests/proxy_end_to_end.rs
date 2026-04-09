@@ -198,6 +198,57 @@ async fn proxy_route_uses_api_segment_for_billing_multi_api_token()
 }
 
 #[tokio::test]
+async fn proxy_route_strips_client_forwarding_headers_before_upstream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/api/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token("billing", &config.secrets)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .header("forwarded", "for=203.0.113.9;proto=https;host=evil.example")
+                .header("x-forwarded-for", "203.0.113.10")
+                .header("x-forwarded-host", "evil.example")
+                .header("x-forwarded-proto", "https")
+                .header("x-forwarded-port", "443")
+                .header("x-forwarded-prefix", "/spoofed")
+                .header("x-real-ip", "203.0.113.11")
+                .header("via", "1.1 attacker-proxy")
+                .header("x-custom", "preserved")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+    assert_eq!(
+        captured.headers.get("authorization").unwrap(),
+        "Bearer billing-secret-token"
+    );
+    assert_eq!(captured.headers.get("x-custom").unwrap(), "preserved");
+    assert!(captured.headers.get("forwarded").is_none());
+    assert!(captured.headers.get("x-forwarded-for").is_none());
+    assert!(captured.headers.get("x-forwarded-host").is_none());
+    assert!(captured.headers.get("x-forwarded-proto").is_none());
+    assert!(captured.headers.get("x-forwarded-port").is_none());
+    assert!(captured.headers.get("x-forwarded-prefix").is_none());
+    assert!(captured.headers.get("x-real-ip").is_none());
+    assert!(captured.headers.get("via").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sender, rx) = capture_channel();
@@ -433,6 +484,48 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id()
             }
         })
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_rejects_duplicate_authorization_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token("billing", &config.secrets)?;
+    let app = build_router(AppState::from_config(&config)?);
+    let mut request = Request::builder()
+        .uri("/proxy/billing/v1/projects")
+        .header("x-request-id", "req-duplicate-auth")
+        .body(Body::empty())?;
+    request.headers_mut().append(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
+    );
+    request.headers_mut().append(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
+    );
+
+    let response = app.oneshot(request).await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("www-authenticate").unwrap(),
+        "Bearer"
+    );
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "req-duplicate-auth"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "invalid_token");
+    assert_eq!(payload["error"]["request_id"], "req-duplicate-auth");
 
     Ok(())
 }

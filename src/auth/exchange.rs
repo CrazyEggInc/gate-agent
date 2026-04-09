@@ -2,10 +2,10 @@ use axum::{
     Json,
     body::Body,
     extract::State,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Limited};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
 use super::jwt::sign_access_token_for_client;
 
 pub const EXCHANGE_TOKEN_TTL_SECS: u64 = 10 * 60;
+const MAX_EXCHANGE_BODY_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ExchangeRequest {
@@ -55,18 +56,14 @@ async fn handle_exchange_request(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let (parts, body) = request.into_parts();
-    let api_key = parts
-        .headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::InvalidApiKey)?;
+    let api_key = extract_api_key(&parts.headers)?;
     let client = state
         .client_for_api_key(api_key)
         .map_err(remap_api_key_error)?;
-    let body = body
+    let body = Limited::new(body, MAX_EXCHANGE_BODY_BYTES)
         .collect()
         .await
-        .map_err(|_| AppError::BadRequest("request body must be valid JSON".to_owned()))?
+        .map_err(|_| AppError::BadRequest("request body is too large or invalid".to_owned()))?
         .to_bytes();
     let payload: ExchangeRequest = serde_json::from_slice(&body)
         .map_err(|_| AppError::BadRequest("request body must be valid JSON".to_owned()))?;
@@ -107,9 +104,9 @@ fn normalize_requested_apis(apis: Vec<String>) -> Result<Vec<String>, AppError> 
     }
 
     if let Some(invalid_api) = normalized.iter().find(|api| !is_valid_slug(api)) {
-        return Err(AppError::ForbiddenApi {
-            api: invalid_api.clone(),
-        });
+        return Err(AppError::BadRequest(format!(
+            "apis must contain only valid slugs: {invalid_api}"
+        )));
     }
 
     Ok(normalized)
@@ -127,6 +124,23 @@ fn validate_requested_apis(
     }
 
     Ok(())
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Result<&str, AppError> {
+    let mut values = headers.get_all("x-api-key").iter();
+    let value = values.next().ok_or(AppError::InvalidApiKey)?;
+
+    if values.next().is_some() {
+        return Err(AppError::InvalidApiKey);
+    }
+
+    let value = value.to_str().map_err(|_| AppError::InvalidApiKey)?;
+
+    if value.trim().is_empty() {
+        return Err(AppError::InvalidApiKey);
+    }
+
+    Ok(value)
 }
 
 fn remap_api_key_error(error: AppError) -> AppError {

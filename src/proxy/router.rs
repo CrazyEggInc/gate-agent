@@ -19,6 +19,7 @@ use crate::app::AppState;
 use crate::auth::exchange::exchange_handler;
 use crate::auth::jwt::validate_bearer_authorized_request;
 use crate::error::{AppError, LoggedErrorCode};
+use crate::telemetry::{sanitize_request_uri_for_logs, sanitize_url_for_logs};
 
 use super::{request::map_request, response::map_response, upstream::execute_request};
 
@@ -51,7 +52,7 @@ pub fn build_router(state: AppState) -> Router {
                         "http_request",
                         request_id = %request_id_from_request(request).unwrap_or_else(|| "-".to_owned()),
                         method = %request.method(),
-                        uri = %request.uri(),
+                        uri = %sanitize_request_uri_for_logs(request.uri()),
                     )
                 })
                 .on_response(|response: &Response, latency: Duration, span: &tracing::Span| {
@@ -139,11 +140,8 @@ async fn handle_proxy_request(
     api_slug: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    let authorization_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::InvalidToken)?;
+    let authorization_header = request.headers();
+    let authorization_header = extract_authorization_header(authorization_header)?;
 
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())?;
     if !authorized.claims.apis().contains(&api_slug) {
@@ -153,7 +151,7 @@ async fn handle_proxy_request(
     let api_config = state.api_config(&api_slug)?;
     let outbound_request = map_request(request, &api_slug, api_config)?;
     let upstream_method = outbound_request.method().clone();
-    let upstream_url = outbound_request.url().to_string();
+    let upstream_url = sanitize_url_for_logs(outbound_request.url().as_ref());
     let timeout_ms = api_config.timeout_ms;
     let upstream_response = execute_request(state.client(), outbound_request, timeout_ms).await?;
     let upstream_status = upstream_response.status().to_string();
@@ -167,6 +165,17 @@ async fn handle_proxy_request(
     });
 
     Ok(response)
+}
+
+fn extract_authorization_header(headers: &http::HeaderMap) -> Result<&str, AppError> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let value = values.next().ok_or(AppError::InvalidToken)?;
+
+    if values.next().is_some() {
+        return Err(AppError::InvalidToken);
+    }
+
+    value.to_str().map_err(|_| AppError::InvalidToken)
 }
 
 fn request_id_from_request(request: &Request<Body>) -> Option<String> {

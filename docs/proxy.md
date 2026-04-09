@@ -29,13 +29,14 @@ The per-request outer timeout is separate from the per-upstream timeout configur
 For proxy routes, the expected flow is:
 
 1. Read `Authorization` header.
-2. Validate the bearer token.
-3. Extract the route `{api}` slug.
-4. Require that `{api}` is included in the token’s authorized API list.
-5. Resolve the upstream API config.
-6. Map the inbound request to an outbound upstream request.
-7. Execute the upstream request with the configured per-API timeout.
-8. Map the upstream response back to the client.
+2. Reject missing, repeated, or malformed authorization headers.
+3. Validate the bearer token.
+4. Extract the route `{api}` slug.
+5. Require that `{api}` is included in the token’s authorized API list.
+6. Resolve the upstream API config.
+7. Map the inbound request to an outbound upstream request.
+8. Execute the upstream request with the configured per-API timeout.
+9. Map the upstream response back to the client.
 
 Expected error classes:
 
@@ -64,6 +65,15 @@ The outbound request must strip:
 - `Host`
 - hop-by-hop headers
 - headers named by the incoming `Connection` header
+- client forwarding headers:
+  - `Forwarded`
+  - `X-Forwarded-For`
+  - `X-Forwarded-Host`
+  - `X-Forwarded-Proto`
+  - `X-Forwarded-Port`
+  - `X-Forwarded-Prefix`
+  - `X-Real-IP`
+  - `Via`
 
 Then the configured upstream auth header is injected:
 
@@ -72,6 +82,7 @@ Then the configured upstream auth header is injected:
 - `auth_value`
 
 The injected auth value overrides whatever client auth would otherwise have been forwarded.
+The proxy does not pass client-supplied topology headers upstream.
 
 ## Upstream execution
 

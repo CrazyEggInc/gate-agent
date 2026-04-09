@@ -221,6 +221,47 @@ async fn request_mapping_preserves_encoded_path_and_query_bytes()
 }
 
 #[tokio::test]
+async fn request_mapping_strips_client_forwarding_headers() -> Result<(), Box<dyn std::error::Error>>
+{
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("billing").expect("billing api config");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/billing/v1/projects")
+        .header("forwarded", "for=203.0.113.9;proto=https;host=evil.example")
+        .header("x-forwarded-for", "203.0.113.10")
+        .header("x-forwarded-host", "evil.example")
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-port", "443")
+        .header("x-forwarded-prefix", "/spoofed")
+        .header("x-real-ip", "203.0.113.11")
+        .header("via", "1.1 attacker-proxy")
+        .header("x-custom", "preserved")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "billing", api)?;
+
+    assert!(outbound.headers().get("forwarded").is_none());
+    assert!(outbound.headers().get("x-forwarded-for").is_none());
+    assert!(outbound.headers().get("x-forwarded-host").is_none());
+    assert!(outbound.headers().get("x-forwarded-proto").is_none());
+    assert!(outbound.headers().get("x-forwarded-port").is_none());
+    assert!(outbound.headers().get("x-forwarded-prefix").is_none());
+    assert!(outbound.headers().get("x-real-ip").is_none());
+    assert!(outbound.headers().get("via").is_none());
+    assert_eq!(outbound.headers().get("x-custom").unwrap(), "preserved");
+    assert_eq!(
+        outbound.headers().get("authorization").unwrap(),
+        "Bearer billing-secret-token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_mapping_sets_raw_upstream_auth_header_when_scheme_is_not_configured()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
