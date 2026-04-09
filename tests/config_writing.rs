@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gate_agent::config::secrets::AccessLevel;
 use gate_agent::config::write::{self, ApiUpsert, ClientUpsert};
 use secrecy::SecretString;
 
@@ -51,9 +52,12 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     );
 
     assert_eq!(
-        find_array_value(default_client, "allowed_apis").unwrap(),
-        Vec::<String>::new()
+        find_inline_table_value(default_client, "api_access"),
+        Some(vec![])
     );
+
+    let groups = section_body(&contents, "groups").unwrap();
+    assert!(groups.trim().is_empty());
 
     let apis = section_body(&contents, "apis").unwrap();
     assert!(apis.trim().is_empty());
@@ -95,7 +99,7 @@ signing_secret = "secret"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2030-01-01T00:00:00Z"
-allowed_apis = []
+api_access = {}
 
 [apis]
 "#,
@@ -175,7 +179,7 @@ allowed_apis = []
 }
 
 #[test]
-fn add_client_upserts_single_entry_and_preserves_existing_key_when_omitted_on_update()
+fn add_client_writes_inline_api_access_in_stable_order_and_preserves_existing_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("gate-agent.toml");
@@ -189,7 +193,9 @@ signing_secret = "secret"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2030-01-01T00:00:00Z"
-allowed_apis = []
+api_access = {}
+
+[groups]
 
 [apis]
 "#,
@@ -201,7 +207,10 @@ allowed_apis = []
             name: "partner".to_string(),
             api_key: None,
             api_key_expires_at: None,
-            allowed_apis: vec!["projects".to_string()],
+            access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([(
+                "projects".to_string(),
+                AccessLevel::Read,
+            )])),
         },
         None,
     )?;
@@ -216,8 +225,8 @@ allowed_apis = []
         1,
     );
     let client_with_notes = client_with_notes.replacen(
-        "allowed_apis = [\"projects\"]\n",
-        "allowed_apis = [\"projects\"]\nlabel = \"keep-me\"\n",
+        "api_access = { projects = \"read\" }\n",
+        "api_access = { projects = \"read\" }\nlabel = \"keep-me\"\n",
         1,
     );
     let client_header = "[clients.partner]\n";
@@ -236,7 +245,10 @@ allowed_apis = []
             name: "partner".to_string(),
             api_key: None,
             api_key_expires_at: None,
-            allowed_apis: vec!["billing".to_string(), "projects".to_string()],
+            access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([
+                ("projects".to_string(), AccessLevel::Read),
+                ("billing".to_string(), AccessLevel::Write),
+            ])),
         },
         None,
     )?;
@@ -255,12 +267,75 @@ allowed_apis = []
         Some(original_expiration.as_str())
     );
 
-    let allowed_apis = find_array_value(client, "allowed_apis").unwrap();
-    assert_eq!(allowed_apis, vec!["billing", "projects"]);
+    let api_access = find_inline_table_value(client, "api_access").unwrap();
+    assert_eq!(
+        api_access,
+        vec![
+            ("billing".to_string(), "write".to_string()),
+            ("projects".to_string(), "read".to_string()),
+        ]
+    );
     assert_eq!(
         find_string_value(client, "label").as_deref(),
         Some("keep-me")
     );
+
+    Ok(())
+}
+
+#[test]
+fn add_client_writes_group_and_removes_stale_inline_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[auth]
+issuer = "issuer"
+audience = "audience"
+signing_secret = "secret"
+
+[clients.partner]
+api_key = "partner-key"
+api_key_expires_at = "2030-01-01T00:00:00Z"
+api_access = { projects = "read" }
+note = "keep-me"
+
+[groups.partner-write]
+api_access = { projects = "write" }
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "upstream-token"
+timeout_ms = 5000
+"#,
+    )?;
+
+    write::upsert_client(
+        &config_path,
+        &ClientUpsert {
+            name: "partner".to_string(),
+            api_key: None,
+            api_key_expires_at: None,
+            access: write::ClientAccessUpsert::Group("partner-write".to_string()),
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let client = section_body(&contents, "clients.partner").unwrap();
+
+    assert_eq!(
+        find_string_value(client, "group").as_deref(),
+        Some("partner-write")
+    );
+    assert_eq!(
+        find_string_value(client, "note").as_deref(),
+        Some("keep-me")
+    );
+    assert!(!client.contains("api_access ="));
 
     Ok(())
 }
@@ -326,14 +401,14 @@ fn find_integer_value(section_body: &str, key: &str) -> Option<i64> {
     })
 }
 
-fn find_array_value(section_body: &str, key: &str) -> Option<Vec<String>> {
+fn find_inline_table_value(section_body: &str, key: &str) -> Option<Vec<(String, String)>> {
     let prefix = format!("{key} = ");
     let value = section_body
         .lines()
         .find_map(|line| line.trim().strip_prefix(&prefix).map(str::to_owned))?;
     let trimmed = value.trim();
 
-    if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
         return None;
     }
 
@@ -343,7 +418,13 @@ fn find_array_value(section_body: &str, key: &str) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
 
-    inner.split(',').map(|part| unquote(part.trim())).collect()
+    inner
+        .split(',')
+        .map(|item| {
+            let (key, value) = item.split_once('=')?;
+            Some((key.trim().to_string(), unquote(value.trim())?))
+        })
+        .collect::<Option<Vec<_>>>()
 }
 
 fn unquote(value: &str) -> Option<String> {

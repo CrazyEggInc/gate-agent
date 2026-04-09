@@ -33,6 +33,7 @@ JWT_TOKEN=$(
 )
 
 cargo run --quiet -- curl --jwt "$JWT_TOKEN" --api projects --path /v1/projects/1/tasks | curl -K -
+cargo run --quiet -- curl --jwt "$JWT_TOKEN" --api projects --path /v1/projects/1/tasks | curl -X POST -K -
 ```
 
 The dummy upstream health check stays open at `http://127.0.0.1:18081/healthz`.

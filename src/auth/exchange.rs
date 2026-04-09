@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json,
     body::Body,
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppState,
-    config::secrets::{ClientConfig, is_valid_slug},
+    config::secrets::{AccessLevel, ClientConfig, is_valid_slug},
     error::AppError,
     telemetry::{LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs},
     time::unix_timestamp_secs,
@@ -23,7 +25,7 @@ const MAX_EXCHANGE_BODY_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ExchangeRequest {
-    pub apis: Vec<String>,
+    pub apis: BTreeMap<String, AccessLevel>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,19 +106,31 @@ async fn handle_exchange_request(
     Ok(response)
 }
 
-fn normalize_requested_apis(apis: Vec<String>) -> Result<Vec<String>, AppError> {
-    let mut normalized = apis
-        .into_iter()
-        .map(|api| api.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
-
-    if normalized.is_empty() {
+fn normalize_requested_apis(
+    apis: BTreeMap<String, AccessLevel>,
+) -> Result<BTreeMap<String, AccessLevel>, AppError> {
+    if apis.is_empty() {
         return Err(AppError::BadRequest("apis must not be empty".to_owned()));
     }
 
-    if let Some(invalid_api) = normalized.iter().find(|api| !is_valid_slug(api)) {
+    let mut normalized = BTreeMap::new();
+
+    for (api, access_level) in apis {
+        let api = api.trim().to_ascii_lowercase();
+
+        if api.is_empty() {
+            return Err(AppError::BadRequest(
+                "apis must not contain blank slugs".to_owned(),
+            ));
+        }
+
+        normalized
+            .entry(api)
+            .and_modify(|current: &mut AccessLevel| *current = (*current).max(access_level))
+            .or_insert(access_level);
+    }
+
+    if let Some(invalid_api) = normalized.keys().find(|api| !is_valid_slug(api)) {
         return Err(AppError::BadRequest(format!(
             "apis must contain only valid slugs: {invalid_api}"
         )));
@@ -127,11 +141,15 @@ fn normalize_requested_apis(apis: Vec<String>) -> Result<Vec<String>, AppError> 
 
 fn validate_requested_apis(
     client: &ClientConfig,
-    requested_apis: &[String],
+    requested_apis: &BTreeMap<String, AccessLevel>,
     state: &AppState,
 ) -> Result<(), AppError> {
-    for api in requested_apis {
-        if !state.secrets().apis.contains_key(api) || !client.allowed_apis.contains(api) {
+    for (api, requested_access) in requested_apis {
+        let Some(configured_access) = client.api_access.get(api) else {
+            return Err(AppError::ForbiddenApi { api: api.clone() });
+        };
+
+        if !state.secrets().apis.contains_key(api) || !configured_access.allows(*requested_access) {
             return Err(AppError::ForbiddenApi { api: api.clone() });
         }
     }

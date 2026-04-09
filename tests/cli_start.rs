@@ -18,7 +18,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"

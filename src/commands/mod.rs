@@ -153,6 +153,7 @@ fn map_config_add_client_args(args: ConfigAddClientArgs) -> config::ConfigAddCli
         name: args.name,
         api_key: args.api_key,
         api_key_expires_at: args.api_key_expires_at,
-        allowed_apis: args.allowed_api,
+        group: args.group,
+        api_access: args.api_access,
     }
 }

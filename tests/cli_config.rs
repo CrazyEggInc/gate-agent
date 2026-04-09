@@ -31,7 +31,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -49,7 +49,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -67,7 +67,7 @@ signing_secret = "stdin-replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "stdin-default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["stdin-projects"]
+api_access = { stdin-projects = "read" }
 
 [apis.stdin-projects]
 base_url = "https://stdin-projects.internal.example"
@@ -195,20 +195,6 @@ fn string_at<'a>(value: &'a Value, path: &[&str]) -> &'a str {
         .unwrap_or_else(|| panic!("missing string value at {}", path.join(".")))
 }
 
-fn array_at<'a>(value: &'a Value, path: &[&str]) -> &'a toml::value::Array {
-    let mut current = value;
-
-    for key in path {
-        current = current
-            .get(*key)
-            .unwrap_or_else(|| panic!("missing key: {key}"));
-    }
-
-    current
-        .as_array()
-        .unwrap_or_else(|| panic!("missing array value at {}", path.join(".")))
-}
-
 fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, Box<dyn std::error::Error>> {
     if value.len() != 20 {
         return Err(format!("unexpected timestamp length: {value}").into());
@@ -295,10 +281,8 @@ fn config_init_prefers_explicit_path_and_generates_minimal_config()
     );
     assert!(string_at(&config, &["auth", "signing_secret"]).len() >= 32);
     assert!(string_at(&config, &["clients", "default", "api_key"]).len() >= 32);
-    assert_eq!(
-        array_at(&config, &["clients", "default", "allowed_apis"]).len(),
-        0
-    );
+    assert!(nested_table(&config, &["clients", "default", "api_access"]).is_empty());
+    assert!(table(&config, "groups").is_empty());
     assert!(table(&config, "apis").is_empty());
     assert!(expires_at >= lower_bound);
     assert!(expires_at <= upper_bound);
@@ -494,7 +478,8 @@ fn config_add_client_prefers_local_creation_target_before_home_and_upserts_entry
         name: "partner".to_owned(),
         api_key: Some("partner-key".to_owned()),
         api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        allowed_apis: vec!["billing".to_owned(), "projects".to_owned()],
+        group: None,
+        api_access: vec!["billing=write,projects=read".to_owned()],
     })?;
     add_client(ConfigAddClientArgs {
         config: None,
@@ -503,7 +488,8 @@ fn config_add_client_prefers_local_creation_target_before_home_and_upserts_entry
         name: "partner".to_owned(),
         api_key: None,
         api_key_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
-        allowed_apis: vec!["projects".to_owned()],
+        group: None,
+        api_access: vec!["projects=write".to_owned()],
     })?;
 
     let config = load_toml(&config_path)?;
@@ -518,18 +504,348 @@ fn config_add_client_prefers_local_creation_target_before_home_and_upserts_entry
         Some("2031-02-03T04:05:06Z")
     );
     assert_eq!(
-        client
-            .get("allowed_apis")
-            .and_then(Value::as_array)
-            .expect("allowed_apis array")
-            .iter()
-            .map(|value| value.as_str().expect("string allowed_api"))
-            .collect::<Vec<_>>(),
-        vec!["projects"]
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "write"
+    );
+    assert_eq!(
+        nested_table(&config, &["clients", "partner", "api_access"]).len(),
+        1
     );
     assert_eq!(string_at(&config, &["auth", "issuer"]), "gate-agent");
     assert!(home_dir.join(".config/gate-agent/secrets").exists());
     assert!(!current_dir.join(".secrets").exists());
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec![
+            "projects=read,billing=write".to_owned(),
+            "reports=read".to_owned(),
+        ],
+    })?;
+
+    let config = load_toml(&config_path)?;
+
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "billing"]),
+        "write"
+    );
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "read"
+    );
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "reports"]),
+        "read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned(), "projects=write".to_owned()],
+    })
+    .expect_err("conflicting api access should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "conflicting api_access entries for api 'projects'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_invalid_api_access_level_with_clear_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=admin".to_owned()],
+    })
+    .expect_err("invalid api access level should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access level 'admin' must be one of: read, write"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec![",projects=read".to_owned()],
+    })
+    .expect_err("leading empty segment should be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access entries cannot contain empty comma-separated segments"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_trailing_comma_in_api_access_arg()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,".to_owned()],
+    })
+    .expect_err("trailing comma should be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access entries cannot contain empty comma-separated segments"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_doubled_comma_in_api_access_arg()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,,billing=write".to_owned()],
+    })
+    .expect_err("doubled comma should be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access entries cannot contain empty comma-separated segments"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,billing".to_owned()],
+    })
+    .expect_err("malformed comma-separated segment should be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid api_access entry 'billing'; expected api=level"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_writes_group_reference_without_inline_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+    write_text(
+        &config_path,
+        concat!(
+            "[auth]\n",
+            "issuer = \"gate-agent\"\n",
+            "audience = \"gate-agent-clients\"\n",
+            "signing_secret = \"replace-me-with-a-long-enough-secret\"\n\n",
+            "[clients.default]\n",
+            "api_key = \"default-client-key\"\n",
+            "api_key_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = {}\n\n",
+            "[groups.partner-readonly]\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example\"\n",
+            "auth_header = \"x-api-key\"\n",
+            "auth_value = \"projects-secret-value\"\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        api_key: Some("partner-key".to_owned()),
+        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: Some("partner-readonly".to_owned()),
+        api_access: vec![],
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let client = nested_table(&config, &["clients", "partner"]);
+
+    assert_eq!(
+        client.get("group").and_then(Value::as_str),
+        Some("partner-readonly")
+    );
+    assert!(client.get("api_access").is_none());
 
     Ok(())
 }
@@ -559,7 +875,8 @@ fn config_add_client_rejects_invalid_calendar_date_without_writing_client()
         name: "invalid-date-client".to_owned(),
         api_key: Some("partner-key".to_owned()),
         api_key_expires_at: Some("2030-02-31T04:05:06Z".to_owned()),
-        allowed_apis: vec!["projects".to_owned()],
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
     })
     .expect_err("invalid calendar date should be rejected");
 
@@ -614,7 +931,8 @@ fn config_commands_accept_explicit_relative_paths() -> Result<(), Box<dyn std::e
         name: "partner".to_owned(),
         api_key: Some("partner-key".to_owned()),
         api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        allowed_apis: vec!["projects".to_owned()],
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
     })?;
 
     assert_eq!(initialized_path, init_path);
@@ -631,6 +949,10 @@ fn config_commands_accept_explicit_relative_paths() -> Result<(), Box<dyn std::e
     assert_eq!(
         string_at(&config, &["clients", "partner", "api_key"]),
         "partner-key"
+    );
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "read"
     );
 
     Ok(())
@@ -663,7 +985,8 @@ fn config_add_client_rejects_malformed_clients_root_without_rewriting_file()
         name: "partner".to_owned(),
         api_key: Some("partner-key".to_owned()),
         api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        allowed_apis: vec!["projects".to_owned()],
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
     })
     .expect_err("malformed clients root should be rejected");
 
@@ -692,7 +1015,7 @@ fn config_add_api_rejects_malformed_apis_root_without_rewriting_file()
         "[clients.default]\n",
         "api_key = \"existing-key\"\n",
         "api_key_expires_at = \"2030-01-02T03:04:05Z\"\n",
-        "allowed_apis = []\n",
+        "api_access = {}\n",
     );
     std::fs::write(&config_path, original)?;
 
@@ -808,7 +1131,7 @@ fn config_validate_returns_non_zero_json_for_invalid_config()
 
     assert_eq!(
         error.to_string(),
-        r#"{"errors":[{"message":"clients.default.allowed_apis contains unknown api 'projects'"}]}"#
+        r#"{"errors":[{"message":"clients.default.api_access contains unknown api 'projects'"}]}"#
     );
 
     let output = Command::cargo_bin("gate-agent")?
@@ -824,7 +1147,7 @@ fn config_validate_returns_non_zero_json_for_invalid_config()
     assert_eq!(String::from_utf8(output.stdout)?, "");
     assert_eq!(
         String::from_utf8(output.stderr)?,
-        "{\"errors\":[{\"message\":\"clients.default.allowed_apis contains unknown api 'projects'\"}]}\n"
+        "{\"errors\":[{\"message\":\"clients.default.api_access contains unknown api 'projects'\"}]}\n"
     );
 
     Ok(())
@@ -838,7 +1161,7 @@ fn config_init_fails_when_target_already_exists() -> Result<(), Box<dyn std::err
     let config_path = temp_dir.path().join(".secrets");
     std::fs::write(
         &config_path,
-        "[auth]\nissuer='x'\naudience='y'\nsigning_secret='z'\n\n[clients.default]\napi_key='k'\napi_key_expires_at='2030-01-02T03:04:05Z'\nallowed_apis=[]\n\n[apis]\n",
+        "[auth]\nissuer='x'\naudience='y'\nsigning_secret='z'\n\n[clients.default]\napi_key='k'\napi_key_expires_at='2030-01-02T03:04:05Z'\napi_access={}\n\n[groups]\n\n[apis]\n",
     )?;
 
     let error = init(ConfigInitArgs {
@@ -860,7 +1183,7 @@ fn config_show_prints_plaintext_contents() -> Result<(), Box<dyn std::error::Err
     let temp_dir = tempdir()?;
     let _env = EnvGuard::enter(temp_dir.path())?;
     let config_path = temp_dir.path().join(".secrets");
-    let contents = "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\nallowed_apis = []\n\n[apis]\n";
+    let contents = "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\napi_access = {}\n\n[groups]\n\n[apis]\n";
     std::fs::write(&config_path, contents)?;
 
     let shown = show(ConfigShowArgs {
@@ -884,7 +1207,7 @@ fn config_edit_plaintext_uses_editor_and_persists_changes() -> Result<(), Box<dy
     let config_path = temp_dir.path().join(".secrets");
     std::fs::write(
         &config_path,
-        "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\nallowed_apis = []\n\n[apis]\n",
+        "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\napi_access = {}\n\n[groups]\n\n[apis]\n",
     )?;
     let script_path = temp_dir.path().join("editor.sh");
     std::fs::write(

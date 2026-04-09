@@ -18,12 +18,12 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [clients.partner]
 api_key = "partner-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = []
+api_access = {}
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -47,7 +47,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "{client_api_key}"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["{api_slug}"]
+api_access = {{ {api_slug} = "read" }}
 
 [apis.{api_slug}]
 base_url = "https://{api_slug}.internal.example"
@@ -80,7 +80,7 @@ fn curl_auth_mode_renders_exchange_request_for_default_client()
     assert!(payload.contains("request = \"POST\""));
     assert!(payload.contains("header = \"x-api-key: default-client-key\""));
     assert!(payload.contains("header = \"content-type: application/json\""));
-    assert!(payload.contains("data = \"{\\\"apis\\\":[\\\"projects\\\"]}\""));
+    assert!(payload.contains("data = \"{\\\"apis\\\":{\\\"projects\\\":\\\"read\\\"}}\""));
 
     Ok(())
 }
@@ -158,7 +158,7 @@ fn curl_proxy_mode_requires_path() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn curl_auth_mode_rejects_client_without_allowed_apis() -> Result<(), Box<dyn std::error::Error>> {
+fn curl_auth_mode_rejects_client_without_api_access() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_config_file()?;
 
     let error = render(CurlArgs {
@@ -177,7 +177,7 @@ fn curl_auth_mode_rejects_client_without_allowed_apis() -> Result<(), Box<dyn st
 
     assert_eq!(
         error.to_string(),
-        "client 'partner' has no allowed_apis configured"
+        "client 'partner' has no api_access configured"
     );
 
     Ok(())
@@ -242,7 +242,7 @@ fn curl_auth_mode_renders_exchange_request_from_stdin() -> Result<(), Box<dyn st
 
     assert!(stdout.contains("url = \"http://127.0.0.1:8787/auth/exchange\""));
     assert!(stdout.contains("header = \"x-api-key: stdin-client-key\""));
-    assert!(stdout.contains("data = \"{\\\"apis\\\":[\\\"stdin-projects\\\"]}\""));
+    assert!(stdout.contains("data = \"{\\\"apis\\\":{\\\"stdin-projects\\\":\\\"read\\\"}}\""));
 
     Ok(())
 }
@@ -297,9 +297,9 @@ fn curl_stdin_beats_explicit_config_path() -> Result<(), Box<dyn std::error::Err
     let stdout = String::from_utf8(output.stdout)?;
 
     assert!(stdout.contains("header = \"x-api-key: stdin-client-key\""));
-    assert!(stdout.contains("data = \"{\\\"apis\\\":[\\\"stdin-projects\\\"]}\""));
+    assert!(stdout.contains("data = \"{\\\"apis\\\":{\\\"stdin-projects\\\":\\\"read\\\"}}\""));
     assert!(!stdout.contains("default-client-key"));
-    assert!(!stdout.contains("data = \"{\\\"apis\\\":[\\\"projects\\\"]}\""));
+    assert!(!stdout.contains("data = \"{\\\"apis\\\":{\\\"projects\\\":\\\"read\\\"}}\""));
 
     Ok(())
 }

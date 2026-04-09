@@ -2,4 +2,5 @@ pub mod claims;
 pub mod exchange;
 pub mod jwt;
 
-pub use claims::JwtClaims;
+pub use crate::config::secrets::AccessLevel;
+pub use claims::{JwtClaims, JwtClaimsBuildError};

@@ -3,8 +3,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use http::header::HeaderName;
-use secrecy::SecretString;
-use serde::Deserialize;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::ConfigError;
@@ -42,7 +42,20 @@ pub struct ClientConfig {
     pub slug: String,
     pub api_key: SecretString,
     pub api_key_expires_at: UtcTimestamp,
-    pub allowed_apis: BTreeSet<String>,
+    pub api_access: BTreeMap<String, AccessLevel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLevel {
+    Read,
+    Write,
+}
+
+impl AccessLevel {
+    pub fn allows(self, required: Self) -> bool {
+        self >= required
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +82,8 @@ struct RawSecretsConfig {
     #[serde(default)]
     clients: BTreeMap<String, RawClientConfig>,
     #[serde(default)]
+    groups: BTreeMap<String, RawGroupConfig>,
+    #[serde(default)]
     apis: BTreeMap<String, RawApiConfig>,
 }
 
@@ -77,7 +92,14 @@ struct RawSecretsConfig {
 struct RawClientConfig {
     api_key: String,
     api_key_expires_at: String,
-    allowed_apis: Vec<String>,
+    group: Option<String>,
+    api_access: Option<BTreeMap<String, AccessLevel>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGroupConfig {
+    api_access: BTreeMap<String, AccessLevel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,10 +205,30 @@ impl SecretsConfig {
             apis.insert(slug, api);
         }
 
+        let mut groups = BTreeMap::new();
+
+        for (slug, raw_group) in raw_config.groups {
+            validate_slug("group", &slug)?;
+            let api_access = validate_api_access_map(
+                &format!("groups.{slug}.api_access"),
+                raw_group.api_access,
+                &apis,
+            )?;
+            groups.insert(slug, api_access);
+        }
+
         let mut clients = BTreeMap::new();
+        let mut client_api_keys = BTreeSet::new();
 
         for (slug, raw_client) in raw_config.clients {
-            let client = ClientConfig::try_from_raw(&slug, raw_client, &apis)?;
+            let client = ClientConfig::try_from_raw(&slug, raw_client, &groups, &apis)?;
+
+            if !client_api_keys.insert(client.api_key.expose_secret().to_owned()) {
+                return Err(ConfigError::new(format!(
+                    "clients.{slug}.api_key duplicates another configured client api_key"
+                )));
+            }
+
             clients.insert(slug, client);
         }
 
@@ -221,23 +263,10 @@ impl ClientConfig {
     fn try_from_raw(
         slug: &str,
         raw_config: RawClientConfig,
+        groups: &BTreeMap<String, BTreeMap<String, AccessLevel>>,
         apis: &BTreeMap<String, ApiConfig>,
     ) -> Result<Self, ConfigError> {
-        if slug.is_empty() {
-            return Err(ConfigError::new("client slug cannot be empty"));
-        }
-
-        if slug != slug.to_ascii_lowercase() {
-            return Err(ConfigError::new(format!(
-                "client slug '{slug}' must be lowercase"
-            )));
-        }
-
-        if !is_valid_slug(slug) {
-            return Err(ConfigError::new(format!(
-                "client slug '{slug}' must contain only lowercase letters, digits, or hyphen"
-            )));
-        }
+        validate_slug("client", slug)?;
 
         let api_key = SecretString::from(required_string(
             &format!("clients.{slug}.api_key"),
@@ -248,42 +277,36 @@ impl ClientConfig {
             raw_config.api_key_expires_at,
         )?;
 
-        let mut allowed_apis = BTreeSet::new();
-
-        for (index, allowed_api) in raw_config.allowed_apis.into_iter().enumerate() {
-            let field = format!("clients.{slug}.allowed_apis[{index}]");
-            if allowed_api.is_empty() {
-                return Err(ConfigError::new(format!("{field} cannot be empty")));
-            }
-
-            if allowed_api != allowed_api.to_ascii_lowercase() {
-                return Err(ConfigError::new(format!("{field} must be lowercase")));
-            }
-
-            if !is_valid_slug(&allowed_api) {
+        let api_access = match (raw_config.group, raw_config.api_access) {
+            (Some(_group), Some(_)) => {
                 return Err(ConfigError::new(format!(
-                    "{field} must contain only lowercase letters, digits, or hyphen"
+                    "clients.{slug} must specify exactly one of group or api_access"
                 )));
             }
-
-            if !allowed_apis.insert(allowed_api.clone()) {
+            (None, None) => {
                 return Err(ConfigError::new(format!(
-                    "clients.{slug}.allowed_apis contains duplicate api '{allowed_api}'"
+                    "clients.{slug} must specify exactly one of group or api_access"
                 )));
             }
-
-            if !apis.contains_key(&allowed_api) {
-                return Err(ConfigError::new(format!(
-                    "clients.{slug}.allowed_apis contains unknown api '{allowed_api}'"
-                )));
+            (Some(group), None) => {
+                let group = required_string(&format!("clients.{slug}.group"), group)?;
+                validate_slug("group", &group)?;
+                groups.get(&group).cloned().ok_or_else(|| {
+                    ConfigError::new(format!(
+                        "clients.{slug}.group references unknown group '{group}'"
+                    ))
+                })?
             }
-        }
+            (None, Some(api_access)) => {
+                validate_api_access_map(&format!("clients.{slug}.api_access"), api_access, apis)?
+            }
+        };
 
         Ok(Self {
             slug: slug.to_owned(),
             api_key,
             api_key_expires_at,
-            allowed_apis,
+            api_access,
         })
     }
 }
@@ -358,21 +381,7 @@ impl UtcTimestamp {
 
 impl ApiConfig {
     fn try_from_raw(slug: &str, raw_config: RawApiConfig) -> Result<Self, ConfigError> {
-        if slug.is_empty() {
-            return Err(ConfigError::new("api slug cannot be empty"));
-        }
-
-        if slug != slug.to_ascii_lowercase() {
-            return Err(ConfigError::new(format!(
-                "api slug '{slug}' must be lowercase"
-            )));
-        }
-
-        if !is_valid_slug(slug) {
-            return Err(ConfigError::new(format!(
-                "api slug '{slug}' must contain only lowercase letters, digits, or hyphen"
-            )));
-        }
+        validate_slug("api", slug)?;
 
         let base_url = Url::parse(&required_string(
             &format!("apis.{slug}.base_url"),
@@ -430,6 +439,52 @@ fn required_string(field: &str, value: String) -> Result<String, ConfigError> {
 
 fn optional_string(field: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {
     value.map(|value| required_string(field, value)).transpose()
+}
+
+fn validate_slug(kind: &str, value: &str) -> Result<(), ConfigError> {
+    if value.is_empty() {
+        return Err(ConfigError::new(format!("{kind} slug cannot be empty")));
+    }
+
+    if value != value.to_ascii_lowercase() {
+        return Err(ConfigError::new(format!(
+            "{kind} slug '{value}' must be lowercase"
+        )));
+    }
+
+    if !is_valid_slug(value) {
+        return Err(ConfigError::new(format!(
+            "{kind} slug '{value}' must contain only lowercase letters, digits, or hyphen"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_api_access_map(
+    field: &str,
+    api_access: BTreeMap<String, AccessLevel>,
+    apis: &BTreeMap<String, ApiConfig>,
+) -> Result<BTreeMap<String, AccessLevel>, ConfigError> {
+    let mut validated = BTreeMap::new();
+
+    for (api_slug, access_level) in api_access {
+        if !is_valid_slug(&api_slug) {
+            return Err(ConfigError::new(format!(
+                "{field} contains invalid api slug '{api_slug}'"
+            )));
+        }
+
+        if !apis.contains_key(&api_slug) {
+            return Err(ConfigError::new(format!(
+                "{field} contains unknown api '{api_slug}'"
+            )));
+        }
+
+        validated.insert(api_slug, access_level);
+    }
+
+    Ok(validated)
 }
 
 fn validate_date(field: &str, year: i32, month: u8, day: u8) -> Result<(), ConfigError> {

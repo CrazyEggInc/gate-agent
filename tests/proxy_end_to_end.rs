@@ -17,7 +17,8 @@ use secrecy::ExposeSecret;
 use support::{
     capture_channel, capture_request, load_multi_api_test_config, load_test_config,
     load_test_config_with_billing_timeout, signed_token, signed_token_for_client,
-    signed_token_with_subject_and_secret, spawn_chunked_upstream, spawn_upstream,
+    signed_token_with_access, signed_token_with_subject_and_secret, spawn_chunked_upstream,
+    spawn_upstream,
 };
 use tower::ServiceExt;
 
@@ -165,7 +166,9 @@ async fn proxy_route_uses_api_segment_for_billing_multi_api_token()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects","billing"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{"projects":"write","billing":"write"}}"#,
+                ))?,
         )
         .await?;
 
@@ -267,7 +270,9 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects","billing"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{"projects":"write","billing":"write"}}"#,
+                ))?,
         )
         .await?;
 
@@ -315,7 +320,9 @@ async fn proxy_route_rejects_multi_api_token_for_route_api_not_present_in_token(
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects","billing"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{"projects":"write","billing":"write"}}"#,
+                ))?,
         )
         .await?;
 
@@ -596,7 +603,7 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout_for_exchanged_toke
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["billing"]}"#))?,
+                .body(Body::from(r#"{"apis":{"billing":"write"}}"#))?,
         )
         .await?;
 
@@ -782,6 +789,202 @@ async fn proxy_route_preserves_double_slash_segments() -> Result<(), Box<dyn std
     let captured = rx.await?;
     assert_eq!(captured.path_and_query, "/api//double");
     assert_eq!(captured.body, bytes::Bytes::new());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_allows_get_with_read_token() -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/api/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token_with_access(
+        "billing",
+        gate_agent::auth::AccessLevel::Read,
+        config.secrets(),
+    )?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.method, "GET");
+    assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_rejects_post_with_read_token() -> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token_with_access(
+        "billing",
+        gate_agent::auth::AccessLevel::Read,
+        config.secrets(),
+    )?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "forbidden_api");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_allows_delete_with_write_token() -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/api/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token("billing", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.method, "DELETE");
+    assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_rejects_custom_method_with_read_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = signed_token_with_access(
+        "billing",
+        gate_agent::auth::AccessLevel::Read,
+        config.secrets(),
+    )?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("TRACE")
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "forbidden_api");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_authorizes_multi_api_token_by_route_api_and_method_required_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let exchange_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "default-client-key")
+                .body(Body::from(
+                    r#"{"apis":{"projects":"read","billing":"write"}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(exchange_response.status(), StatusCode::OK);
+
+    let exchange: gate_agent::auth::exchange::ExchangeResponse =
+        serde_json::from_slice(&exchange_response.into_body().collect().await?.to_bytes())?;
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/proxy/projects/path?expand=1")
+                .header("authorization", format!("Bearer {}", exchange.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let projects_request = rx.await?;
+    assert_eq!(projects_request.path_and_query, "/path?expand=1");
+    assert_eq!(projects_request.method, "GET");
+
+    let denied_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/proxy/projects/path")
+                .header("authorization", format!("Bearer {}", exchange.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(denied_response.status(), StatusCode::FORBIDDEN);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&denied_response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "forbidden_api");
 
     Ok(())
 }

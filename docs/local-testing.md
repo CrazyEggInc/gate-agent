@@ -42,8 +42,11 @@ Expected local defaults:
 
 - a `default` client is available for local use
 - the `default` client has an API key suitable for local auth exchange
+- the `default` client uses `group = "local-default"`
+- `groups.local-default` grants `api_access = { projects = "read" }`
 - the `projects` API points at the dummy upstream base URL
 - the `projects` API injects `Authorization: Bearer local-upstream-token` upstream
+- the sample config demonstrates a reusable group-based access assignment
 
 Typical setup:
 
@@ -101,6 +104,16 @@ This flow is used to obtain a short-lived JWT for subsequent proxy requests.
 
 `--client` selects which configured client performs the auth exchange. When omitted, the command uses `default`.
 
+The emitted auth request body uses the effective client access map. For the sample local config that means:
+
+```json
+{
+  "apis": {
+    "projects": "read"
+  }
+}
+```
+
 ### Proxy workflow
 
 The proxy workflow must produce a request to `/proxy/{api}{path}` against the local proxy.
@@ -115,8 +128,14 @@ Expected behavior:
 
 - the request targets the configured local bind address
 - the request carries `Authorization: Bearer <jwt>` to the proxy
-- the proxy authorizes access to the requested API slug
+- the proxy authorizes the requested API slug and required method access
 - the proxy injects upstream credentials from config before forwarding the request
+
+Method access rules during local testing:
+
+- `GET`, `HEAD`, `OPTIONS` require `read`
+- `POST`, `PUT`, `PATCH`, `DELETE` require `write`
+- any other HTTP method also requires `write`
 
 ### Config validation workflow
 
@@ -190,6 +209,7 @@ This verifies:
 - the dummy upstream is running
 - auth exchange is working
 - JWT-based proxy authorization is working
+- method-based read/write authorization is working
 - upstream auth injection is working
 - proxy path forwarding is working
 

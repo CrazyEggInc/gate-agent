@@ -5,7 +5,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{DocumentMut, Item, Table, value};
+
+use crate::config::secrets::AccessLevel;
 
 use super::ConfigError;
 use super::crypto::{
@@ -29,11 +31,17 @@ pub struct ApiUpsert {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientAccessUpsert {
+    Group(String),
+    ApiAccess(std::collections::BTreeMap<String, AccessLevel>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientUpsert {
     pub name: String,
     pub api_key: Option<String>,
     pub api_key_expires_at: Option<String>,
-    pub allowed_apis: Vec<String>,
+    pub access: ClientAccessUpsert,
 }
 
 #[derive(Debug)]
@@ -148,7 +156,16 @@ pub fn upsert_client(
 
     set_string(client_table, "api_key", &api_key);
     set_string(client_table, "api_key_expires_at", &api_key_expires_at);
-    set_string_array(client_table, "allowed_apis", &client.allowed_apis);
+    match &client.access {
+        ClientAccessUpsert::Group(group) => {
+            set_string(client_table, "group", group);
+            client_table.remove("api_access");
+        }
+        ClientAccessUpsert::ApiAccess(api_access) => {
+            client_table.remove("group");
+            set_api_access_inline_table(client_table, "api_access", api_access);
+        }
+    }
 
     write_loaded_config(path, &loaded, &document.to_string(), password)
 }
@@ -201,7 +218,7 @@ fn render_initial_config() -> Result<String, WriteConfigError> {
     let api_key_expires_at = default_api_key_expires_at()?;
 
     Ok(format!(
-        "[auth]\nissuer = \"{DEFAULT_AUTH_ISSUER}\"\naudience = \"{DEFAULT_AUTH_AUDIENCE}\"\nsigning_secret = \"{signing_secret}\"\n\n[clients.default]\napi_key = \"{api_key}\"\napi_key_expires_at = \"{api_key_expires_at}\"\nallowed_apis = []\n\n[apis]\n"
+        "[auth]\nissuer = \"{DEFAULT_AUTH_ISSUER}\"\naudience = \"{DEFAULT_AUTH_AUDIENCE}\"\nsigning_secret = \"{signing_secret}\"\n\n[clients.default]\napi_key = \"{api_key}\"\napi_key_expires_at = \"{api_key_expires_at}\"\napi_access = {{}}\n\n[groups]\n\n[apis]\n"
     ))
 }
 
@@ -253,12 +270,22 @@ fn set_integer(table: &mut Table, key: &str, value_int: u64) -> Result<(), Write
     Ok(())
 }
 
-fn set_string_array(table: &mut Table, key: &str, values: &[String]) {
-    let mut array = Array::default();
-    for value_str in values {
-        array.push(value_str.as_str());
+fn set_api_access_inline_table(
+    table: &mut Table,
+    key: &str,
+    values: &std::collections::BTreeMap<String, AccessLevel>,
+) {
+    let mut inline = toml_edit::InlineTable::new();
+    for (api, level) in values {
+        inline.insert(
+            api,
+            toml_edit::Value::from(match level {
+                AccessLevel::Read => "read",
+                AccessLevel::Write => "write",
+            }),
+        );
     }
-    table[key] = value(array);
+    table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
 }
 
 fn generate_secret(byte_len: usize) -> Result<String, WriteConfigError> {

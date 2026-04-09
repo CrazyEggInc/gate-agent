@@ -13,7 +13,7 @@ use axum::{
 use gate_agent::{
     auth::{
         claims::JwtClaims,
-        jwt::{sign_local_test_token_at, sign_local_test_token_for_client_at},
+        jwt::{sign_local_test_token_for_client_with_access_at, sign_local_test_token_with_access},
     },
     config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
 };
@@ -88,12 +88,12 @@ signing_secret = "replace-me"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects", "billing"]
+api_access = {{ projects = "write", billing = "write" }}
 
 [clients.partner]
 api_key = "partner-client-key"
 api_key_expires_at = "2030-01-03T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = {{ projects = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -132,12 +132,12 @@ signing_secret = "replace-me"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["billing"]
+api_access = {{ billing = "write" }}
 
 [clients.partner]
 api_key = "partner-client-key"
 api_key_expires_at = "2030-01-03T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = {{ projects = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -166,10 +166,15 @@ pub fn signed_token(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let issued_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    Ok(sign_local_test_token_at(api, secrets, issued_at, 600)?)
+    signed_token_with_access(api, gate_agent::auth::AccessLevel::Write, secrets)
+}
+
+pub fn signed_token_with_access(
+    api: &str,
+    access: gate_agent::auth::AccessLevel,
+    secrets: &SecretsConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(sign_local_test_token_with_access(api, access, secrets)?)
 }
 
 pub fn signed_token_for_client(
@@ -177,12 +182,27 @@ pub fn signed_token_for_client(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    signed_token_for_client_with_access(
+        client_slug,
+        api,
+        gate_agent::auth::AccessLevel::Write,
+        secrets,
+    )
+}
+
+pub fn signed_token_for_client_with_access(
+    client_slug: &str,
+    api: &str,
+    access: gate_agent::auth::AccessLevel,
+    secrets: &SecretsConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
     let issued_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    Ok(sign_local_test_token_for_client_at(
+    Ok(sign_local_test_token_for_client_with_access_at(
         client_slug,
         api,
+        access,
         secrets,
         issued_at,
         600,
@@ -200,12 +220,12 @@ pub fn signed_token_with_subject_and_secret(
         .as_secs();
     let claims = JwtClaims::new(
         subject_client_slug.to_owned(),
-        [api.to_owned()],
+        [(api.to_owned(), gate_agent::auth::AccessLevel::Write)],
         secrets.auth.issuer.clone(),
         secrets.auth.audience.clone(),
         issued_at,
         issued_at + 600,
-    );
+    )?;
 
     Ok(encode(
         &Header::new(Algorithm::HS256),

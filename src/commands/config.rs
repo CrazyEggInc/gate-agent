@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +18,8 @@ use crate::config::password::{
 };
 use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
 use crate::config::secrets::SecretsConfig;
-use crate::config::write::{self, ApiUpsert, ClientUpsert, WriteConfigError};
+use crate::config::secrets::{AccessLevel, is_valid_slug};
+use crate::config::write::{self, ApiUpsert, ClientAccessUpsert, ClientUpsert, WriteConfigError};
 
 #[derive(Debug)]
 pub struct ConfigCommandError {
@@ -121,7 +123,8 @@ pub struct ConfigAddClientArgs {
     pub name: String,
     pub api_key: Option<String>,
     pub api_key_expires_at: Option<String>,
-    pub allowed_apis: Vec<String>,
+    pub group: Option<String>,
+    pub api_access: Vec<String>,
 }
 
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
@@ -357,13 +360,17 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
         })
         .transpose()?;
 
-    let mut allowed_apis = args.allowed_apis;
-    allowed_apis.sort();
-    allowed_apis.dedup();
+    let group = args
+        .group
+        .as_deref()
+        .map(|value| {
+            let value = trimmed_required("group", value)?;
+            ensure_slug("group", &value)?;
+            Ok::<String, ConfigCommandError>(value)
+        })
+        .transpose()?;
 
-    for api in &allowed_apis {
-        ensure_slug("allowed api", api)?;
-    }
+    let api_access = parse_api_access_args(&args.api_access)?;
 
     let path = resolve_target_path(args.config.as_deref())?;
     ensure_config_exists(&path)?;
@@ -374,7 +381,10 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
             name: args.name,
             api_key,
             api_key_expires_at,
-            allowed_apis,
+            access: match group {
+                Some(group) => ClientAccessUpsert::Group(group),
+                None => ClientAccessUpsert::ApiAccess(api_access),
+            },
         },
         password.as_ref(),
     )?;
@@ -490,6 +500,70 @@ fn ensure_slug(kind: &str, value: &str) -> Result<(), ConfigCommandError> {
     }
 
     Ok(())
+}
+
+fn parse_api_access_args(
+    api_access_args: &[String],
+) -> Result<BTreeMap<String, AccessLevel>, ConfigCommandError> {
+    let mut api_access = BTreeMap::new();
+
+    for raw_arg in api_access_args {
+        for raw_pair in raw_arg.split(',') {
+            let raw_pair = raw_pair.trim();
+            if raw_pair.is_empty() {
+                return Err(ConfigCommandError::new(
+                    "api_access entries cannot contain empty comma-separated segments".to_owned(),
+                ));
+            }
+
+            let (api, level) = raw_pair.split_once('=').ok_or_else(|| {
+                ConfigCommandError::new(format!(
+                    "invalid api_access entry '{raw_pair}'; expected api=level"
+                ))
+            })?;
+
+            let api = api.trim();
+            let level = level.trim();
+
+            if api.is_empty() {
+                return Err(ConfigCommandError::new(
+                    "api_access api slug cannot be empty".to_owned(),
+                ));
+            }
+
+            if level.is_empty() {
+                return Err(ConfigCommandError::new(format!(
+                    "api_access level cannot be empty for api '{api}'"
+                )));
+            }
+
+            if !is_valid_slug(api) {
+                return Err(ConfigCommandError::new(format!(
+                    "api_access api slug '{api}' must contain only lowercase letters, digits, or hyphen"
+                )));
+            }
+
+            let level = match level {
+                "read" => AccessLevel::Read,
+                "write" => AccessLevel::Write,
+                _ => {
+                    return Err(ConfigCommandError::new(format!(
+                        "api_access level '{level}' must be one of: read, write"
+                    )));
+                }
+            };
+
+            if let Some(existing) = api_access.insert(api.to_owned(), level) {
+                if existing != level {
+                    return Err(ConfigCommandError::new(format!(
+                        "conflicting api_access entries for api '{api}'"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(api_access)
 }
 
 fn validate_base_url(base_url: &str, slug: &str) -> Result<(), ConfigCommandError> {

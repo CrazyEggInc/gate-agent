@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     extract::{Path, State},
-    http::{Request, StatusCode, header},
+    http::{Method, Request, StatusCode, header},
     response::Response,
     routing::{any, post},
 };
@@ -18,6 +18,7 @@ use tracing::{Level, info};
 use crate::app::AppState;
 use crate::auth::exchange::exchange_handler;
 use crate::auth::jwt::validate_bearer_authorized_request;
+use crate::config::secrets::AccessLevel;
 use crate::error::{AppError, LoggedErrorCode};
 use crate::telemetry::{
     LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs, sanitize_url_for_logs,
@@ -233,9 +234,17 @@ async fn handle_proxy_request(
     let authorization_header =
         extract_authorization_header(authorization_header).map_err(proxy_error_without_client)?;
 
+    let required_access = required_access_for_method(request.method());
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())
         .map_err(proxy_error_without_client)?;
-    if !authorized.claims.apis().contains(&api_slug) {
+    let Some(token_access) = authorized.claims.apis.get(&api_slug).copied() else {
+        return Err(proxy_error_with_client(
+            AppError::ForbiddenApi { api: api_slug },
+            authorized.client_slug,
+        ));
+    };
+
+    if !token_access.allows(required_access) {
         return Err(proxy_error_with_client(
             AppError::ForbiddenApi { api: api_slug },
             authorized.client_slug,
@@ -293,6 +302,13 @@ fn extract_authorization_header(headers: &http::HeaderMap) -> Result<&str, AppEr
     }
 
     value.to_str().map_err(|_| AppError::InvalidToken)
+}
+
+fn required_access_for_method(method: &Method) -> AccessLevel {
+    match method {
+        &Method::GET | &Method::HEAD | &Method::OPTIONS => AccessLevel::Read,
+        _ => AccessLevel::Write,
+    }
 }
 
 fn request_id_from_request(request: &Request<Body>) -> Option<String> {
