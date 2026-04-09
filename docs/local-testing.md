@@ -57,7 +57,15 @@ The local proxy must then be started against that config file:
 cargo run -- start --config .secrets --log-level info
 ```
 
+Stdin-backed startup is also supported. When stdin contains non-whitespace config content, it overrides `--config`, `GATE_AGENT_CONFIG`, `./.secrets`, and the home fallback:
+
+```sh
+cat .secrets.example | cargo run -- start --log-level info
+```
+
 When local debugging needs proxy telemetry, rerun the server with `--log-level debug`. Debug logging should stay free of noisy `reqwest` or `hyper` connection chatter, while the normal proxy completion info log includes safe upstream request details.
+
+Request completion logs also include `client_id` on every request. Successful auth and proxy requests record the authenticated client slug; unauthenticated failures log `client_id = "<unknown>"`.
 
 ## `curl` helper
 
@@ -102,6 +110,28 @@ Expected behavior:
 - the request carries `Authorization: Bearer <jwt>` to the proxy
 - the proxy authorizes access to the requested API slug
 - the proxy injects upstream credentials from config before forwarding the request
+
+### Config validation workflow
+
+Operators can verify runtime config loading before starting the server.
+
+Path-backed example:
+
+```sh
+cargo run -- config validate --config .secrets
+```
+
+Stdin-backed example:
+
+```sh
+cat .secrets.example | cargo run -- config validate
+```
+
+Expected behavior:
+
+- valid config prints `config is valid`
+- invalid config prints a JSON error payload to stderr and exits non-zero
+- validation uses the same strict parser and source-resolution behavior as `start`
 
 ## Recommended local smoke test
 

@@ -101,11 +101,12 @@ impl SecretsConfig {
             ))
         })?;
 
-        let raw_config: RawSecretsConfig = toml::from_str(&contents).map_err(|error| {
-            ConfigError::new(format!(
-                "failed to parse config file '{}': {error}",
-                path.display()
-            ))
+        Self::parse(&contents, &format!("file '{}'", path.display()))
+    }
+
+    pub fn parse(contents: &str, source_label: &str) -> Result<Self, ConfigError> {
+        let raw_config: RawSecretsConfig = toml::from_str(contents).map_err(|error| {
+            ConfigError::new(format!("failed to parse config {source_label}: {error}"))
         })?;
 
         Self::try_from_raw(raw_config)

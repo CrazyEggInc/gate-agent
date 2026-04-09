@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use gate_agent::cli::StartArgs;
-use gate_agent::config::app_config::AppConfig;
+use gate_agent::config::{
+    ConfigSource,
+    app_config::{AppConfig, StartConfigStdin},
+};
 use tempfile::tempdir;
 
 const CONFIG_ENV_VAR: &str = "GATE_AGENT_CONFIG";
@@ -48,6 +51,35 @@ auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
 "#;
+
+const STDIN_CONFIG: &str = r#"
+[auth]
+issuer = "stdin-gate-agent-dev"
+audience = "stdin-gate-agent-clients"
+signing_secret = "stdin-replace-me"
+
+[clients.default]
+api_key = "stdin-default-client-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+allowed_apis = ["projects"]
+
+[apis.projects]
+base_url = "https://stdin-projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "stdin-projects-secret-value"
+timeout_ms = 7000
+"#;
+
+fn load_config(args: &StartArgs) -> Result<AppConfig, gate_agent::config::ConfigError> {
+    AppConfig::from_start_args_with_stdin(args, StartConfigStdin::terminal())
+}
+
+fn load_config_with_stdin(
+    args: &StartArgs,
+    stdin: impl Into<Vec<u8>>,
+) -> Result<AppConfig, gate_agent::config::ConfigError> {
+    AppConfig::from_start_args_with_stdin(args, StartConfigStdin::piped(stdin))
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -149,13 +181,43 @@ fn start_config_loads_runtime_flags_and_resolved_config_path()
         log_level: " debug ".to_string(),
     };
 
-    let config = AppConfig::from_start_args(&args)?;
+    let config = load_config(&args)?;
 
-    assert_eq!(config.bind, "127.0.0.1:9898".parse::<SocketAddr>()?);
-    assert_eq!(config.log_level, "debug");
-    assert_eq!(config.config_file, config_file);
-    assert_eq!(config.secrets.clients.len(), 1);
-    assert_eq!(config.secrets.apis.len(), 1);
+    assert_eq!(config.bind(), "127.0.0.1:9898".parse::<SocketAddr>()?);
+    assert_eq!(config.log_level(), "debug");
+    assert_eq!(config.config_source(), &ConfigSource::Path(config_file));
+    assert_eq!(config.secrets().clients.len(), 1);
+    assert_eq!(config.secrets().apis.len(), 1);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_exposes_stable_config_source_accessors() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
+
+    let args = StartArgs {
+        bind: "127.0.0.1:9898".parse::<SocketAddr>()?,
+        config: Some(config_file.clone()),
+        log_level: "debug".to_string(),
+    };
+
+    let file_config = load_config(&args)?;
+
+    assert_eq!(file_config.bind(), "127.0.0.1:9898".parse::<SocketAddr>()?);
+    assert_eq!(file_config.log_level(), "debug");
+    assert_eq!(file_config.secrets().clients.len(), 1);
+    assert_eq!(
+        file_config.config_source(),
+        &ConfigSource::Path(config_file.clone())
+    );
+    assert_eq!(file_config.config_path(), Some(config_file.as_path()));
+
+    let stdin_config = load_config_with_stdin(&args, STDIN_CONFIG)?;
+
+    assert_eq!(stdin_config.config_source(), &ConfigSource::Stdin);
+    assert_eq!(stdin_config.config_path(), None);
 
     Ok(())
 }
@@ -171,7 +233,7 @@ fn start_config_rejects_blank_log_level() -> Result<(), Box<dyn std::error::Erro
         log_level: "   ".to_string(),
     };
 
-    let error = AppConfig::from_start_args(&args).unwrap_err();
+    let error = load_config(&args).unwrap_err();
 
     assert_eq!(error.to_string(), "log level cannot be empty");
 
@@ -194,11 +256,11 @@ fn start_config_uses_env_resolved_path_when_cli_omits_config_override()
         log_level: "info".to_string(),
     };
 
-    let config = AppConfig::from_start_args(&args)?;
+    let config = load_config(&args)?;
 
-    assert_eq!(config.config_file, config_file);
-    assert_eq!(config.secrets.clients.len(), 1);
-    assert_eq!(config.secrets.apis.len(), 1);
+    assert_eq!(config.config_source(), &ConfigSource::Path(config_file));
+    assert_eq!(config.secrets().clients.len(), 1);
+    assert_eq!(config.secrets().apis.len(), 1);
 
     Ok(())
 }
@@ -223,9 +285,9 @@ fn start_config_uses_local_default_before_home_fallback() -> Result<(), Box<dyn 
         log_level: "info".to_string(),
     };
 
-    let config = AppConfig::from_start_args(&args)?;
+    let config = load_config(&args)?;
 
-    assert_eq!(config.config_file, local_config);
+    assert_eq!(config.config_source(), &ConfigSource::Path(local_config));
 
     Ok(())
 }
@@ -248,9 +310,9 @@ fn start_config_uses_home_fallback_when_local_default_is_missing()
         log_level: "info".to_string(),
     };
 
-    let config = AppConfig::from_start_args(&args)?;
+    let config = load_config(&args)?;
 
-    assert_eq!(config.config_file, home_config);
+    assert_eq!(config.config_source(), &ConfigSource::Path(home_config));
 
     Ok(())
 }
@@ -272,7 +334,7 @@ fn start_config_fails_fast_when_no_resolved_config_exists() -> Result<(), Box<dy
         log_level: "info".to_string(),
     };
 
-    let error = AppConfig::from_start_args(&args).unwrap_err();
+    let error = load_config(&args).unwrap_err();
 
     assert_eq!(
         error.to_string(),
@@ -282,6 +344,111 @@ fn start_config_fails_fast_when_no_resolved_config_exists() -> Result<(), Box<dy
             home_dir.join(".config/gate-agent/secrets").display(),
         )
     );
+
+    Ok(())
+}
+
+#[test]
+fn start_config_prefers_stdin_over_cli_config_path() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: Some(config_file),
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
+
+    assert_eq!(config.config_source(), &ConfigSource::Stdin);
+    assert_eq!(config.secrets().auth.issuer, "stdin-gate-agent-dev");
+    assert_eq!(config.secrets().auth.audience, "stdin-gate-agent-clients");
+
+    Ok(())
+}
+
+#[test]
+fn start_config_prefers_stdin_over_env_config_path() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-secrets.toml", VALID_CONFIG)?;
+
+    unsafe {
+        std::env::set_var(CONFIG_ENV_VAR, &config_file);
+    }
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
+
+    assert_eq!(config.config_source(), &ConfigSource::Stdin);
+    assert_eq!(config.secrets().auth.issuer, "stdin-gate-agent-dev");
+
+    Ok(())
+}
+
+#[test]
+fn start_config_ignores_empty_piped_stdin_and_falls_back_to_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: Some(config_file.clone()),
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config_with_stdin(&args, "  \n\t  ")?;
+
+    assert_eq!(config.config_source(), &ConfigSource::Path(config_file));
+    assert_eq!(config.secrets().auth.issuer, "gate-agent-dev");
+
+    Ok(())
+}
+
+#[test]
+fn start_config_reports_stdin_as_chosen_source() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
+
+    assert_eq!(config.config_source(), &ConfigSource::Stdin);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_cli_path_still_beats_env_when_stdin_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_cli_dir, cli_config) = write_config_file("cli-config.toml", VALID_CONFIG)?;
+    let (_env_dir, env_config) = write_config_file("env-config.toml", STDIN_CONFIG)?;
+
+    unsafe {
+        std::env::set_var(CONFIG_ENV_VAR, &env_config);
+    }
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: Some(cli_config.clone()),
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config(&args)?;
+
+    assert_eq!(config.config_source(), &ConfigSource::Path(cli_config));
+    assert_eq!(config.secrets().auth.issuer, "gate-agent-dev");
 
     Ok(())
 }

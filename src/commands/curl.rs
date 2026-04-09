@@ -45,7 +45,7 @@ fn render_auth_payload(args: &CurlArgs, config: &AppConfig) -> Result<String, Co
     }
 
     let client = config
-        .secrets
+        .secrets()
         .clients
         .get(&args.client)
         .ok_or_else(|| CommandError::new(format!("unknown client '{}'", args.client)))?;
@@ -104,7 +104,7 @@ fn render_proxy_payload(args: &CurlArgs, config: &AppConfig) -> Result<String, C
         return Err(CommandError::new("path must start with '/'"));
     }
 
-    if !config.secrets.apis.contains_key(api) {
+    if !config.secrets().apis.contains_key(api) {
         return Err(CommandError::new(format!("unknown api '{}'", api)));
     }
 
@@ -119,11 +119,11 @@ fn render_proxy_payload(args: &CurlArgs, config: &AppConfig) -> Result<String, C
 }
 
 fn local_auth_url(config: &AppConfig) -> String {
-    format!("http://{}/auth/exchange", config.bind)
+    format!("http://{}/auth/exchange", config.bind())
 }
 
 fn local_proxy_url(config: &AppConfig, api: &str, path: &str) -> String {
-    format!("http://{}/proxy/{api}{path}", config.bind)
+    format!("http://{}/proxy/{api}{path}", config.bind())
 }
 
 fn escape_for_curl_config(value: &str) -> String {

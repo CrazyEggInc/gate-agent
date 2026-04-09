@@ -113,7 +113,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     );
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let logs = captured_dispatch("debug", || async {
@@ -142,6 +142,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     .await?;
 
     assert!(logs.contains("status=201 Created"), "logs were: {logs}");
+    assert!(logs.contains("client_id=default"), "logs were: {logs}");
     assert!(logs.contains("latency_ms="), "logs were: {logs}");
     assert!(logs.contains("api=billing"), "logs were: {logs}");
     assert!(logs.contains("upstream_method=GET"), "logs were: {logs}");
@@ -211,7 +212,7 @@ async fn completion_logs_add_error_code_only_for_application_errors()
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token_for_client("default", "billing", &config.secrets)?;
+    let token = signed_token_for_client("default", "billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let logs = captured_dispatch("debug", || async {
@@ -232,12 +233,85 @@ async fn completion_logs_add_error_code_only_for_application_errors()
     .await?;
 
     assert!(logs.contains("status=403 Forbidden"), "logs were: {logs}");
+    assert!(logs.contains("client_id=default"), "logs were: {logs}");
     assert!(
         logs.contains("error_code=\"forbidden_api\""),
         "logs were: {logs}"
     );
     assert!(!logs.contains("upstream_method="), "logs were: {logs}");
     assert!(!logs.contains("upstream_status="), "logs were: {logs}");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_token_completion_logs_keep_default_client_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/proxy/billing/v1/projects/1/tasks")
+                    .header("x-request-id", "req-invalid-token")
+                    .header("authorization", "Bearer not-a-real-token")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    })
+    .await?;
+
+    assert!(
+        logs.contains("status=401 Unauthorized"),
+        "logs were: {logs}"
+    );
+    assert!(logs.contains("client_id=<unknown>"), "logs were: {logs}");
+    assert!(
+        logs.contains("error_code=\"invalid_token\""),
+        "logs were: {logs}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_auth_exchange_completion_logs_include_client_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/exchange")
+                    .header("x-request-id", "req-exchange")
+                    .header("x-api-key", "default-client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"apis":["billing"]}"#))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        Ok(())
+    })
+    .await?;
+
+    assert!(logs.contains("status=200 OK"), "logs were: {logs}");
+    assert!(logs.contains("client_id=default"), "logs were: {logs}");
+    assert!(!logs.contains("error_code="), "logs were: {logs}");
 
     Ok(())
 }

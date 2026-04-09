@@ -56,6 +56,8 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
 
     assert!(stdout.contains("init"));
     assert!(stdout.contains("Create a new config file"));
+    assert!(stdout.contains("validate"));
+    assert!(stdout.contains("Validate config from stdin or file"));
     assert!(stdout.contains("add-api"));
     assert!(stdout.contains("Add an upstream API entry"));
     assert!(stdout.contains("add-client"));
@@ -90,6 +92,19 @@ fn config_init_help_uses_config_flag_without_secrets_file_placeholder()
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("Create a new config file"));
+    assert!(!stdout.contains("--secrets-file"));
+    assert!(!stdout.contains("SECRETS_FILE"));
+
+    Ok(())
+}
+
+#[test]
+fn config_validate_help_uses_config_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "validate", "--help"])?;
+
+    assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--log-level"));
+    assert!(stdout.contains("Validate config from stdin or file"));
     assert!(!stdout.contains("--secrets-file"));
     assert!(!stdout.contains("SECRETS_FILE"));
 

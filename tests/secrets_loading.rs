@@ -94,6 +94,82 @@ timeout_ms = 5000
 }
 
 #[test]
+fn secrets_config_parses_valid_toml_from_source_label() -> Result<(), Box<dyn std::error::Error>> {
+    let config = SecretsConfig::parse(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "client-api-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+allowed_apis = ["billing"]
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#,
+        "stdin",
+    )?;
+
+    let client = config
+        .clients
+        .get("default")
+        .expect("default client config");
+    let api = config.apis.get("billing").expect("billing api config");
+
+    assert_eq!(config.auth.issuer, "gate-agent-dev");
+    assert_eq!(config.auth.audience, "gate-agent-clients");
+    assert_eq!(config.auth.signing_secret.expose_secret(), "rotate-me");
+    assert_eq!(client.slug, "default");
+    assert_eq!(client.api_key.expose_secret(), "client-api-key");
+    assert_eq!(client.api_key_expires_at.as_str(), "2026-10-08T12:00:00Z");
+    assert_eq!(
+        client.allowed_apis.iter().collect::<Vec<_>>(),
+        vec![&"billing"]
+    );
+    assert_eq!(api.slug, "billing");
+    assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
+    assert_eq!(api.auth_header.as_str(), "authorization");
+    assert_eq!(api.auth_scheme.as_deref(), Some("Bearer"));
+    assert_eq!(api.auth_value.expose_secret(), "billing-secret-token");
+    assert_eq!(api.timeout_ms, 5000);
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_parse_errors_use_stdin_source_label() {
+    let error = SecretsConfig::parse(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "client-api-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+allowed_apis = ["billing"
+"#,
+        "stdin",
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to parse config stdin:")
+    );
+    assert!(!error.to_string().contains("config file"));
+}
+
+#[test]
 fn secrets_config_loads_multiple_clients_sharing_one_api() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_temp_dir, secrets_file) = write_secrets_file(

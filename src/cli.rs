@@ -88,6 +88,8 @@ pub struct ConfigArgs {
 pub enum ConfigCommand {
     #[command(about = "Create a new config file")]
     Init(ConfigInitArgs),
+    #[command(about = "Validate config from stdin or file")]
+    Validate(ConfigValidateArgs),
     #[command(name = "add-api")]
     #[command(about = "Add an upstream API entry")]
     AddApi(ConfigAddApiArgs),
@@ -98,6 +100,15 @@ pub enum ConfigCommand {
 
 #[derive(Clone, Debug, Args)]
 pub struct ConfigInitArgs {
+    #[arg(long, help = "Path to the config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ConfigValidateArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
 
@@ -165,6 +176,7 @@ impl Command {
             Self::Curl(args) => &args.log_level,
             Self::Config(args) => match &args.command {
                 ConfigCommand::Init(args) => &args.log_level,
+                ConfigCommand::Validate(args) => &args.log_level,
                 ConfigCommand::AddApi(args) => &args.log_level,
                 ConfigCommand::AddClient(args) => &args.log_level,
             },

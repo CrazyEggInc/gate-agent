@@ -21,6 +21,7 @@ The router also applies:
 
 - request timeout layer with 60 second outer timeout
 - request ID generation and propagation through `x-request-id`
+- request completion logging with `client_id` on every request
 
 The per-request outer timeout is separate from the per-upstream timeout configured on each API entry.
 
@@ -102,6 +103,15 @@ Response expectations:
 - stream upstream response bodies back to the caller
 - strip hop-by-hop headers from upstream responses
 - preserve non-hop-by-hop headers
+
+## Proxy telemetry
+
+Proxy completion logs must include:
+
+- `client_id` on every request completion log
+- the authenticated client slug when JWT validation succeeds, otherwise `<unknown>`
+- safe upstream metadata for proxied requests: API slug, outbound method, outbound URL, upstream status, and timeout
+- `error_code` only when the response came from an application error
 
 ## Hop-by-hop header logic
 

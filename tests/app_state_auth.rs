@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use gate_agent::{
     app::AppState,
-    config::{app_config::AppConfig, secrets::SecretsConfig},
+    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
     error::AppError,
 };
 use tempfile::tempdir;
@@ -19,12 +19,12 @@ fn write_secrets_file(
 fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_secrets_file(contents)?;
 
-    let config = AppConfig {
-        bind: "127.0.0.1:0".parse()?,
-        log_level: "debug".to_owned(),
-        config_file: config_file.clone(),
-        secrets: SecretsConfig::load_from_file(&config_file)?,
-    };
+    let config = AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    );
 
     Ok(AppState::from_config(&config)?)
 }
@@ -32,12 +32,12 @@ fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
 fn load_config(contents: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_secrets_file(contents)?;
 
-    Ok(AppConfig {
-        bind: "127.0.0.1:0".parse()?,
-        log_level: "debug".to_owned(),
-        config_file: config_file.clone(),
-        secrets: SecretsConfig::load_from_file(&config_file)?,
-    })
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
 }
 
 const VALID_SECRETS: &str = r#"

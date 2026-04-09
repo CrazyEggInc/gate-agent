@@ -7,7 +7,7 @@ use axum::{
 use gate_agent::{
     app::AppState,
     auth::{exchange::ExchangeResponse, jwt::validate_token},
-    config::{app_config::AppConfig, secrets::SecretsConfig},
+    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
     proxy::router::build_router,
 };
 use http_body_util::BodyExt;
@@ -25,12 +25,12 @@ fn write_secrets_file(
 fn load_config(contents: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_secrets_file(contents)?;
 
-    Ok(AppConfig {
-        bind: "127.0.0.1:0".parse()?,
-        log_level: "debug".to_owned(),
-        config_file: config_file.clone(),
-        secrets: SecretsConfig::load_from_file(&config_file)?,
-    })
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
 }
 
 const VALID_SECRETS: &str = r#"
@@ -84,7 +84,7 @@ async fn auth_exchange_returns_server_signed_token_for_one_api()
 
     let exchange: ExchangeResponse =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
-    let claims = validate_token(&exchange.access_token, &config.secrets)?;
+    let claims = validate_token(&exchange.access_token, config.secrets())?;
 
     assert_eq!(exchange.token_type, "Bearer");
     assert_eq!(exchange.expires_in, 600);
@@ -118,7 +118,7 @@ async fn auth_exchange_normalizes_multiple_requested_apis_before_signing()
 
     let exchange: ExchangeResponse =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
-    let claims = validate_token(&exchange.access_token, &config.secrets)?;
+    let claims = validate_token(&exchange.access_token, config.secrets())?;
 
     assert_eq!(claims.sub, "default");
     assert_eq!(claims.apis(), vec!["billing", "projects"]);

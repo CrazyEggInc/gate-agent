@@ -29,7 +29,7 @@ cargo run -- start --config .secrets --log-level debug
 
 # call apis using gate-agent
 JWT_TOKEN=$(
-  cargo run --quiet -- curl --auth --client default warn | curl -s -K - | jq -r '.access_token'
+  cargo run --quiet -- curl --auth --client default | curl -s -K - | jq -r '.access_token'
 )
 
 cargo run --quiet -- curl --jwt "$JWT_TOKEN" --api projects --path /v1/projects/1/tasks | curl -K -
