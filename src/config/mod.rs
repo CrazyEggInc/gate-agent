@@ -1,10 +1,17 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 
 pub mod app_config;
 pub mod path;
 pub mod secrets;
 pub mod write;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigSource {
+    Path(PathBuf),
+    Stdin,
+}
 
 #[derive(Debug)]
 pub struct ConfigError {

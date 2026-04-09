@@ -1,17 +1,64 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use assert_cmd::Command as AssertCommand;
 use clap::{Parser, error::ErrorKind};
 use gate_agent::cli::{
     Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
+    ConfigValidateArgs,
 };
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use tempfile::tempdir;
 use toml::Value;
 
+const VALID_CONFIG: &str = r#"
+[auth]
+issuer = "gate-agent"
+audience = "gate-agent-clients"
+signing_secret = "replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects"]
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#;
+
+const INVALID_CONFIG: &str = r#"
+[auth]
+issuer = "gate-agent"
+audience = "gate-agent-clients"
+signing_secret = "replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects"]
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "x-api-key"
+auth_value = "billing-secret-value"
+timeout_ms = 5000
+"#;
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn write_config(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, contents)?;
+    Ok(())
 }
 
 struct EnvGuard {
@@ -184,6 +231,81 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
             .and_then(Value::as_array)
             .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
         Some(vec!["projects", "reports"])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_runs_validate_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    write_config(&config_path, VALID_CONFIG)?;
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Validate(ConfigValidateArgs {
+            config: Some(config_path),
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        }),
+    }))?;
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_validate_returns_json_shaped_error_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    write_config(&config_path, INVALID_CONFIG)?;
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Validate(ConfigValidateArgs {
+            config: Some(config_path),
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        }),
+    }))
+    .expect_err("invalid config should fail");
+
+    assert_eq!(
+        error.to_string(),
+        r#"{"errors":[{"message":"clients.default.allowed_apis contains unknown api 'projects'"}]}"#
+    );
+
+    let output = AssertCommand::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "validate",
+            "--config",
+            workspace
+                .join("nested/secrets.toml")
+                .to_str()
+                .expect("utf-8 config path"),
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "{\"errors\":[{\"message\":\"clients.default.allowed_apis contains unknown api 'projects'\"}]}\n"
     );
 
     Ok(())

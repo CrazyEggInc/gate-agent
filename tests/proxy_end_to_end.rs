@@ -49,7 +49,7 @@ async fn assert_upstream_redirect_is_not_followed(
         .with_state(redirect_target_hits.clone());
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -96,7 +96,7 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token_for_client("default", "billing", &config.secrets)?;
+    let token = signed_token_for_client("default", "billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -206,7 +206,7 @@ async fn proxy_route_strips_client_forwarding_headers_before_upstream()
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -349,7 +349,7 @@ async fn proxy_route_rejects_selected_api_not_present_in_token()
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token_for_client("default", "billing", &config.secrets)?;
+    let token = signed_token_for_client("default", "billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -380,8 +380,8 @@ async fn proxy_route_rejects_disallowed_api_for_valid_client_token()
     let token = signed_token_with_subject_and_secret(
         "default",
         "projects",
-        config.secrets.auth.signing_secret.expose_secret(),
-        &config.secrets,
+        config.secrets().auth.signing_secret.expose_secret(),
+        config.secrets(),
     )?;
     let app = build_router(AppState::from_config(&config)?);
 
@@ -417,7 +417,7 @@ async fn proxy_route_rejects_token_signed_with_wrong_secret()
         "default",
         "billing",
         "wrong-secret",
-        &config.secrets,
+        config.secrets(),
     )?;
     let app = build_router(AppState::from_config(&config)?);
 
@@ -494,7 +494,7 @@ async fn proxy_route_rejects_duplicate_authorization_headers()
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
     let mut request = Request::builder()
         .uri("/proxy/billing/v1/projects")
@@ -542,7 +542,7 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
     );
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config_with_billing_timeout(&base_url, 50)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -653,7 +653,7 @@ async fn proxy_route_preserves_raw_encoded_path_and_query() -> Result<(), Box<dy
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -704,7 +704,7 @@ async fn proxy_route_forwards_empty_suffix_to_upstream_base_path_without_using_w
         );
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -736,7 +736,7 @@ async fn proxy_route_preserves_trailing_api_route_slash() -> Result<(), Box<dyn 
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -765,7 +765,7 @@ async fn proxy_route_preserves_double_slash_segments() -> Result<(), Box<dyn std
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
@@ -799,7 +799,7 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
     )
     .await?;
     let config = load_test_config(&upstream.base_url)?;
-    let token = signed_token("billing", &config.secrets)?;
+    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app

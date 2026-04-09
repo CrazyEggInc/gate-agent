@@ -2,6 +2,10 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
+use crate::cli::StartArgs;
+use crate::config::app_config::{AppConfig, DEFAULT_BIND};
 use crate::config::path::resolve_config_path_for_update;
 use crate::config::write::{self, ApiUpsert, ClientUpsert, WriteConfigError};
 
@@ -15,6 +19,10 @@ impl ConfigCommandError {
         Self {
             message: message.into(),
         }
+    }
+
+    fn json_message(message: impl Into<String>) -> Self {
+        Self::new(serialize_json_error(message.into()))
     }
 }
 
@@ -32,8 +40,31 @@ impl From<WriteConfigError> for ConfigCommandError {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ValidateErrorPayload {
+    errors: Vec<ValidateErrorMessage>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidateErrorMessage {
+    message: String,
+}
+
+fn serialize_json_error(message: String) -> String {
+    serde_json::to_string(&ValidateErrorPayload {
+        errors: vec![ValidateErrorMessage { message }],
+    })
+    .expect("validate error payload should serialize")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigInitArgs {
+    pub config: Option<PathBuf>,
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigValidateArgs {
     pub config: Option<PathBuf>,
     pub log_level: String,
 }
@@ -64,6 +95,20 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
     let path = resolve_target_path(args.config.as_deref())?;
     write::init_config(&path)?;
     Ok(path)
+}
+
+pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> {
+    let start_args = StartArgs {
+        bind: DEFAULT_BIND
+            .parse()
+            .expect("default bind address should parse"),
+        config: args.config,
+        log_level: args.log_level,
+    };
+
+    AppConfig::from_start_args(&start_args)
+        .map(|_| "config is valid".to_owned())
+        .map_err(|error| ConfigCommandError::json_message(error.to_string()))
 }
 
 pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {

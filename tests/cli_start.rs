@@ -1,14 +1,15 @@
 use assert_cmd::Command;
-use gate_agent::{cli::StartArgs, commands::start};
+use gate_agent::{
+    cli::StartArgs,
+    commands::start,
+    config::{
+        ConfigSource,
+        app_config::{AppConfig, StartConfigStdin},
+    },
+};
 use tempfile::tempdir;
 
-fn write_config_file() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>>
-{
-    let temp_dir = tempdir()?;
-    let config_file = temp_dir.path().join(".secrets.test");
-    std::fs::write(
-        &config_file,
-        r#"
+const VALID_CONFIG: &str = r#"
 [auth]
 issuer = "gate-agent"
 audience = "gate-agent-clients"
@@ -24,8 +25,13 @@ base_url = "https://projects.internal.example"
 auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
-"#,
-    )?;
+"#;
+
+fn write_config_file() -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>>
+{
+    let temp_dir = tempdir()?;
+    let config_file = temp_dir.path().join(".secrets.test");
+    std::fs::write(&config_file, VALID_CONFIG)?;
 
     Ok((temp_dir, config_file))
 }
@@ -62,11 +68,36 @@ async fn start_prepare_loads_runtime_state_and_binds_listener()
         log_level: "debug".to_owned(),
     };
     let prepared = start::prepare(&args)?;
-    let listener = start::bind_listener(prepared.config.bind).await?;
+    let listener = start::bind_listener(prepared.config.bind()).await?;
 
     assert_eq!(prepared.state.startup().bind, args.bind);
     assert_eq!(prepared.state.startup().log_level, "debug");
-    assert_eq!(prepared.state.startup().config_file, config_file);
+    assert_eq!(
+        prepared.state.startup().config_source,
+        ConfigSource::Path(config_file)
+    );
+    assert_eq!(prepared.state.secrets().apis.len(), 1);
+    assert!(listener.local_addr()?.port() > 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_prepare_accepts_stdin_backed_config_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    let args = StartArgs {
+        bind: "127.0.0.1:0".parse()?,
+        config: None,
+        log_level: "debug".to_owned(),
+    };
+    let config =
+        AppConfig::from_start_args_with_stdin(&args, StartConfigStdin::piped(VALID_CONFIG))?;
+    let prepared = start::prepare_from_config(config)?;
+    let listener = start::bind_listener(prepared.config.bind()).await?;
+
+    assert_eq!(prepared.state.startup().config_source, ConfigSource::Stdin);
+    assert_eq!(prepared.state.startup().bind, args.bind);
+    assert_eq!(prepared.state.startup().log_level, "debug");
     assert_eq!(prepared.state.secrets().apis.len(), 1);
     assert!(listener.local_addr()?.port() > 0);
 

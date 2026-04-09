@@ -31,6 +31,8 @@ The `start` command must accept:
 Behavior:
 
 - loads runtime config using the shared config resolution rules
+- when stdin is piped and begins providing any non-whitespace bytes, loads config from stdin instead of `--config`, `GATE_AGENT_CONFIG`, `./.secrets`, or `~/.config/gate-agent/secrets`
+- ignores piped stdin when it is empty or whitespace-only, then falls back to normal path resolution
 - validates that the selected config exists and parses correctly
 - constructs runtime state
 - binds the requested listener
@@ -146,13 +148,21 @@ cargo run -- config add-client --help
 The subcommands must be:
 
 - `config init`
+- `config validate`
 - `config add-api`
 - `config add-client`
 
 Each config subcommand must also accept `--log-level <level>` with the same application-only verbosity semantics used by `start` and `curl`.
 
+`config validate` uses the same strict config loading path as runtime startup. A valid config prints `config is valid`. An invalid config prints a JSON error payload to stderr and exits non-zero.
+
 See `docs/config.md` for detailed config command semantics.
 
 ## Exit behavior
 
-CLI commands must return success on success, and on failure they must print a human-readable error to stderr and exit non-zero.
+CLI commands must return success on success.
+
+Failure output is split by command behavior:
+
+- `config validate` exits non-zero and prints a JSON error payload to stderr when the selected config is invalid
+- other CLI failures print a human-readable error to stderr and exit non-zero

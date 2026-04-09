@@ -2,13 +2,69 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use assert_cmd::Command;
 use gate_agent::commands::config::{
-    ConfigAddApiArgs, ConfigAddClientArgs, ConfigInitArgs, add_api, add_client, init,
+    ConfigAddApiArgs, ConfigAddClientArgs, ConfigInitArgs, ConfigValidateArgs, add_api, add_client,
+    init, validate,
 };
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::path::CONFIG_ENV_VAR;
 use tempfile::tempdir;
 use toml::Value;
+
+const VALID_VALIDATE_CONFIG: &str = r#"
+[auth]
+issuer = "gate-agent"
+audience = "gate-agent-clients"
+signing_secret = "replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects"]
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#;
+
+const INVALID_VALIDATE_CONFIG: &str = r#"
+[auth]
+issuer = "gate-agent"
+audience = "gate-agent-clients"
+signing_secret = "replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["projects"]
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "x-api-key"
+auth_value = "billing-secret-value"
+timeout_ms = 5000
+"#;
+
+const STDIN_VALIDATE_CONFIG: &str = r#"
+[auth]
+issuer = "stdin-gate-agent"
+audience = "stdin-gate-agent-clients"
+signing_secret = "stdin-replace-me-with-a-long-enough-secret"
+
+[clients.default]
+api_key = "stdin-default-client-key"
+api_key_expires_at = "2030-01-02T03:04:05Z"
+allowed_apis = ["stdin-projects"]
+
+[apis.stdin-projects]
+base_url = "https://stdin-projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "stdin-projects-secret-value"
+timeout_ms = 5000
+"#;
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -57,6 +113,15 @@ impl Drop for EnvGuard {
 
 fn load_toml(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(std::fs::read_to_string(path)?.parse::<Value>()?)
+}
+
+fn write_text(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, contents)?;
+    Ok(())
 }
 
 fn table<'a>(value: &'a Value, key: &str) -> &'a toml::map::Map<String, Value> {
@@ -521,6 +586,121 @@ fn config_add_api_rejects_malformed_apis_root_without_rewriting_file()
 
     assert!(error.to_string().contains("apis must be a TOML table"));
     assert_eq!(std::fs::read_to_string(&config_path)?, original);
+
+    Ok(())
+}
+
+#[test]
+fn config_validate_accepts_stdin_and_prefers_it_over_file_and_env()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let home_dir = temp_dir.path().join("home");
+    let current_dir = temp_dir.path().join("workspace");
+    let env_path = temp_dir.path().join("env/gate-agent.toml");
+    std::fs::create_dir_all(home_dir.join(".config/gate-agent"))?;
+    std::fs::create_dir_all(&current_dir)?;
+    let _env = EnvGuard::enter(&current_dir)?;
+    let file_path = current_dir.join("explicit.toml");
+
+    write_text(&file_path, INVALID_VALIDATE_CONFIG)?;
+    write_text(&env_path, INVALID_VALIDATE_CONFIG)?;
+
+    unsafe {
+        std::env::set_var("HOME", &home_dir);
+        std::env::set_var(CONFIG_ENV_VAR, &env_path);
+    }
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "validate",
+            "--config",
+            file_path.to_str().expect("utf-8 config path"),
+        ])
+        .write_stdin(STDIN_VALIDATE_CONFIG)
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "config is valid\n");
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    Ok(())
+}
+
+#[test]
+fn config_validate_returns_success_text_for_valid_config() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+    write_text(&config_path, VALID_VALIDATE_CONFIG)?;
+
+    let message = validate(ConfigValidateArgs {
+        config: Some(config_path.clone()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    assert_eq!(message, "config is valid");
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "validate",
+            "--config",
+            config_path.to_str().expect("utf-8 config path"),
+        ])
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "config is valid\n");
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    Ok(())
+}
+
+#[test]
+fn config_validate_returns_non_zero_json_for_invalid_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+    write_text(&config_path, INVALID_VALIDATE_CONFIG)?;
+
+    let error = validate(ConfigValidateArgs {
+        config: Some(config_path.clone()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })
+    .expect_err("invalid config should fail");
+
+    assert_eq!(
+        error.to_string(),
+        r#"{"errors":[{"message":"clients.default.allowed_apis contains unknown api 'projects'"}]}"#
+    );
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "validate",
+            "--config",
+            config_path.to_str().expect("utf-8 config path"),
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "");
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "{\"errors\":[{\"message\":\"clients.default.allowed_apis contains unknown api 'projects'\"}]}\n"
+    );
 
     Ok(())
 }

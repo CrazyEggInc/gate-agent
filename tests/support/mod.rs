@@ -15,7 +15,7 @@ use gate_agent::{
         claims::JwtClaims,
         jwt::{sign_local_test_token_at, sign_local_test_token_for_client_at},
     },
-    config::{app_config::AppConfig, secrets::SecretsConfig},
+    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
 };
 use http_body_util::BodyExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -110,12 +110,12 @@ timeout_ms = 5000
 "#
     ))?;
 
-    Ok(AppConfig {
-        bind: "127.0.0.1:0".parse()?,
-        log_level: "debug".to_owned(),
-        config_file: config_file.clone(),
-        secrets: SecretsConfig::load_from_file(&config_file)?,
-    })
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
 }
 
 pub fn load_test_config_with_billing_timeout(
@@ -154,12 +154,12 @@ timeout_ms = {billing_timeout_ms}
 "#
     ))?;
 
-    Ok(AppConfig {
-        bind: "127.0.0.1:0".parse()?,
-        log_level: "debug".to_owned(),
-        config_file: config_file.clone(),
-        secrets: SecretsConfig::load_from_file(&config_file)?,
-    })
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
 }
 
 pub fn signed_token(

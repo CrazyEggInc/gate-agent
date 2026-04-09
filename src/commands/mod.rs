@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use crate::cli::{
     Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
-    CurlArgs, StartArgs,
+    ConfigValidateArgs, CurlArgs, StartArgs,
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
@@ -67,6 +67,11 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
             config::init(map_config_init_args(args))
                 .map_err(|error| CommandError::new(error.to_string()))?;
         }
+        ConfigCommand::Validate(args) => {
+            let message = config::validate(map_config_validate_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+            println!("{message}");
+        }
         ConfigCommand::AddApi(args) => {
             config::add_api(map_config_add_api_args(args))
                 .map_err(|error| CommandError::new(error.to_string()))?;
@@ -81,12 +86,19 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
 }
 
 fn run_start(args: StartArgs) -> Result<(), CommandError> {
-    let _ = AppConfig::from_start_args(&args)?;
-    start::run(args)
+    let config = AppConfig::from_start_args(&args)?;
+    start::run_with_config(config)
 }
 
 fn map_config_init_args(args: ConfigInitArgs) -> config::ConfigInitArgs {
     config::ConfigInitArgs {
+        config: args.config,
+        log_level: args.log_level,
+    }
+}
+
+fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateArgs {
+    config::ConfigValidateArgs {
         config: args.config,
         log_level: args.log_level,
     }

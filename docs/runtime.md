@@ -19,7 +19,12 @@ The product startup flow must be:
 5. build the HTTP router
 6. start serving requests
 
-CLI success, including built-in `--help`, must exit zero. CLI failures must print a human-readable error and exit non-zero.
+CLI success, including built-in `--help`, must exit zero.
+
+CLI failure output must match the current command behavior:
+
+- `config validate` exits non-zero and prints a JSON error payload to stderr when config validation fails
+- other CLI failures print a human-readable error and exit non-zero
 
 ## App state
 
@@ -28,7 +33,7 @@ Runtime state must contain:
 - parsed secrets/config
 - an index from API key to client slug
 - a shared reqwest client
-- startup settings such as bind address, log level, and config path
+- startup settings such as bind address, log level, and the explicit config source (`Path(...)` or `Stdin`)
 
 Runtime rules:
 
@@ -84,7 +89,8 @@ Expected logging behavior:
 - invalid `--log-level` input must fail startup with a clear human-readable error instead of silently falling back
 - the selected level applies only to `gate-agent` targets
 - dependency targets must remain limited to warning and error output even when the application runs at `debug`
-- each HTTP request must emit a completion log with method, URI, status, latency, and request ID
+- each HTTP request must emit a completion log with method, URI, status, latency, request ID, and `client_id`
+- `client_id` is the authenticated client slug when the request authenticates successfully, otherwise `<unknown>`
 - proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
 - completion logs must include `error_code` only when the response came from an application error
 - logs must not include API keys, bearer tokens, JWTs, or upstream secret values

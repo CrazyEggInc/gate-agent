@@ -16,13 +16,17 @@ The project must support a single runtime config file that is:
 
 Read precedence:
 
-1. `--config <path>`
-2. `GATE_AGENT_CONFIG`
-3. `./.secrets`
-4. `~/.config/gate-agent/secrets`
+1. non-empty piped stdin
+2. `--config <path>`
+3. `GATE_AGENT_CONFIG`
+4. `./.secrets`
+5. `~/.config/gate-agent/secrets`
 
 Behavior:
 
+- non-empty piped stdin overrides every file-based source
+- attached non-terminal stdin is checked without blocking when no bytes are immediately available; once stdin config bytes begin arriving, the loader continues reading until EOF before parsing
+- empty or whitespace-only piped stdin is ignored
 - blank `--config` values are rejected
 - blank `GATE_AGENT_CONFIG` is rejected
 - read mode requires an existing file
@@ -192,3 +196,26 @@ Runtime loading is stricter than CLI writing:
 - unknown fields are rejected
 - client `allowed_apis` must refer to known `[apis.*]`
 - malformed timestamps and invalid slugs are rejected during parse/load
+
+## `config validate`
+
+`config validate` is the operator-facing way to check whether a config would load at runtime.
+
+Behavior:
+
+- uses the same config loading behavior as `start`, including non-empty stdin override
+- uses the same strict parser and runtime validation rules as `start`
+- prints `config is valid` on success
+- prints a JSON error payload to stderr on invalid config and exits non-zero
+
+Error shape:
+
+```json
+{
+  "errors": [
+    {
+      "message": "..."
+    }
+  ]
+}
+```
