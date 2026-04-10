@@ -9,7 +9,39 @@
 - bearer tokens are simple to issue and rotate
 - config is file-based, explicit, and easy to inspect
 
+## Install
+
+Download a release binary from GitHub Releases and put `gate-agent` on your `PATH`.
+
+Use one archive name:
+
+- Linux: `gate-agent-v${VERSION}-linux-x64.tar.gz`
+- macOS Intel: `gate-agent-v${VERSION}-macos-x64.tar.gz`
+- macOS Apple Silicon: `gate-agent-v${VERSION}-macos-arm64.tar.gz`
+
+```sh
+VERSION=1.2.3
+ARCHIVE="gate-agent-v${VERSION}-linux-x64.tar.gz"
+CHECKSUMS="gate-agent-v${VERSION}-sha256sums.txt"
+
+curl -L -O \
+  "https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}/${CHECKSUMS}"
+curl -L -O \
+  "https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}/${ARCHIVE}"
+
+if command -v shasum >/dev/null 2>&1; then
+  grep " ${ARCHIVE}\$" "${CHECKSUMS}" | shasum -a 256 -c -
+else
+  grep " ${ARCHIVE}\$" "${CHECKSUMS}" | sha256sum --check -
+fi
+
+tar -xzf "${ARCHIVE}"
+install gate-agent /usr/local/bin/gate-agent
+```
+
 ## Quick local flow
+
+Assumes `gate-agent` is already installed.
 
 ```sh
 # setup local files and dummy upstream
@@ -22,7 +54,7 @@ curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
 
 # start gate-agent
-cargo run -- start --config .secrets --log-level info
+gate-agent start --config .secrets --log-level info
 
 # call gate-agent with the sample local bearer token
 export GATE_AGENT_TOKEN='default.s3cr3t'
@@ -84,14 +116,16 @@ curl -sS http://127.0.0.1:8787/mcp \
   }' | jq
 ```
 
-If you create a fresh config with `cargo run -- config init`, the command prints the default client bearer token once. Save it then; the config file only stores the token id, hash, and expiry.
+If you create a fresh config with `gate-agent config init`, the command prints the default client bearer token once. Save it then; the config file only stores the token id, hash, and expiry.
 
 See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the MCP contract, and `docs/pending.md` for intentionally deferred work.
 
 ## Development
 
+Use Cargo only for repo-local development:
+
 ```sh
-cargo build
+cargo run -- start --config .secrets --log-level debug
 cargo test
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings

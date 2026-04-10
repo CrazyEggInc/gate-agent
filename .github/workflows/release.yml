@@ -1,0 +1,168 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build and release. Defaults to branch or SHA that triggered manual run.
+        required: false
+        type: string
+      version:
+        description: Release version or tag name. Leave empty to publish a SHA-based release.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+      verify_tag: ${{ steps.meta.outputs.verify_tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || github.sha) || github.ref }}
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          MANUAL_REF: ${{ inputs.ref }}
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          checkout_ref="${MANUAL_REF:-${GITHUB_SHA}}"
+          target_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+            verify_tag=true
+          elif [[ -n "${MANUAL_VERSION}" ]]; then
+            release_tag="${MANUAL_VERSION}"
+            verify_tag=false
+          else
+            release_tag="sha-${short_sha}"
+            verify_tag=false
+          fi
+
+          {
+            echo "checkout_ref=${checkout_ref}"
+            echo "release_tag=${release_tag}"
+            echo "target_sha=${target_sha}"
+            echo "verify_tag=${verify_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: build (${{ matrix.asset_name }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: linux-x64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: macos-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_name: macos-arm64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin gate-agent --target ${{ matrix.target }}
+
+      - name: Package archive
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          archive_name="gate-agent-${RELEASE_TAG}-${{ matrix.asset_name }}.tar.gz"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/gate-agent" "dist/gate-agent"
+          chmod +x "dist/gate-agent"
+          tar -C dist -czf "dist/${archive_name}" gate-agent
+          rm "dist/gate-agent"
+
+      - name: Upload packaged archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build
+    steps:
+      - name: Download packaged archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate aggregate checksums
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          checksum_file="gate-agent-${RELEASE_TAG}-sha256sums.txt"
+          cd dist
+          sha256sum gate-agent-*.tar.gz > "${checksum_file}"
+
+      - name: Publish GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+          VERIFY_TAG: ${{ needs.prepare.outputs.verify_tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view -R "${GH_REPO}" "${RELEASE_TAG}" >/dev/null 2>&1; then
+            if [[ "${VERIFY_TAG}" == "true" ]]; then
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --notes ""
+            else
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --notes ""
+            fi
+          fi
+          gh release upload -R "${GH_REPO}" "${RELEASE_TAG}" \
+            "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz#linux-x64" \
+            "dist/gate-agent-${RELEASE_TAG}-macos-x64.tar.gz#macos-x64" \
+            "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz#macos-arm64" \
+            "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt" \
+            --clobber

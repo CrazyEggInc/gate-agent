@@ -45,7 +45,6 @@ Keyring backend policy is platform-specific but explicit:
 
 - Linux uses the native keyutils backend from the `keyring` crate
 - macOS uses the native Keychain backend
-- Windows uses the native Credential Manager backend
 
 ## App state
 

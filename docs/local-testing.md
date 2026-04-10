@@ -2,6 +2,8 @@
 
 This document defines the local operator workflow.
 
+> Note: `README.md` covers the installed-binary and GitHub Releases operator flow at a high level. This document intentionally covers repository-local development using `cargo run` and the local dummy upstream.
+
 ## Goal
 
 The repository provides a repeatable local environment for exercising:
