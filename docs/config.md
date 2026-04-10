@@ -1,10 +1,10 @@
 # Configuration
 
-This document describes the configuration feature as an operator-facing contract.
+This document defines the operator-facing config contract.
 
 ## Goal
 
-The project must support a single runtime config file that is:
+The runtime config must be:
 
 - easy to locate
 - explicit to override
@@ -25,36 +25,25 @@ Read precedence:
 
 Behavior:
 
-- non-empty piped stdin overrides every file-based source
-- attached non-terminal stdin is checked without blocking when no bytes are immediately available; once stdin config bytes begin arriving, the loader continues reading until EOF before parsing
+- non-empty piped stdin overrides file-based sources
 - empty or whitespace-only piped stdin is ignored
-- blank `--config` values are rejected
-- blank `GATE_AGENT_CONFIG` is rejected
+- blank `--config` and blank `GATE_AGENT_CONFIG` are rejected
 - read mode requires an existing file
-- write/update mode falls back to `~/.config/gate-agent/secrets` when `HOME` is available and no explicit path or existing file was selected
-- write/update mode falls back to `./.secrets` only when `HOME` is unavailable
-- when nothing is found in read mode, the error reports the attempted paths
-- home fallback is skipped when `HOME` is unset
+- write/update mode falls back to `~/.config/gate-agent/secrets` when `HOME` is available
+- when nothing is found in read mode, the error reports attempted paths
 
 ## Config file formats
 
-The product must support two on-disk config formats at the same path:
+The same path may contain either:
 
 - plaintext TOML
 - ASCII-armored `age` passphrase-encrypted content
 
-Format detection is content-based:
-
-- files starting with `-----BEGIN AGE ENCRYPTED FILE-----` are treated as encrypted
-- all other files are treated as plaintext TOML
-
-The file extension does not change the parsing mode.
-
-`.secrets.example` remains plaintext.
+Detection is content-based. File extension does not control parsing mode.
 
 ## Password sources
 
-When a command operates on an encrypted config, password precedence must be:
+For encrypted configs, password precedence is:
 
 1. `--password` / `-p`
 2. `GATE_AGENT_PASSWORD`
@@ -63,44 +52,31 @@ When a command operates on an encrypted config, password precedence must be:
 
 Behavior:
 
-- blank `--password` is rejected
-- blank `GATE_AGENT_PASSWORD` is rejected
-- each config path is looked up separately in the system keyring, so different config files keep separate stored passwords
-- keyring lookup is best-effort; if the stored password cannot be read, commands continue to the remaining fallback path instead of failing only because keyring access had a problem
-- on Linux, the system keyring backend is explicitly pinned to the native keyutils path instead of relying on `keyring` crate defaults
-- prompting is only attempted for encrypted configs, or for `config init --encrypted`
-- non-interactive sessions must fail with a clear error when an encrypted config needs a password and neither flag, env var, nor readable keyring entry is available
+- blank flag and env passwords are rejected
 - plaintext configs ignore password inputs
-- when a flag, env var, or prompted password successfully decrypts an encrypted config, that password is cached into the system keyring for that config path
-- when a cached keyring password fails to decrypt the file, the stale keyring entry is removed automatically
+- non-interactive sessions fail clearly when an encrypted config needs a password and none is available
+- successful decrypts cache the password in the keyring for that config path
+- stale cached passwords are removed automatically when they stop decrypting the file
 
-## Config model
+## Runtime config model
 
-The config model must use these top-level tables:
+The runtime config has these top-level tables:
 
-- `[auth]`
 - `[groups.<slug>]`
 - `[clients.<slug>]`
 - `[apis.<slug>]`
 
-Unknown fields must be rejected. Empty required strings must be rejected.
+There is no `[auth]` table in the runtime config contract.
 
-### `[auth]`
-
-This section defines server-owned signing configuration.
-
-Required fields:
-
-- `issuer: String`
-- `audience: String`
-- `signing_secret: String`
+Unknown fields are rejected. Empty required strings are rejected.
 
 ### `[clients.<slug>]`
 
 Required fields:
 
-- `api_key: String`
-- `api_key_expires_at: RFC3339 UTC timestamp`
+- `bearer_token_id: String`
+- `bearer_token_hash: String`
+- `bearer_token_expires_at: RFC3339 UTC timestamp`
 - exactly one of:
   - `group: String`
   - `api_access: { <api-slug> = "read" | "write", ... }`
@@ -108,17 +84,25 @@ Required fields:
 Validation expectations:
 
 - client slug must be lowercase and contain only lowercase letters, digits, or hyphen
-- `api_key` must be non-empty
-- `api_key_expires_at` must be an RFC3339 UTC timestamp ending in `Z`
+- `bearer_token_id` must be non-empty
+- `bearer_token_hash` must be non-empty
+- `bearer_token_expires_at` must be an RFC3339 UTC timestamp ending in `Z`
 - clients must declare exactly one of `group` or `api_access`
 - `group` must reference an existing `[groups.<slug>]`
 - `api_access` keys must be lowercase valid API slugs
 - `api_access` values must be `read` or `write`
 - every referenced API must exist in `[apis.*]`
+- duplicate `bearer_token_id` values across clients are rejected
+
+Token storage contract:
+
+- operators use bearer tokens on the wire in the form `<token_id>.<secret>`
+- config files never persist the plaintext bearer token
+- config files persist only `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 
 ### `[groups.<slug>]`
 
-Each group entry defines a reusable API access map that clients can reference.
+Each group defines a reusable API access map.
 
 Required fields:
 
@@ -144,48 +128,32 @@ Required fields:
 
 Validation expectations:
 
-- slug must be lowercase valid slug
+- slug must be a valid lowercase slug
 - `base_url` must parse as a URL
 - `auth_header` must parse as an HTTP header name
 - required string fields must be non-empty
 - omitted `timeout_ms` falls back to `5000`
-- `timeout_ms` must be greater than zero when explicitly provided or written through CLI commands
+- explicit `timeout_ms` must be greater than zero
 
 ## Operational expectations
 
-At least one client is required.
-
-The product must treat `clients.default` as the conventional local/dev client when a default client is needed.
-
-`[apis]` may be empty in generated configs, but real proxy and exchange behavior remains fail-closed until APIs are added.
+- at least one client is required
+- `clients.default` is the conventional local/dev client
+- generated configs may start with empty `[groups]` and `[apis]`
 
 ## Sample config
 
-The committed `.secrets.example` is the runnable local/dev sample.
-
-Expected shape:
+`.secrets.example` is the runnable local/dev sample:
 
 ```toml
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "local-dev-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-group = "local-default"
-
 [groups.local-default]
 api_access = { projects = "read" }
 
-[groups.partner-readonly]
-api_access = { projects = "read" }
-
-[clients.partner]
-api_key = "partner-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-group = "partner-readonly"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2036-10-08T12:00:00Z"
+group = "local-default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
@@ -195,41 +163,38 @@ auth_value = "local-upstream-token"
 timeout_ms = 5000
 ```
 
+For the committed sample config, the matching local bearer token is `default.s3cr3t`.
+
 ## CLI-assisted config management
 
 ### `config init`
 
+Behavior:
+
 - resolves the target path using write precedence
-- when no `--config` or `GATE_AGENT_CONFIG` is set, defaults to `~/.config/gate-agent/secrets` when `HOME` is available
 - fails if the target file already exists
 - creates parent directories as needed
 - writes a minimal config with:
-  - generated signing secret
-  - generated `clients.default.api_key`
-  - generated `api_key_expires_at` about 180 days in the future
-  - empty `api_access = {}`
+  - generated `clients.default` bearer token metadata
+  - generated `bearer_token_expires_at` about 180 days in the future
+  - empty `api_access = {}` for `clients.default`
   - empty `[groups]`
   - empty `[apis]`
-
-Generated secrets are hex-encoded bytes read from `/dev/urandom`.
+- prints the generated default client bearer token once to stdout
+- persists only the token id, hash, and expiry
 
 When `--encrypted` is supplied:
 
 - the generated config is encrypted immediately
-- the password is resolved using the standard password precedence
-- interactive prompting must ask twice and require an exact match
-- after a successful encrypted init, the chosen password is stored in the system keyring for that config path
-- if keyring storage fails during encrypted init, the command fails instead of silently leaving a half-configured stored-password setup
-
-Other encrypted-config commands may read a stored keyring password for the selected config path, but they must never write or backfill keyring entries silently.
+- password resolution follows the standard password precedence
+- interactive prompting asks twice and requires an exact match
+- successful encrypted init stores the password in the system keyring for that config path
 
 ### `config show`
 
 - resolves the target path using read precedence
 - prints plaintext TOML to stdout
 - decrypts first when the selected file is encrypted
-- when the selected file is encrypted, password resolution follows flag → env → keyring → prompt
-- is intentionally a sharp tool because it reveals secrets in plaintext output
 
 ### `config edit`
 
@@ -238,38 +203,33 @@ Other encrypted-config commands may read a stored keyring password for the selec
 - fails if neither editor variable is set
 - plaintext configs are edited in place
 - encrypted configs are decrypted to a temporary file, edited, validated, then re-encrypted and atomically written back
-- when the selected file is encrypted, password resolution follows flag → env → keyring → prompt
-- if validation fails, the original encrypted config must remain untouched
-- if the editor exits non-zero, the original file must remain untouched
 
 ### `config add-api`
 
-This command must accept:
+Accepted flags:
 
 - `--name`
 - `--base-url`
 - `--auth-header`
 - `--auth-scheme`
 - `--auth-value`
+- optional `--timeout-ms`
 
 Behavior:
 
 - validates inputs before writing
 - creates config if it does not exist yet
-- upserts a single `[apis.<name>]` entry
+- upserts one `[apis.<name>]` entry
 - removes `auth_scheme` when omitted or blank
 - uses `5000` when `--timeout-ms` is omitted
-- keeps unrelated content and comments where possible
 - preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
 
 ### `config add-client`
 
-This command must accept:
+Accepted flags:
 
 - `--name`
-- `--api-key`
-- `--api-key-expires-at`
+- `--bearer-token-expires-at`
 - `--group <slug>`
 - repeated `--api-access <api=level[,api=level...]>`
 
@@ -277,35 +237,20 @@ Behavior:
 
 - validates slug and timestamp inputs
 - requires exactly one of `--group` or `--api-access`
-- `--group` must be a valid slug
 - `--api-access` accepts `read` and `write`
 - repeated `--api-access` flags are merged
-- comma-separated entries inside one `--api-access` flag are supported
-- conflicting duplicate `api=level` entries fail
-- inline `api_access` is written in stable order
 - creates config if it does not exist yet
-- preserves existing `api_key` and `api_key_expires_at` when omitted on update
-- generates missing `api_key` / expiration when creating a new client without them
-- preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- if the client does not already exist, a bearer token is generated and printed once
+- if the client already exists, existing token metadata is preserved
+- if `--password` is supplied while bootstrapping a missing config, the new config is created encrypted
+- if a config must be created first, the generated default client token is also printed once
+- plaintext bearer tokens are never persisted
 - writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
-- does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
-
-## Mutation expectations
-
-Config-writing commands must preserve unrelated structure and comments where possible rather than rewriting the file wholesale.
-
-Encrypted updates still follow that rule by:
-
-1. decrypting to TOML in memory
-2. editing TOML
-3. serializing TOML
-4. re-encrypting the whole file
-5. atomically replacing the original file
+- referenced APIs are validated at runtime load, not at write time
 
 ## Fail-closed parsing expectations
 
-Runtime loading is stricter than CLI writing:
+Runtime loading is stricter than ad-hoc file editing:
 
 - at least one `[clients.*]` entry is required
 - unknown fields are rejected
@@ -315,7 +260,7 @@ Runtime loading is stricter than CLI writing:
 
 ## `config validate`
 
-`config validate` is the operator-facing way to check whether a config would load at runtime.
+`config validate` checks whether a config would load at runtime.
 
 Behavior:
 
@@ -323,15 +268,3 @@ Behavior:
 - uses the same strict parser and runtime validation rules as `start`
 - prints `config is valid` on success
 - prints a JSON error payload to stderr on invalid config and exits non-zero
-
-Error shape:
-
-```json
-{
-  "errors": [
-    {
-      "message": "..."
-    }
-  ]
-}
-```

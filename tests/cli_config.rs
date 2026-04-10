@@ -1,34 +1,25 @@
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use assert_cmd::Command;
 use gate_agent::commands::config::{
-    ConfigAddApiArgs, ConfigAddClientArgs, ConfigEditArgs, ConfigInitArgs, ConfigShowArgs,
-    ConfigValidateArgs, add_api, add_client, edit, init, show, validate,
+    ConfigAddClientArgs, ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs, add_client, init,
+    show, validate,
 };
-use gate_agent::config::app_config::{
-    AppConfig, DEFAULT_BIND, DEFAULT_LOG_LEVEL, StartConfigStdin,
-};
-use gate_agent::config::password::PASSWORD_ENV_VAR;
-use gate_agent::config::path::CONFIG_ENV_VAR;
+use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
+use gate_agent::config::secrets::AccessLevel;
+use gate_agent::config::write::{self, ClientAccessUpsert, ClientUpsert, sha256_hex};
+use secrecy::{ExposeSecret, SecretString};
 use tempfile::tempdir;
 use toml::Value;
 
-const TEST_KEYRING_FILE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_FILE";
-const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_FAILURE";
-
-const VALID_VALIDATE_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent"
-audience = "gate-agent-clients"
-signing_secret = "replace-me-with-a-long-enough-secret"
-
+const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "0011223344556677"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { projects = "read" }
+
+[groups]
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -37,34 +28,26 @@ auth_value = "projects-secret-value"
 timeout_ms = 5000
 "#;
 
-const INVALID_VALIDATE_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent"
-audience = "gate-agent-clients"
-signing_secret = "replace-me-with-a-long-enough-secret"
-
+const INVALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "0011223344556677"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { projects = "read" }
 
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "x-api-key"
-auth_value = "billing-secret-value"
-timeout_ms = 5000
+[groups]
+
+[apis]
 "#;
 
-const STDIN_VALIDATE_CONFIG: &str = r#"
-[auth]
-issuer = "stdin-gate-agent"
-audience = "stdin-gate-agent-clients"
-signing_secret = "stdin-replace-me-with-a-long-enough-secret"
-
+const STDIN_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
-api_key = "stdin-default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "8899aabbccddeeff"
+bearer_token_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { stdin-projects = "read" }
+
+[groups]
 
 [apis.stdin-projects]
 base_url = "https://stdin-projects.internal.example"
@@ -73,753 +56,139 @@ auth_value = "stdin-projects-secret-value"
 timeout_ms = 5000
 "#;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct EnvGuard {
-    original_dir: PathBuf,
-    original_env: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn enter(current_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let original_dir = std::env::current_dir()?;
-        let original_env = tracked_env_vars()
-            .into_iter()
-            .map(|name| (name, std::env::var(name).ok()))
-            .collect();
-
-        std::env::set_current_dir(current_dir)?;
-
-        Ok(Self {
-            original_dir,
-            original_env,
-        })
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original_dir);
-
-        unsafe {
-            for (name, value) in &self.original_env {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
-    }
-}
-
-fn tracked_env_vars() -> Vec<&'static str> {
-    vec![
-        CONFIG_ENV_VAR,
-        "HOME",
-        PASSWORD_ENV_VAR,
-        "VISUAL",
-        "EDITOR",
-        TEST_KEYRING_FILE_ENV_VAR,
-        TEST_KEYRING_STORE_FAILURE_ENV_VAR,
-    ]
-}
-
-fn load_toml(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
-    Ok(std::fs::read_to_string(path)?.parse::<Value>()?)
-}
-
-fn write_text(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(path, contents)?;
-    Ok(())
-}
-
-fn read_test_keyring(path: &Path) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-
-    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
-}
-
-fn keyring_entry_key(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(format!(
-        "gate-agent::config:{}",
-        path.canonicalize()?.display()
-    ))
-}
-
-fn table<'a>(value: &'a Value, key: &str) -> &'a toml::map::Map<String, Value> {
-    value
-        .get(key)
-        .and_then(Value::as_table)
-        .unwrap_or_else(|| panic!("missing table: {key}"))
-}
-
-fn nested_table<'a>(value: &'a Value, path: &[&str]) -> &'a toml::map::Map<String, Value> {
-    let mut current = value;
-
-    for key in path {
-        current = current
-            .get(*key)
-            .unwrap_or_else(|| panic!("missing key: {key}"));
-    }
-
-    current
-        .as_table()
-        .unwrap_or_else(|| panic!("missing nested table: {}", path.join(".")))
-}
-
-fn string_at<'a>(value: &'a Value, path: &[&str]) -> &'a str {
-    let mut current = value;
-
-    for key in path {
-        current = current
-            .get(*key)
-            .unwrap_or_else(|| panic!("missing key: {key}"));
-    }
-
-    current
-        .as_str()
-        .unwrap_or_else(|| panic!("missing string value at {}", path.join(".")))
-}
-
-fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, Box<dyn std::error::Error>> {
-    if value.len() != 20 {
-        return Err(format!("unexpected timestamp length: {value}").into());
-    }
-
-    let year: i32 = value[0..4].parse()?;
-    let month: u32 = value[5..7].parse()?;
-    let day: u32 = value[8..10].parse()?;
-    let hour: u64 = value[11..13].parse()?;
-    let minute: u64 = value[14..16].parse()?;
-    let second: u64 = value[17..19].parse()?;
-
-    if &value[4..5] != "-"
-        || &value[7..8] != "-"
-        || &value[10..11] != "T"
-        || &value[13..14] != ":"
-        || &value[16..17] != ":"
-        || &value[19..20] != "Z"
-    {
-        return Err(format!("unexpected timestamp format: {value}").into());
-    }
-
-    let days = days_from_civil(year, month, day)?;
-    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
-
-    Ok(UNIX_EPOCH + Duration::from_secs(seconds))
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> Result<u64, Box<dyn std::error::Error>> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return Err("invalid calendar date".into());
-    }
-
-    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
-    let era = if adjusted_year >= 0 {
-        adjusted_year / 400
-    } else {
-        (adjusted_year - 399) / 400
-    };
-    let year_of_era = adjusted_year - era * 400;
-    let month_index = month as i32;
-    let day_index = day as i32;
-    let day_of_year =
-        (153 * (month_index + if month_index > 2 { -3 } else { 9 }) + 2) / 5 + day_index - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-
-    u64::try_from(days).map_err(|_| "date predates unix epoch".into())
-}
-
 #[test]
-fn config_init_prefers_explicit_path_and_generates_minimal_config()
+fn config_init_generates_default_bearer_token_and_persists_only_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let explicit_path = temp_dir.path().join("nested/custom/secrets.toml");
-    let started_at = SystemTime::now();
+    let config_path = temp_dir.path().join("gate-agent.toml");
 
-    let written_path = init(ConfigInitArgs {
-        config: Some(explicit_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+        ])
+        .output()?;
 
-    let config = load_toml(&written_path)?;
-    let expires_at = parse_rfc3339_utc(string_at(
-        &config,
-        &["clients", "default", "api_key_expires_at"],
-    ))?;
-    let lower_bound = started_at + Duration::from_secs(60 * 60 * 24 * 170);
-    let upper_bound = started_at + Duration::from_secs(60 * 60 * 24 * 190);
+    assert!(output.status.success(), "{output:?}");
 
-    assert_eq!(written_path, explicit_path);
-    assert!(written_path.exists());
-    assert_eq!(string_at(&config, &["auth", "issuer"]), "gate-agent");
-    assert_eq!(
-        string_at(&config, &["auth", "audience"]),
-        "gate-agent-clients"
-    );
-    assert!(string_at(&config, &["auth", "signing_secret"]).len() >= 32);
-    assert!(string_at(&config, &["clients", "default", "api_key"]).len() >= 32);
-    assert!(nested_table(&config, &["clients", "default", "api_access"]).is_empty());
-    assert!(table(&config, "groups").is_empty());
-    assert!(table(&config, "apis").is_empty());
-    assert!(expires_at >= lower_bound);
-    assert!(expires_at <= upper_bound);
-
-    Ok(())
-}
-
-#[test]
-fn config_init_uses_env_path_before_local_and_home() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let home_dir = temp_dir.path().join("home");
-    let current_dir = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(home_dir.join(".config/gate-agent"))?;
-    std::fs::create_dir_all(&current_dir)?;
-    std::fs::write(current_dir.join(".secrets"), "local = true\n")?;
-    let _env = EnvGuard::enter(&current_dir)?;
-    unsafe {
-        std::env::set_var("HOME", &home_dir);
-        std::env::set_var(CONFIG_ENV_VAR, temp_dir.path().join("env/gate-agent.toml"));
-    }
-
-    let written_path = init(ConfigInitArgs {
-        config: None,
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    assert_eq!(written_path, temp_dir.path().join("env/gate-agent.toml"));
-
-    Ok(())
-}
-
-#[test]
-fn config_init_defaults_to_home_path_when_no_cli_or_env_path_is_set()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let home_dir = temp_dir.path().join("home");
-    let current_dir = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(&current_dir)?;
-    let _env = EnvGuard::enter(&current_dir)?;
-    unsafe {
-        std::env::set_var("HOME", &home_dir);
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-
-    let written_path = init(ConfigInitArgs {
-        config: None,
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    assert_eq!(written_path, home_dir.join(".config/gate-agent/secrets"));
-    assert!(written_path.exists());
-    assert!(!current_dir.join(".secrets").exists());
-
-    Ok(())
-}
-
-#[test]
-fn config_add_api_uses_local_precedence_and_upserts_entry() -> Result<(), Box<dyn std::error::Error>>
-{
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    add_api(ConfigAddApiArgs {
-        config: None,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "http://127.0.0.1:18081/api".to_owned(),
-        auth_header: "authorization".to_owned(),
-        auth_scheme: Some("Bearer".to_owned()),
-        auth_value: "local-upstream-token".to_owned(),
-        timeout_ms: 5_000,
-    })?;
-    add_api(ConfigAddApiArgs {
-        config: None,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
-        auth_header: "x-api-key".to_owned(),
-        auth_scheme: None,
-        auth_value: "updated-token".to_owned(),
-        timeout_ms: 2_500,
-    })?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let tokens = printed_tokens(&stdout)?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].0, "default");
 
     let config = load_toml(&config_path)?;
-    let api = nested_table(&config, &["apis", "projects"]);
-
-    assert_eq!(
-        api.get("base_url").and_then(Value::as_str),
-        Some("https://projects.internal.example/api")
-    );
-    assert_eq!(
-        api.get("auth_header").and_then(Value::as_str),
-        Some("x-api-key")
-    );
-    assert_eq!(api.get("auth_scheme"), None);
-    assert_eq!(
-        api.get("auth_value").and_then(Value::as_str),
-        Some("updated-token")
-    );
-    assert_eq!(
-        api.get("timeout_ms").and_then(Value::as_integer),
-        Some(2_500)
-    );
+    assert_client_metadata_matches(&config, "default", &tokens[0].1);
+    assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_defaults_timeout_when_omitted() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    add_api(ConfigAddApiArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
-        auth_header: "authorization".to_owned(),
-        auth_scheme: None,
-        auth_value: "local-upstream-token".to_owned(),
-        timeout_ms: 5_000,
-    })?;
-
-    let config = load_toml(&config_path)?;
-    let api = nested_table(&config, &["apis", "projects"]);
-
-    assert_eq!(
-        api.get("timeout_ms").and_then(Value::as_integer),
-        Some(5_000)
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_prefers_local_creation_target_before_home_and_upserts_entry()
+fn config_add_client_generates_bearer_token_when_missing_and_prints_it_once()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let home_dir = temp_dir.path().join("home");
-    let current_dir = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(home_dir.join(".config/gate-agent"))?;
-    std::fs::create_dir_all(&current_dir)?;
-    let _env = EnvGuard::enter(&current_dir)?;
-    unsafe {
-        std::env::set_var("HOME", &home_dir);
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = home_dir.join(".config/gate-agent/secrets");
+    let config_path = temp_dir.path().join("gate-agent.toml");
 
-    init(ConfigInitArgs {
-        config: None,
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-    add_client(ConfigAddClientArgs {
-        config: None,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["billing=write,projects=read".to_owned()],
-    })?;
-    add_client(ConfigAddClientArgs {
-        config: None,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: None,
-        api_key_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=write".to_owned()],
-    })?;
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "partner",
+            "--api-access",
+            "projects=read",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let tokens = printed_tokens(&stdout)?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].0, "partner");
 
     let config = load_toml(&config_path)?;
-    let client = nested_table(&config, &["clients", "partner"]);
-
+    assert_client_metadata_matches(&config, "partner", &tokens[0].1);
+    assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
     assert_eq!(
-        client.get("api_key").and_then(Value::as_str),
-        Some("partner-key")
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "read"
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_generates_bearer_token_with_explicit_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "partner",
+            "--bearer-token-expires-at",
+            "2031-02-03T04:05:06Z",
+            "--api-access",
+            "projects=write",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout)?;
+    let tokens = printed_tokens(&stdout)?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].0, "partner");
+
+    let config = load_toml(&config_path)?;
+    assert_client_metadata_matches(&config, "partner", &tokens[0].1);
+    assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
     assert_eq!(
-        client.get("api_key_expires_at").and_then(Value::as_str),
-        Some("2031-02-03T04:05:06Z")
+        string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
+        "2031-02-03T04:05:06Z"
     );
     assert_eq!(
         string_at(&config, &["clients", "partner", "api_access", "projects"]),
         "write"
     );
-    assert_eq!(
-        nested_table(&config, &["clients", "partner", "api_access"]).len(),
-        1
-    );
-    assert_eq!(string_at(&config, &["auth", "issuer"]), "gate-agent");
-    assert!(home_dir.join(".config/gate-agent/secrets").exists());
-    assert!(!current_dir.join(".secrets").exists());
 
     Ok(())
 }
 
 #[test]
-fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
+fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    let existing_token = "partnertoken01.abcdefabcdefabcdefabcdefabcdefabcdef";
 
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec![
-            "projects=read,billing=write".to_owned(),
-            "reports=read".to_owned(),
-        ],
-    })?;
-
-    let config = load_toml(&config_path)?;
-
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "billing"]),
-        "write"
-    );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
-    );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "reports"]),
-        "read"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read".to_owned(), "projects=write".to_owned()],
-    })
-    .expect_err("conflicting api access should fail");
-
-    assert_eq!(
-        error.to_string(),
-        "conflicting api_access entries for api 'projects'"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_invalid_api_access_level_with_clear_message()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=admin".to_owned()],
-    })
-    .expect_err("invalid api access level should fail");
-
-    assert_eq!(
-        error.to_string(),
-        "api_access level 'admin' must be one of: read, write"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec![",projects=read".to_owned()],
-    })
-    .expect_err("leading empty segment should be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_trailing_comma_in_api_access_arg()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,".to_owned()],
-    })
-    .expect_err("trailing comma should be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_doubled_comma_in_api_access_arg()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,,billing=write".to_owned()],
-    })
-    .expect_err("doubled comma should be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,billing".to_owned()],
-    })
-    .expect_err("malformed comma-separated segment should be rejected");
-
-    assert_eq!(
-        error.to_string(),
-        "invalid api_access entry 'billing'; expected api=level"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_writes_group_reference_without_inline_api_access()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    write_text(
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+    write::upsert_client(
         &config_path,
-        concat!(
-            "[auth]\n",
-            "issuer = \"gate-agent\"\n",
-            "audience = \"gate-agent-clients\"\n",
-            "signing_secret = \"replace-me-with-a-long-enough-secret\"\n\n",
-            "[clients.default]\n",
-            "api_key = \"default-client-key\"\n",
-            "api_key_expires_at = \"2030-01-02T03:04:05Z\"\n",
-            "api_access = {}\n\n",
-            "[groups.partner-readonly]\n",
-            "api_access = { projects = \"read\" }\n\n",
-            "[apis.projects]\n",
-            "base_url = \"https://projects.internal.example\"\n",
-            "auth_header = \"x-api-key\"\n",
-            "auth_value = \"projects-secret-value\"\n",
-            "timeout_ms = 5000\n",
-        ),
+        &ClientUpsert {
+            name: "partner".to_owned(),
+            bearer_token: Some(existing_token.to_owned()),
+            bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+            access: ClientAccessUpsert::ApiAccess(
+                [("projects".to_owned(), AccessLevel::Read)]
+                    .into_iter()
+                    .collect(),
+            ),
+        },
+        None,
     )?;
 
     add_client(ConfigAddClientArgs {
@@ -827,276 +196,104 @@ fn config_add_client_writes_group_reference_without_inline_api_access()
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: Some("partner-readonly".to_owned()),
-        api_access: vec![],
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=write".to_owned()],
     })?;
 
     let config = load_toml(&config_path)?;
-    let client = nested_table(&config, &["clients", "partner"]);
-
+    assert_client_metadata_matches(&config, "partner", existing_token);
     assert_eq!(
-        client.get("group").and_then(Value::as_str),
-        Some("partner-readonly")
-    );
-    assert!(client.get("api_access").is_none());
-
-    Ok(())
-}
-
-#[test]
-fn config_add_client_rejects_invalid_calendar_date_without_writing_client()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "invalid-date-client".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-02-31T04:05:06Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read".to_owned()],
-    })
-    .expect_err("invalid calendar date should be rejected");
-
-    let config = load_toml(&config_path)?;
-
-    assert_eq!(
-        error.to_string(),
-        "invalid api_key_expires_at: invalid calendar date"
-    );
-    assert!(
-        nested_table(&config, &["clients"])
-            .get("invalid-date-client")
-            .is_none()
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_commands_accept_explicit_relative_paths() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-
-    let init_path = PathBuf::from(".secrets");
-    let config_path = PathBuf::from("gate-agent.toml");
-
-    let initialized_path = init(ConfigInitArgs {
-        config: Some(init_path.clone()),
-        encrypted: false,
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-    let api_path = add_api(ConfigAddApiArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
-        auth_header: "authorization".to_owned(),
-        auth_scheme: Some("Bearer".to_owned()),
-        auth_value: "local-upstream-token".to_owned(),
-        timeout_ms: 5_000,
-    })?;
-    let client_path = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read".to_owned()],
-    })?;
-
-    assert_eq!(initialized_path, init_path);
-    assert_eq!(api_path, config_path);
-    assert_eq!(client_path, config_path);
-    assert!(temp_dir.path().join(".secrets").exists());
-
-    let config = load_toml(&temp_dir.path().join("gate-agent.toml"))?;
-
-    assert_eq!(
-        string_at(&config, &["apis", "projects", "base_url"]),
-        "https://projects.internal.example/api"
-    );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_key"]),
-        "partner-key"
+        string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
+        "2031-02-03T04:05:06Z"
     );
     assert_eq!(
         string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+        "write"
     );
 
     Ok(())
 }
 
 #[test]
-fn config_add_client_rejects_malformed_clients_root_without_rewriting_file()
+fn config_add_client_implicit_config_creation_prints_default_and_client_tokens_once()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    let original = concat!(
-        "clients = \"oops\"\n\n",
-        "[auth]\n",
-        "issuer = \"gate-agent\"\n",
-        "audience = \"gate-agent-clients\"\n",
-        "signing_secret = \"existing-secret\"\n\n",
-        "[apis]\n",
-    );
-    std::fs::write(&config_path, original)?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "partner",
+            "--api-access",
+            "projects=read",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let tokens = printed_tokens(&stdout)?;
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].0, "default");
+    assert_eq!(tokens[1].0, "partner");
+
+    let config = load_toml(&config_path)?;
+    assert_client_metadata_matches(&config, "default", &tokens[0].1);
+    assert_client_metadata_matches(&config, "partner", &tokens[1].1);
+    assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
+    assert_no_plain_bearer_token_persisted(&config, &tokens[1].1);
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
 
     let error = add_client(ConfigAddClientArgs {
-        config: Some(config_path.clone()),
+        config: Some(config_path),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "partner".to_owned(),
-        api_key: Some("partner-key".to_owned()),
-        api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-02-31T04:05:06Z".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })
-    .expect_err("malformed clients root should be rejected");
+    .expect_err("invalid timestamp should fail");
 
-    assert!(error.to_string().contains("clients must be a TOML table"));
-    assert_eq!(std::fs::read_to_string(&config_path)?, original);
-
-    Ok(())
-}
-
-#[test]
-fn config_add_api_rejects_malformed_apis_root_without_rewriting_file()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    let original = concat!(
-        "apis = []\n\n",
-        "[auth]\n",
-        "issuer = \"gate-agent\"\n",
-        "audience = \"gate-agent-clients\"\n",
-        "signing_secret = \"existing-secret\"\n\n",
-        "[clients.default]\n",
-        "api_key = \"existing-key\"\n",
-        "api_key_expires_at = \"2030-01-02T03:04:05Z\"\n",
-        "api_access = {}\n",
+    assert_eq!(
+        error.to_string(),
+        "invalid bearer_token_expires_at: invalid calendar date"
     );
-    std::fs::write(&config_path, original)?;
-
-    let error = add_api(ConfigAddApiArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
-        auth_header: "authorization".to_owned(),
-        auth_scheme: Some("Bearer".to_owned()),
-        auth_value: "local-upstream-token".to_owned(),
-        timeout_ms: 5_000,
-    })
-    .expect_err("malformed apis root should be rejected");
-
-    assert!(error.to_string().contains("apis must be a TOML table"));
-    assert_eq!(std::fs::read_to_string(&config_path)?, original);
 
     Ok(())
 }
 
 #[test]
-fn config_validate_accepts_stdin_and_prefers_it_over_file_and_env()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let home_dir = temp_dir.path().join("home");
-    let current_dir = temp_dir.path().join("workspace");
-    let env_path = temp_dir.path().join("env/gate-agent.toml");
-    std::fs::create_dir_all(home_dir.join(".config/gate-agent"))?;
-    std::fs::create_dir_all(&current_dir)?;
-    let _env = EnvGuard::enter(&current_dir)?;
-    let file_path = current_dir.join("explicit.toml");
-
-    write_text(&file_path, INVALID_VALIDATE_CONFIG)?;
-    write_text(&env_path, INVALID_VALIDATE_CONFIG)?;
-
-    unsafe {
-        std::env::set_var("HOME", &home_dir);
-        std::env::set_var(CONFIG_ENV_VAR, &env_path);
-    }
-
-    let output = Command::cargo_bin("gate-agent")?
-        .args([
-            "config",
-            "validate",
-            "--config",
-            file_path.to_str().expect("utf-8 config path"),
-        ])
-        .write_stdin(STDIN_VALIDATE_CONFIG)
-        .output()?;
-
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout)?, "config is valid\n");
-    assert_eq!(String::from_utf8(output.stderr)?, "");
-
-    Ok(())
-}
-
-#[test]
-fn config_validate_returns_success_text_for_valid_config() -> Result<(), Box<dyn std::error::Error>>
+fn config_validate_prefers_stdin_for_valid_bearer_config() -> Result<(), Box<dyn std::error::Error>>
 {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    write_text(&config_path, VALID_VALIDATE_CONFIG)?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
 
-    let message = validate(ConfigValidateArgs {
-        config: Some(config_path.clone()),
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    assert_eq!(message, "config is valid");
+    write_text(&config_path, INVALID_BEARER_VALIDATE_CONFIG)?;
 
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
             "validate",
             "--config",
-            config_path.to_str().expect("utf-8 config path"),
+            config_path.to_str().ok_or("non-utf8 config path")?,
         ])
+        .write_stdin(STDIN_BEARER_VALIDATE_CONFIG)
         .output()?;
 
     assert!(output.status.success());
@@ -1107,16 +304,12 @@ fn config_validate_returns_success_text_for_valid_config() -> Result<(), Box<dyn
 }
 
 #[test]
-fn config_validate_returns_non_zero_json_for_invalid_config()
+fn config_validate_returns_json_error_for_invalid_bearer_config()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    unsafe {
-        std::env::remove_var(CONFIG_ENV_VAR);
-    }
-    let config_path = temp_dir.path().join(".secrets");
-    write_text(&config_path, INVALID_VALIDATE_CONFIG)?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, INVALID_BEARER_VALIDATE_CONFIG)?;
 
     let error = validate(ConfigValidateArgs {
         config: Some(config_path.clone()),
@@ -1134,7 +327,7 @@ fn config_validate_returns_non_zero_json_for_invalid_config()
             "config",
             "validate",
             "--config",
-            config_path.to_str().expect("utf-8 config path"),
+            config_path.to_str().ok_or("non-utf8 config path")?,
         ])
         .output()?;
 
@@ -1149,203 +342,221 @@ fn config_validate_returns_non_zero_json_for_invalid_config()
 }
 
 #[test]
-fn config_init_fails_when_target_already_exists() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+fn encrypted_config_add_client_preserves_password_workflow()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join(".secrets");
-    std::fs::write(
-        &config_path,
-        "[auth]\nissuer='x'\naudience='y'\nsigning_secret='z'\n\n[clients.default]\napi_key='k'\napi_key_expires_at='2030-01-02T03:04:05Z'\napi_access={}\n\n[groups]\n\n[apis]\n",
-    )?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("top-secret-password".to_owned());
 
-    let error = init(ConfigInitArgs {
+    write::init_config(&config_path, true, Some(&password))?;
+
+    add_client(ConfigAddClientArgs {
         config: Some(config_path.clone()),
-        encrypted: false,
-        password: None,
+        password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })
-    .expect_err("existing file should fail");
-
-    assert!(error.to_string().contains("already exists"));
-
-    Ok(())
-}
-
-#[test]
-fn config_show_prints_plaintext_contents() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join(".secrets");
-    let contents = "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\napi_access = {}\n\n[groups]\n\n[apis]\n";
-    std::fs::write(&config_path, contents)?;
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })?;
 
     let shown = show(ConfigShowArgs {
         config: Some(config_path),
-        password: None,
+        password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    let config = shown.parse::<Value>()?;
 
-    assert_eq!(shown, contents);
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn config_edit_plaintext_uses_editor_and_persists_changes() -> Result<(), Box<dyn std::error::Error>>
-{
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join(".secrets");
-    std::fs::write(
-        &config_path,
-        "[auth]\nissuer = \"gate-agent\"\naudience = \"gate-agent-clients\"\nsigning_secret = \"secret\"\n\n[clients.default]\napi_key = \"key\"\napi_key_expires_at = \"2030-01-02T03:04:05Z\"\napi_access = {}\n\n[groups]\n\n[apis]\n",
-    )?;
-    let script_path = temp_dir.path().join("editor.sh");
-    std::fs::write(
-        &script_path,
-        "#!/bin/sh\nprintf '[apis.projects]\nbase_url = \"https://example.test\"\nauth_header = \"authorization\"\nauth_value = \"token\"\ntimeout_ms = 5000\n' >> \"$1\"\n",
-    )?;
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&script_path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script_path, perms)?;
-    unsafe {
-        std::env::set_var("VISUAL", &script_path);
-    }
-
-    let edited = edit(ConfigEditArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let shown = std::fs::read_to_string(&config_path)?;
-    assert_eq!(edited, config_path);
-    assert!(shown.contains("[apis.projects]"));
+    let partner = table_at(&config, &["clients", "partner"]);
+    assert!(
+        partner
+            .get("bearer_token_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(
+        partner
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() == 64)
+    );
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "read"
+    );
 
     Ok(())
 }
 
 #[test]
-fn encrypted_init_writes_file_stores_keyring_password_and_show_uses_it()
+fn config_add_client_bootstraps_encrypted_config_when_password_is_supplied()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join("config.secrets");
-    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = "top-secret-password";
 
-    unsafe {
-        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
-        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
-        std::env::remove_var(PASSWORD_ENV_VAR);
-    }
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--password",
+            password,
+            "--name",
+            "partner",
+            "--bearer-token-expires-at",
+            "2031-02-03T04:05:06Z",
+            "--api-access",
+            "projects=read",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let raw = std::fs::read_to_string(&config_path)?;
+    assert!(raw.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+
+    assert!(
+        table_at(&config, &["clients", "default"])
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+    assert!(
+        table_at(&config, &["clients", "partner"])
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_init_function_still_creates_explicit_config_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("nested/custom/secrets.toml");
 
     let written_path = init(ConfigInitArgs {
         config: Some(config_path.clone()),
-        encrypted: true,
-        password: Some("flag-secret".to_owned()),
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let stored_passwords = read_test_keyring(&keyring_path)?;
-    let shown = show(ConfigShowArgs {
-        config: Some(config_path.clone()),
+        encrypted: false,
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
     assert_eq!(written_path, config_path);
     assert!(written_path.exists());
-    assert!(
-        std::fs::read_to_string(&written_path)?.starts_with("-----BEGIN AGE ENCRYPTED FILE-----")
-    );
-    assert_eq!(
-        stored_passwords.get(&keyring_entry_key(&config_path)?),
-        Some(&"flag-secret".to_owned())
-    );
-    assert_eq!(
-        string_at(&shown.parse::<Value>()?, &["auth", "issuer"]),
-        "gate-agent"
-    );
+
+    let config = load_toml(&written_path)?;
+    assert!(config.get("auth").is_none());
+    assert!(config.get("groups").and_then(Value::as_table).is_some());
+    assert!(config.get("apis").and_then(Value::as_table).is_some());
 
     Ok(())
 }
 
-#[test]
-fn encrypted_runtime_load_uses_keyring_password_without_cli_password()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join("runtime.secrets");
-    let keyring_path = temp_dir.path().join("test-keyring.json");
-
-    unsafe {
-        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
-        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
-        std::env::remove_var(PASSWORD_ENV_VAR);
+fn write_text(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
-    init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: true,
-        password: Some("runtime-secret".to_owned()),
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    let args = gate_agent::cli::StartArgs {
-        bind: DEFAULT_BIND.parse()?,
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    };
-    let loaded = AppConfig::from_start_args_with_stdin(&args, StartConfigStdin::terminal())?;
-
-    assert_eq!(loaded.config_path(), Some(config_path.as_path()));
-    assert_eq!(loaded.secrets().auth.issuer, "gate-agent");
-
+    std::fs::write(path, contents)?;
     Ok(())
 }
 
-#[test]
-fn encrypted_init_removes_new_file_when_keyring_store_fails()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join("broken.secrets");
-    let keyring_path = temp_dir.path().join("test-keyring.json");
+fn load_toml(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+    Ok(std::fs::read_to_string(path)?.parse::<Value>()?)
+}
 
-    unsafe {
-        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
-        std::env::set_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR, "fake keyring locked");
+fn table_at<'a>(value: &'a Value, path: &[&str]) -> &'a toml::map::Map<String, Value> {
+    let mut current = value;
+
+    for key in path {
+        current = current
+            .get(*key)
+            .unwrap_or_else(|| panic!("missing key: {key}"));
     }
 
-    let error = init(ConfigInitArgs {
-        config: Some(config_path.clone()),
-        encrypted: true,
-        password: Some("top-secret".to_owned()),
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })
-    .expect_err("init should fail when keyring storage fails");
+    current
+        .as_table()
+        .unwrap_or_else(|| panic!("expected table at {}", path.join(".")))
+}
 
-    assert!(
-        error
-            .to_string()
-            .contains("failed to store password in system keyring")
+fn string_at<'a>(value: &'a Value, path: &[&str]) -> &'a str {
+    let mut current = value;
+
+    for key in path {
+        current = current
+            .get(*key)
+            .unwrap_or_else(|| panic!("missing key: {key}"));
+    }
+
+    current
+        .as_str()
+        .unwrap_or_else(|| panic!("expected string at {}", path.join(".")))
+}
+
+fn printed_tokens(stdout: &str) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            parse_printed_token(line)
+                .ok_or_else(|| format!("unexpected stdout line: {line}").into())
+        })
+        .collect()
+}
+
+fn parse_printed_token(line: &str) -> Option<(String, String)> {
+    let prefix = "generated bearer token for client '";
+    let rest = line.strip_prefix(prefix)?;
+    let (client_name, token) = rest.split_once("': ")?;
+    split_full_token(token)?;
+    Some((client_name.to_owned(), token.to_owned()))
+}
+
+fn split_full_token(value: &str) -> Option<(&str, &str)> {
+    let (token_id, secret) = value.split_once('.')?;
+
+    if token_id.is_empty() || secret.is_empty() || secret.contains('.') {
+        return None;
+    }
+
+    Some((token_id, secret))
+}
+
+fn assert_client_metadata_matches(config: &Value, client_name: &str, full_token: &str) {
+    let client = table_at(config, &["clients", client_name]);
+    let (token_id, _) = split_full_token(full_token).expect("token format");
+
+    assert_eq!(
+        client.get("bearer_token_id").and_then(Value::as_str),
+        Some(token_id)
+    );
+    assert_eq!(
+        client.get("bearer_token_hash").and_then(Value::as_str),
+        Some(sha256_hex(full_token).as_str())
     );
     assert!(
-        error
-            .to_string()
-            .contains("removed the newly created encrypted config file")
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str)
+            .is_some()
     );
-    assert!(!config_path.exists());
-    assert!(read_test_keyring(&keyring_path)?.is_empty());
+    assert!(client.get("api_key").is_none());
+    assert!(client.get("api_key_expires_at").is_none());
+}
 
-    Ok(())
+fn assert_no_plain_bearer_token_persisted(config: &Value, full_token: &str) {
+    let rendered = toml::to_string(config).expect("toml render");
+    assert!(!rendered.contains(full_token));
 }

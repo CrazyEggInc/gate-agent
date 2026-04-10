@@ -3,8 +3,10 @@ use std::path::Path;
 use std::str::FromStr;
 
 use http::header::HeaderName;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use url::Url;
 
 use super::ConfigError;
@@ -15,7 +17,6 @@ use super::password::{
 };
 
 pub const DEFAULT_API_TIMEOUT_MS: u64 = 5_000;
-
 pub(crate) fn is_valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -25,25 +26,20 @@ pub(crate) fn is_valid_slug(value: &str) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct SecretsConfig {
-    pub auth: AuthConfig,
     pub clients: BTreeMap<String, ClientConfig>,
     pub apis: BTreeMap<String, ApiConfig>,
 }
 
 #[derive(Clone, Debug)]
-pub struct AuthConfig {
-    pub issuer: String,
-    pub audience: String,
-    pub signing_secret: SecretString,
-}
-
-#[derive(Clone, Debug)]
 pub struct ClientConfig {
-    pub slug: String,
-    pub api_key: SecretString,
-    pub api_key_expires_at: UtcTimestamp,
+    pub bearer_token_id: String,
+    pub bearer_token_hash: BearerTokenHash,
+    pub bearer_token_expires_at: UtcTimestamp,
     pub api_access: BTreeMap<String, AccessLevel>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BearerTokenHash(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,7 +74,6 @@ pub struct ApiConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSecretsConfig {
-    auth: RawAuthConfig,
     #[serde(default)]
     clients: BTreeMap<String, RawClientConfig>,
     #[serde(default)]
@@ -90,8 +85,9 @@ struct RawSecretsConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawClientConfig {
-    api_key: String,
-    api_key_expires_at: String,
+    bearer_token_id: String,
+    bearer_token_hash: String,
+    bearer_token_expires_at: String,
     group: Option<String>,
     api_access: Option<BTreeMap<String, AccessLevel>>,
 }
@@ -100,14 +96,6 @@ struct RawClientConfig {
 #[serde(deny_unknown_fields)]
 struct RawGroupConfig {
     api_access: BTreeMap<String, AccessLevel>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAuthConfig {
-    issuer: String,
-    audience: String,
-    signing_secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,8 +178,6 @@ impl SecretsConfig {
     }
 
     fn try_from_raw(raw_config: RawSecretsConfig) -> Result<Self, ConfigError> {
-        let auth = AuthConfig::try_from_raw(raw_config.auth)?;
-
         if raw_config.clients.is_empty() {
             return Err(ConfigError::new(
                 "at least one [clients.*] entry is required",
@@ -218,25 +204,28 @@ impl SecretsConfig {
         }
 
         let mut clients = BTreeMap::new();
-        let mut client_api_keys = BTreeSet::new();
+        let mut bearer_token_ids = BTreeSet::new();
+        let mut bearer_token_hashes = BTreeSet::new();
 
         for (slug, raw_client) in raw_config.clients {
             let client = ClientConfig::try_from_raw(&slug, raw_client, &groups, &apis)?;
 
-            if !client_api_keys.insert(client.api_key.expose_secret().to_owned()) {
+            if !bearer_token_ids.insert(client.bearer_token_id.clone()) {
                 return Err(ConfigError::new(format!(
-                    "clients.{slug}.api_key duplicates another configured client api_key"
+                    "clients.{slug}.bearer_token_id duplicates another configured client bearer_token_id"
+                )));
+            }
+
+            if !bearer_token_hashes.insert(client.bearer_token_hash.as_str().to_owned()) {
+                return Err(ConfigError::new(format!(
+                    "clients.{slug}.bearer_token_hash duplicates another configured client bearer_token_hash"
                 )));
             }
 
             clients.insert(slug, client);
         }
 
-        Ok(Self {
-            auth,
-            clients,
-            apis,
-        })
+        Ok(Self { clients, apis })
     }
 
     pub fn default_client(&self) -> Result<&ClientConfig, ConfigError> {
@@ -244,18 +233,22 @@ impl SecretsConfig {
             .get("default")
             .ok_or_else(|| ConfigError::new("missing required [clients.default] entry"))
     }
-}
 
-impl AuthConfig {
-    fn try_from_raw(raw_config: RawAuthConfig) -> Result<Self, ConfigError> {
-        Ok(Self {
-            issuer: required_string("auth.issuer", raw_config.issuer)?,
-            audience: required_string("auth.audience", raw_config.audience)?,
-            signing_secret: SecretString::from(required_string(
-                "auth.signing_secret",
-                raw_config.signing_secret,
-            )?),
-        })
+    pub fn client_by_bearer_token_id(&self, bearer_token_id: &str) -> Option<&ClientConfig> {
+        self.clients
+            .values()
+            .find(|client| client.bearer_token_id == bearer_token_id)
+    }
+
+    pub fn client_slug_by_bearer_token_id(&self, bearer_token_id: &str) -> Option<&str> {
+        self.clients
+            .iter()
+            .find(|(_, client)| client.bearer_token_id == bearer_token_id)
+            .map(|(slug, _)| slug.as_str())
+    }
+
+    pub fn client_slug(&self, client: &ClientConfig) -> Option<&str> {
+        self.client_slug_by_bearer_token_id(&client.bearer_token_id)
     }
 }
 
@@ -268,13 +261,17 @@ impl ClientConfig {
     ) -> Result<Self, ConfigError> {
         validate_slug("client", slug)?;
 
-        let api_key = SecretString::from(required_string(
-            &format!("clients.{slug}.api_key"),
-            raw_config.api_key,
-        )?);
-        let api_key_expires_at = UtcTimestamp::parse(
-            &format!("clients.{slug}.api_key_expires_at"),
-            raw_config.api_key_expires_at,
+        let bearer_token_id = required_string(
+            &format!("clients.{slug}.bearer_token_id"),
+            raw_config.bearer_token_id,
+        )?;
+        let bearer_token_hash = BearerTokenHash::parse(
+            &format!("clients.{slug}.bearer_token_hash"),
+            raw_config.bearer_token_hash,
+        )?;
+        let bearer_token_expires_at = UtcTimestamp::parse(
+            &format!("clients.{slug}.bearer_token_expires_at"),
+            raw_config.bearer_token_expires_at,
         )?;
 
         let api_access = match (raw_config.group, raw_config.api_access) {
@@ -303,11 +300,48 @@ impl ClientConfig {
         };
 
         Ok(Self {
-            slug: slug.to_owned(),
-            api_key,
-            api_key_expires_at,
+            bearer_token_id,
+            bearer_token_hash,
+            bearer_token_expires_at,
             api_access,
         })
+    }
+}
+
+impl BearerTokenHash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn from_token(token: &str) -> Self {
+        let digest = Sha256::digest(token.as_bytes());
+        Self(hex_lower(&digest))
+    }
+
+    pub fn matches_token(&self, token: &str) -> bool {
+        let digest = Sha256::digest(token.as_bytes());
+        decode_hex_32(&self.0)
+            .as_slice()
+            .ct_eq(digest.as_slice())
+            .into()
+    }
+
+    fn parse(field: &str, value: String) -> Result<Self, ConfigError> {
+        let value = required_string(field, value)?;
+
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ConfigError::new(format!(
+                "{field} must be a 64-character lowercase SHA-256 hex digest"
+            )));
+        }
+
+        if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(ConfigError::new(format!(
+                "{field} must be a 64-character lowercase SHA-256 hex digest"
+            )));
+        }
+
+        Ok(Self(value))
     }
 }
 
@@ -550,4 +584,33 @@ fn unix_timestamp_from_utc(
     let days_since_epoch = era * 146_097 + day_of_era - 719_468;
 
     Ok(days_since_epoch * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        output.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+        output.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+    }
+
+    output
+}
+
+fn decode_hex_32(value: &str) -> [u8; 32] {
+    let mut output = [0_u8; 32];
+
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        output[index] = (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]);
+    }
+
+    output
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => unreachable!("validated lowercase hex digest"),
+    }
 }

@@ -2,10 +2,9 @@ use std::{
     future::Future,
     io,
     io::Write,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
-
-mod support;
 
 use axum::{
     Router,
@@ -13,12 +12,20 @@ use axum::{
     http::{Request, Response, StatusCode},
     routing::any,
 };
-use gate_agent::{app::AppState, proxy::router::build_router, telemetry::build_env_filter};
+use gate_agent::{
+    app::AppState,
+    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
+    proxy::router::build_router,
+    telemetry::build_env_filter,
+};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use support::{load_test_config, signed_token, signed_token_for_client, spawn_upstream};
+use tempfile::tempdir;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 use tracing_subscriber::fmt::MakeWriter;
+
+const DEFAULT_TOKEN: &str = "default.s3cr3t";
 
 #[derive(Clone, Default)]
 struct SharedBuffer {
@@ -205,6 +212,66 @@ fn assert_message_absent(entries: &[Value], unexpected: &str) {
     );
 }
 
+fn write_secrets_file(
+    contents: &str,
+) -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let secrets_file = temp_dir.path().join(".secrets");
+    std::fs::write(&secrets_file, contents)?;
+    Ok((temp_dir, secrets_file))
+}
+
+fn load_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_secrets_file(&format!(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = {{ billing = "write" }}
+
+[clients.partner]
+bearer_token_id = "partner"
+bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
+bearer_token_expires_at = "2030-01-03T03:04:05Z"
+api_access = {{ projects = "write" }}
+
+[apis.projects]
+base_url = "{base_url}"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+
+[apis.billing]
+base_url = "{base_url}/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#,
+    ))?;
+
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
+}
+
+async fn spawn_upstream(app: Router) -> Result<String, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("upstream server should run");
+    });
+
+    Ok(format!("http://{address}"))
+}
+
 async fn captured_dispatch<F, Fut>(
     log_level: &str,
     run: F,
@@ -263,7 +330,6 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     );
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token("billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let logs = captured_dispatch("debug", || async {
@@ -272,7 +338,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
                 Request::builder()
                     .uri("/proxy/billing/v1/projects/1/tasks?expand=1&jwt=query-secret")
                     .header("x-request-id", "req-success")
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
                     .body(Body::empty())?,
             )
             .await?;
@@ -359,7 +425,12 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         "logs were: {}",
         logs.raw
     );
-    assert!(!logs.raw.contains(&token), "logs were: {}", logs.raw);
+    assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
+    assert!(
+        !logs.raw.contains(&format!("Bearer {DEFAULT_TOKEN}")),
+        "logs were: {}",
+        logs.raw
+    );
     assert!(
         !logs.raw.contains("billing-secret-token"),
         "logs were: {}",
@@ -381,90 +452,11 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn auth_exchange_logs_do_not_leak_api_key_or_query_values()
--> Result<(), Box<dyn std::error::Error>> {
-    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
-    let base_url = spawn_upstream(upstream).await?;
-    let config = load_test_config(&base_url)?;
-    let app = build_router(AppState::from_config(&config)?);
-
-    let logs = captured_dispatch("debug", || async {
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/auth/exchange?token=query-secret")
-                    .header("x-request-id", "req-auth-log")
-                    .header("content-type", "application/json")
-                    .header("x-api-key", "default-client-key")
-                    .body(Body::from(r#"{"apis":{"billing":"write"}}"#))?,
-            )
-            .await?;
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        Ok(())
-    })
-    .await?;
-
-    let completion = find_event_with_keys(
-        &logs.entries,
-        &[
-            "client",
-            "request_id",
-            "method",
-            "uri",
-            "status",
-            "latency_ms",
-        ],
-    );
-
-    assert_eq!(
-        find_string(completion, &["client"]).as_deref(),
-        Some("default")
-    );
-    assert_eq!(
-        find_string(completion, &["request_id"]).as_deref(),
-        Some("req-auth-log")
-    );
-    assert_eq!(
-        find_string(completion, &["method"]).as_deref(),
-        Some("POST")
-    );
-    assert_eq!(
-        find_string(completion, &["uri"]).as_deref(),
-        Some("/auth/exchange")
-    );
-    assert_eq!(
-        find_status_code(completion, &["status", "status_code"]),
-        Some(200)
-    );
-    assert!(
-        find_u64(completion, &["latency_ms"]).is_some(),
-        "logs were: {}",
-        logs.raw
-    );
-    assert!(
-        !logs.raw.contains("token=query-secret"),
-        "logs were: {}",
-        logs.raw
-    );
-    assert!(
-        !logs.raw.contains("default-client-key"),
-        "logs were: {}",
-        logs.raw
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn completion_logs_add_error_code_only_for_application_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
     let config = load_test_config(&base_url)?;
-    let token = signed_token_for_client("default", "billing", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let logs = captured_dispatch("debug", || async {
@@ -473,7 +465,7 @@ async fn completion_logs_add_error_code_only_for_application_errors()
                 Request::builder()
                     .uri("/proxy/projects/v1/projects/1/tasks")
                     .header("x-request-id", "req-forbidden")
-                    .header("authorization", format!("Bearer {token}"))
+                    .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
                     .body(Body::empty())?,
             )
             .await?;
@@ -522,6 +514,12 @@ async fn completion_logs_add_error_code_only_for_application_errors()
     assert_eq!(
         find_string(completion, &["error_code"]).as_deref(),
         Some("forbidden_api")
+    );
+    assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
+    assert!(
+        !logs.raw.contains(&format!("Bearer {DEFAULT_TOKEN}")),
+        "logs were: {}",
+        logs.raw
     );
     assert!(
         !contains_key(completion, "upstream_method"),

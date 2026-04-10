@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::{Method, Request, StatusCode, header},
     response::Response,
-    routing::{any, post},
+    routing::any,
 };
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -16,8 +16,7 @@ use tower_http::{
 use tracing::{Level, info};
 
 use crate::app::AppState;
-use crate::auth::exchange::exchange_handler;
-use crate::auth::jwt::validate_bearer_authorized_request;
+use crate::auth::bearer::validate_bearer_authorized_request;
 use crate::config::secrets::AccessLevel;
 use crate::error::{AppError, LoggedErrorCode};
 use crate::telemetry::{
@@ -45,7 +44,6 @@ struct ProxyResponseError {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/auth/exchange", post(exchange_handler))
         .route("/proxy/{api}", any(proxy_handler))
         .route("/proxy/{api}/", any(proxy_handler))
         .route("/proxy/{api}/{*path}", any(proxy_handler_with_path))
@@ -237,7 +235,7 @@ async fn handle_proxy_request(
     let required_access = required_access_for_method(request.method());
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())
         .map_err(proxy_error_without_client)?;
-    let Some(token_access) = authorized.claims.apis.get(&api_slug).copied() else {
+    let Some(token_access) = authorized.access.apis.get(&api_slug).copied() else {
         return Err(proxy_error_with_client(
             AppError::ForbiddenApi { api: api_slug },
             authorized.client_slug,

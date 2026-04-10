@@ -30,19 +30,16 @@ fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
 }
 
 const VALID_SECRETS: &str = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
 [clients.default]
-api_key = "default-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
 api_access = { projects = "write", billing = "write" }
 
 [clients.partner]
-api_key = "partner-key"
-api_key_expires_at = "2026-10-09T12:00:00Z"
+bearer_token_id = "partner"
+bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
+bearer_token_expires_at = "2026-10-09T12:00:00Z"
 api_access = { projects = "write" }
 
 [apis.projects]
@@ -60,15 +57,11 @@ timeout_ms = 5000
 "#;
 
 #[test]
-fn app_state_exposes_auth_config_and_existing_api_lookup() -> Result<(), Box<dyn std::error::Error>>
-{
+fn app_state_exposes_existing_api_lookup() -> Result<(), Box<dyn std::error::Error>> {
     let state = load_state(VALID_SECRETS)?;
 
-    let auth = state.auth_config();
     let api = state.api_config("billing")?;
 
-    assert_eq!(auth.issuer, "gate-agent-dev");
-    assert_eq!(auth.audience, "gate-agent-clients");
     assert_eq!(api.slug, "billing");
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
 
@@ -76,13 +69,12 @@ fn app_state_exposes_auth_config_and_existing_api_lookup() -> Result<(), Box<dyn
 }
 
 #[test]
-fn app_state_resolves_client_by_api_key() -> Result<(), Box<dyn std::error::Error>> {
+fn app_state_resolves_client_by_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
     let state = load_state(VALID_SECRETS)?;
 
-    let client = state.client_for_api_key("partner-key")?;
+    let client = state.client_for_bearer_token("partner.s3cr3t")?;
     let projects_access = state.client_api_access(client, "projects")?;
 
-    assert_eq!(client.slug, "partner");
     assert_eq!(
         projects_access,
         gate_agent::config::secrets::AccessLevel::Write
@@ -95,14 +87,10 @@ fn app_state_resolves_client_by_api_key() -> Result<(), Box<dyn std::error::Erro
 fn app_state_exposes_group_derived_client_access() -> Result<(), Box<dyn std::error::Error>> {
     let state = load_state(
         r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
 [clients.partner]
-api_key = "partner-key"
-api_key_expires_at = "2026-10-09T12:00:00Z"
+bearer_token_id = "partner"
+bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
+bearer_token_expires_at = "2026-10-09T12:00:00Z"
 group = "shared-read"
 
 [groups.shared-read]
@@ -123,9 +111,8 @@ timeout_ms = 5000
 "#,
     )?;
 
-    let client = state.client_for_api_key("partner-key")?;
+    let client = state.client_for_bearer_token("partner.s3cr3t")?;
 
-    assert_eq!(client.slug, "partner");
     assert_eq!(
         state.client_api_access(client, "projects")?,
         gate_agent::config::secrets::AccessLevel::Read
@@ -150,10 +137,25 @@ fn app_state_rejects_missing_api_lookup() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn app_state_rejects_unknown_api_key() -> Result<(), Box<dyn std::error::Error>> {
+fn app_state_rejects_blank_malformed_and_unknown_bearer_tokens()
+-> Result<(), Box<dyn std::error::Error>> {
     let state = load_state(VALID_SECRETS)?;
 
-    let error = state.client_for_api_key("missing-key").unwrap_err();
+    for token in [
+        "",
+        "   ",
+        " partner.s3cr3t ",
+        "missing",
+        ".secret",
+        "partner.",
+        "partner.secret.extra",
+    ] {
+        let error = state.client_for_bearer_token(token).unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidToken));
+    }
+
+    let error = state.client_for_bearer_token("missing.s3cr3t").unwrap_err();
 
     assert!(matches!(error, AppError::InvalidToken));
 
@@ -161,17 +163,24 @@ fn app_state_rejects_unknown_api_key() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
-fn app_state_rejects_expired_api_key() -> Result<(), Box<dyn std::error::Error>> {
+fn app_state_rejects_hash_mismatch_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
+    let state = load_state(VALID_SECRETS)?;
+
+    let error = state.client_for_bearer_token("partner.secret").unwrap_err();
+
+    assert!(matches!(error, AppError::InvalidToken));
+
+    Ok(())
+}
+
+#[test]
+fn app_state_rejects_expired_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
     let state = load_state(
         r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
 [clients.default]
-api_key = "expired-key"
-api_key_expires_at = "2020-10-08T12:00:00Z"
+bearer_token_id = "expired"
+bearer_token_hash = "ebb3c39e47bd8ebff3c889fcb0acdde61ef2d7913af92cdf821bb821ee90d048"
+bearer_token_expires_at = "2020-10-08T12:00:00Z"
 api_access = { projects = "write" }
 
 [apis.projects]
@@ -182,46 +191,9 @@ timeout_ms = 5000
 "#,
     )?;
 
-    let error = state.client_for_api_key("expired-key").unwrap_err();
+    let error = state.client_for_bearer_token("expired.s3cr3t").unwrap_err();
 
     assert!(matches!(error, AppError::InvalidToken));
-
-    Ok(())
-}
-
-#[test]
-fn app_state_fails_fast_on_duplicate_api_keys() -> Result<(), Box<dyn std::error::Error>> {
-    let (_temp_dir, config_file) = write_secrets_file(
-        r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "shared-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "write" }
-
-[clients.partner]
-api_key = "shared-key"
-api_key_expires_at = "2026-10-09T12:00:00Z"
-api_access = { projects = "write" }
-
-[apis.projects]
-base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
-timeout_ms = 5000
-"#,
-    )?;
-
-    let error = SecretsConfig::load_from_file(&config_file).unwrap_err();
-
-    assert_eq!(
-        error.to_string(),
-        "clients.partner.api_key duplicates another configured client api_key"
-    );
 
     Ok(())
 }

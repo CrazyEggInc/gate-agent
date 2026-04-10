@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use crate::cli::{
     Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigEditArgs,
-    ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs, CurlArgs, StartArgs,
+    ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs, StartArgs,
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
@@ -11,7 +11,6 @@ use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
 pub mod config;
-pub mod curl;
 pub mod start;
 
 #[derive(Debug)]
@@ -52,13 +51,8 @@ pub fn run(command: Command) -> Result<(), CommandError> {
 
     match command {
         Command::Start(args) => run_start(args),
-        Command::Curl(args) => run_curl(args),
         Command::Config(args) => run_config(args),
     }
-}
-
-fn run_curl(args: CurlArgs) -> Result<(), CommandError> {
-    curl::run(args)
 }
 
 fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
@@ -151,8 +145,7 @@ fn map_config_add_client_args(args: ConfigAddClientArgs) -> config::ConfigAddCli
         password: args.password,
         log_level: args.log_level,
         name: args.name,
-        api_key: args.api_key,
-        api_key_expires_at: args.api_key_expires_at,
+        bearer_token_expires_at: args.bearer_token_expires_at,
         group: args.group,
         api_access: args.api_access,
     }

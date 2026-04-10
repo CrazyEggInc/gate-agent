@@ -2,7 +2,7 @@
 
 ## Project summary
 
-`gate-agent` is a local Rust proxy for internal upstream APIs. It authenticates clients, authorizes access to configured API slugs, injects upstream credentials, and forwards requests to the configured upstream.
+`gate-agent` is a local Rust proxy for internal upstream APIs. It authenticates clients with configured bearer tokens, authorizes access to configured API slugs, injects upstream credentials, and forwards requests to the configured upstream.
 
 ## Technologies
 
@@ -13,16 +13,15 @@
 - Clap for CLI parsing
 - Serde / serde_json / toml for config and payload serialization
 - toml_edit for config file updates
-- jsonwebtoken for HS256 JWT signing and validation
 - secrecy for handling secrets in memory
 
 ## Directory map
 
 - `src/cli.rs` — CLI argument surface
 - `src/commands/` — command handlers
-- `src/auth/` — auth exchange, JWT claims, token validation/signing
-- `src/config/` — config resolution, parsing, validation, writing
-- `src/proxy/` — proxy routing, request/response mapping, upstream execution
+- `src/auth/` — bearer token lookup, validation, and API authorization
+- `src/config/` — config resolution, parsing, validation, and bearer-token client definitions
+- `src/proxy/` — proxy authorization, request/response mapping, and upstream execution
 - `src/app/` — runtime app state
 - `tests/` — integration tests
 - `docs/` — canonical agent-facing documentation of current behavior

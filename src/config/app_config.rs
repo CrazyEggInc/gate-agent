@@ -279,12 +279,16 @@ mod tests {
     fn nonblocking_stdin_reader_collects_chunked_bytes_until_eof() {
         let (mut reader, mut writer) = UnixStream::pair().expect("unix stream pair");
         writer
-            .write_all(b"[auth]\nissuer = \"stdin\"\n")
+            .write_all(b"[clients.default]\nbearer_token_id = \"stdin\"\n")
             .expect("write stdin bytes");
         let writer_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
             writer
-                .write_all(b"audience = \"stdin-clients\"\n")
+                .write_all(
+                    b"bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\
+bearer_token_expires_at = \"2030-01-01T00:00:00Z\"\n\
+api_access = {}\n",
+                )
                 .expect("write trailing stdin bytes");
         });
 
@@ -293,7 +297,10 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(bytes).expect("utf-8"),
-            "[auth]\nissuer = \"stdin\"\naudience = \"stdin-clients\"\n"
+            "[clients.default]\nbearer_token_id = \"stdin\"\n\
+bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\
+bearer_token_expires_at = \"2030-01-01T00:00:00Z\"\n\
+api_access = {}\n"
         );
     }
 }

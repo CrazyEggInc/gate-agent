@@ -20,8 +20,6 @@ pub enum AppError {
     SecretsLoad(String),
     #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("api key validation failed")]
-    InvalidApiKey,
     #[error("token validation failed")]
     InvalidToken,
     #[error("api is not allowed: {api}")]
@@ -56,7 +54,6 @@ impl AppError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::InvalidApiKey => StatusCode::UNAUTHORIZED,
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::ForbiddenApi { .. } => StatusCode::FORBIDDEN,
             Self::BadProxyPath(_) => StatusCode::BAD_REQUEST,
@@ -75,7 +72,6 @@ impl AppError {
             Self::ConfigLoad(_) => "config_load",
             Self::SecretsLoad(_) => "secrets_load",
             Self::BadRequest(_) => "bad_request",
-            Self::InvalidApiKey => "invalid_api_key",
             Self::InvalidToken => "invalid_token",
             Self::ForbiddenApi { .. } => "forbidden_api",
             Self::BadProxyPath(_) => "bad_proxy_path",
@@ -93,7 +89,6 @@ impl AppError {
                 "internal server error"
             }
             Self::BadRequest(_) => "request is invalid",
-            Self::InvalidApiKey => "authentication failed",
             Self::InvalidToken => "authentication failed",
             Self::ForbiddenApi { .. } => "api access is forbidden",
             Self::BadProxyPath(_) => "request path is invalid",

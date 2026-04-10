@@ -10,14 +10,10 @@ use gate_agent::{
 use tempfile::tempdir;
 
 const VALID_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent"
-audience = "gate-agent-clients"
-signing_secret = "replace-me-with-a-long-enough-secret"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { projects = "read" }
 
 [apis.projects]

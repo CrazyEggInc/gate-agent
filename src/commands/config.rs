@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use toml_edit::{DocumentMut, Table};
 
 use crate::cli::StartArgs;
 use crate::config::ConfigError;
@@ -121,8 +122,7 @@ pub struct ConfigAddClientArgs {
     pub password: Option<String>,
     pub log_level: String,
     pub name: String,
-    pub api_key: Option<String>,
-    pub api_key_expires_at: Option<String>,
+    pub bearer_token_expires_at: Option<String>,
     pub group: Option<String>,
     pub api_access: Vec<String>,
 }
@@ -146,7 +146,8 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
         None
     };
 
-    write::init_config(&path, args.encrypted, password.as_ref())?;
+    let default_bearer_token =
+        write::init_config_with_default_bearer_token(&path, args.encrypted, password.as_ref())?;
 
     if let Some(password) = password.as_ref() {
         match ConfigKeyring::default().store_password(&path, password.expose_secret()) {
@@ -164,6 +165,8 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
             }
         }
     }
+
+    print_generated_bearer_token("default", &default_bearer_token);
 
     Ok(path)
 }
@@ -323,7 +326,7 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
     };
 
     let path = resolve_target_path(args.config.as_deref())?;
-    ensure_config_exists(&path)?;
+    let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
     let password = password_for_existing_encrypted_file(&path, args.password)?;
     write::upsert_api(
         &path,
@@ -338,24 +341,22 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
         password.as_ref(),
     )?;
 
+    if let Some(token) = generated_default_bearer_token.as_deref() {
+        print_generated_bearer_token("default", token);
+    }
+
     Ok(path)
 }
 
 pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandError> {
     ensure_slug("client", &args.name)?;
 
-    let api_key = args
-        .api_key
-        .as_deref()
-        .map(|value| trimmed_required("api_key", value))
-        .transpose()?;
-
-    let api_key_expires_at = args
-        .api_key_expires_at
+    let bearer_token_expires_at = args
+        .bearer_token_expires_at
         .as_deref()
         .map(|value| {
-            let value = trimmed_required("api_key_expires_at", value)?;
-            validate_timestamp(&value)?;
+            let value = trimmed_required("bearer_token_expires_at", value)?;
+            validate_timestamp("bearer_token_expires_at", &value)?;
             Ok::<String, ConfigCommandError>(value)
         })
         .transpose()?;
@@ -373,14 +374,18 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
     let api_access = parse_api_access_args(&args.api_access)?;
 
     let path = resolve_target_path(args.config.as_deref())?;
-    ensure_config_exists(&path)?;
+    let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
     let password = password_for_existing_encrypted_file(&path, args.password)?;
+
+    let existing = load_existing_client_bearer_metadata(&path, password.as_ref(), &args.name)?;
+    let resolved = resolve_bearer_token_metadata(bearer_token_expires_at, existing)?;
+
     write::upsert_client(
         &path,
         &ClientUpsert {
-            name: args.name,
-            api_key,
-            api_key_expires_at,
+            name: args.name.clone(),
+            bearer_token: resolved.bearer_token.clone(),
+            bearer_token_expires_at: Some(resolved.expires_at.clone()),
             access: match group {
                 Some(group) => ClientAccessUpsert::Group(group),
                 None => ClientAccessUpsert::ApiAccess(api_access),
@@ -389,7 +394,27 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
         password.as_ref(),
     )?;
 
+    if let Some(token) = generated_default_bearer_token.as_deref() {
+        print_generated_bearer_token("default", token);
+    }
+
+    if let Some(token) = resolved.generated_token.as_deref() {
+        print_generated_bearer_token(&args.name, token);
+    }
+
     Ok(path)
+}
+
+#[derive(Clone, Debug)]
+struct ExistingBearerMetadata {
+    expires_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedBearerMetadata {
+    expires_at: String,
+    bearer_token: Option<String>,
+    generated_token: Option<String>,
 }
 
 fn resolve_target_path(
@@ -409,13 +434,122 @@ fn resolve_existing_path(
         .map_err(|error| ConfigCommandError::new(error.to_string()))
 }
 
-fn ensure_config_exists(path: &std::path::Path) -> Result<(), ConfigCommandError> {
+fn ensure_config_exists(
+    path: &std::path::Path,
+    password: Option<&str>,
+) -> Result<Option<String>, ConfigCommandError> {
     if path.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
-    write::init_config(path, false, None)?;
-    Ok(())
+    let encrypted = password.is_some();
+    let resolved_password = match password {
+        Some(password) => Some(
+            resolve_for_encrypted_create(
+                &PasswordArgs {
+                    password: Some(password.to_owned()),
+                },
+                path,
+            )?
+            .password,
+        ),
+        None => None,
+    };
+
+    write::init_config_with_default_bearer_token(path, encrypted, resolved_password.as_ref())
+        .map(Some)
+        .map_err(ConfigCommandError::from)
+}
+
+fn print_generated_bearer_token(client_name: &str, token: &str) {
+    println!("generated bearer token for client '{client_name}': {token}");
+}
+
+fn load_existing_client_bearer_metadata(
+    path: &Path,
+    password: Option<&secrecy::SecretString>,
+    client_name: &str,
+) -> Result<Option<ExistingBearerMetadata>, ConfigCommandError> {
+    let loaded = write::load_display_text(path, password)?;
+    let document = parse_config(path, &loaded.toml)?;
+    let Some(client_table) = find_table(document.as_table(), &["clients", client_name]) else {
+        return Ok(None);
+    };
+
+    let Some(_id) = find_string_value(client_table, "bearer_token_id") else {
+        return Ok(None);
+    };
+    let Some(_hash) = find_string_value(client_table, "bearer_token_hash") else {
+        return Ok(None);
+    };
+    let Some(expires_at) = find_string_value(client_table, "bearer_token_expires_at") else {
+        return Ok(None);
+    };
+
+    Ok(Some(ExistingBearerMetadata { expires_at }))
+}
+
+fn resolve_bearer_token_metadata(
+    bearer_token_expires_at: Option<String>,
+    existing: Option<ExistingBearerMetadata>,
+) -> Result<ResolvedBearerMetadata, ConfigCommandError> {
+    match (bearer_token_expires_at, existing) {
+        (Some(expires_at), Some(_existing)) => Ok(ResolvedBearerMetadata {
+            expires_at,
+            bearer_token: None,
+            generated_token: None,
+        }),
+        (None, Some(existing)) => Ok(ResolvedBearerMetadata {
+            expires_at: existing.expires_at,
+            bearer_token: None,
+            generated_token: None,
+        }),
+        (expires_at, None) => {
+            let token = write::generate_bearer_token()?;
+            compute_bearer_token_metadata(
+                &token,
+                expires_at.unwrap_or(default_bearer_token_expires_at()?),
+                Some(token.clone()),
+                Some(token.clone()),
+            )
+        }
+    }
+}
+
+fn compute_bearer_token_metadata(
+    _token: &str,
+    expires_at: String,
+    bearer_token: Option<String>,
+    generated_token: Option<String>,
+) -> Result<ResolvedBearerMetadata, ConfigCommandError> {
+    Ok(ResolvedBearerMetadata {
+        expires_at,
+        bearer_token,
+        generated_token,
+    })
+}
+
+fn parse_config(path: &Path, contents: &str) -> Result<DocumentMut, ConfigCommandError> {
+    contents.parse::<DocumentMut>().map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to parse config file '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn find_table<'a>(parent: &'a Table, path: &[&str]) -> Option<&'a Table> {
+    let mut current = parent;
+
+    for key in path {
+        current = current.get(key)?.as_table()?;
+    }
+
+    Some(current)
+}
+
+fn find_string_value(table: &Table, key: &str) -> Option<String> {
+    table.get(key)?.as_str().map(str::to_owned)
 }
 
 fn password_for_existing_encrypted_file(
@@ -588,10 +722,36 @@ fn validate_header_name(header: &str, slug: &str) -> Result<(), ConfigCommandErr
     Ok(())
 }
 
-fn validate_timestamp(value: &str) -> Result<(), ConfigCommandError> {
+fn validate_timestamp(field: &str, value: &str) -> Result<(), ConfigCommandError> {
     parse_rfc3339_utc(value)
         .map(|_| ())
-        .map_err(|error| ConfigCommandError::new(format!("invalid api_key_expires_at: {error}")))
+        .map_err(|error| ConfigCommandError::new(format!("invalid {field}: {error}")))
+}
+
+fn default_bearer_token_expires_at() -> Result<String, ConfigCommandError> {
+    let expires_at = SystemTime::now()
+        .checked_add(Duration::from_secs(180 * 24 * 60 * 60))
+        .ok_or_else(|| ConfigCommandError::new("failed to compute bearer token expiration"))?;
+
+    let unix_seconds = expires_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ConfigCommandError::new(format!("system clock is before unix epoch: {error}"))
+        })?
+        .as_secs();
+
+    Ok(format_rfc3339(unix_seconds))
+}
+
+fn format_rfc3339(unix_seconds: u64) -> String {
+    let days = unix_seconds / 86_400;
+    let seconds_of_day = unix_seconds % 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, &'static str> {

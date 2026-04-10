@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::config::secrets::AccessLevel;
@@ -15,10 +16,7 @@ use super::crypto::{
     write_config_file_atomic,
 };
 
-pub const DEFAULT_AUTH_ISSUER: &str = "gate-agent";
-pub const DEFAULT_AUTH_AUDIENCE: &str = "gate-agent-clients";
-
-const DEFAULT_API_KEY_VALIDITY_DAYS: u64 = 180;
+const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiUpsert {
@@ -39,9 +37,16 @@ pub enum ClientAccessUpsert {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientUpsert {
     pub name: String,
-    pub api_key: Option<String>,
-    pub api_key_expires_at: Option<String>,
+    pub bearer_token: Option<String>,
+    pub bearer_token_expires_at: Option<String>,
     pub access: ClientAccessUpsert,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BearerTokenMetadata {
+    id: String,
+    hash: String,
+    expires_at: String,
 }
 
 #[derive(Debug)]
@@ -76,7 +81,16 @@ pub fn init_config(
     encrypted: bool,
     password: Option<&SecretString>,
 ) -> Result<(), WriteConfigError> {
-    let config = render_initial_config()?;
+    init_config_with_default_bearer_token(path, encrypted, password).map(|_| ())
+}
+
+pub fn init_config_with_default_bearer_token(
+    path: &Path,
+    encrypted: bool,
+    password: Option<&SecretString>,
+) -> Result<String, WriteConfigError> {
+    let default_bearer_token = generate_bearer_token()?;
+    let config = render_initial_config(&default_bearer_token)?;
     let format = if encrypted {
         ConfigFileFormat::AgeEncryptedToml
     } else {
@@ -85,7 +99,7 @@ pub fn init_config(
 
     let serialized = serialize_for_format(&format, &config, password)?;
     write_config_file_atomic(path, &serialized)?;
-    Ok(())
+    Ok(default_bearer_token)
 }
 
 pub fn upsert_api(
@@ -126,36 +140,15 @@ pub fn upsert_client(
     let loaded = load_editable_config(path, password)?;
     let mut document = parse_config(path, &loaded.toml)?;
     let existing_client = find_table(document.as_table(), &["clients", &client.name]);
-
-    let api_key = match client
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(api_key) => api_key.to_owned(),
-        None => existing_client
-            .and_then(|table| find_string_value(table, "api_key"))
-            .unwrap_or(generate_secret(18)?),
-    };
-
-    let api_key_expires_at = match client
-        .api_key_expires_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(expires_at) => expires_at.to_owned(),
-        None => existing_client
-            .and_then(|table| find_string_value(table, "api_key_expires_at"))
-            .unwrap_or(default_api_key_expires_at()?),
-    };
+    let metadata = resolve_bearer_token_metadata(client, existing_client)?;
 
     let clients = get_or_insert_table(document.as_table_mut(), "clients")?;
+    ensure_unique_bearer_token_id(clients, &client.name, &metadata.id)?;
     let client_table = get_or_insert_table(clients, &client.name)?;
 
-    set_string(client_table, "api_key", &api_key);
-    set_string(client_table, "api_key_expires_at", &api_key_expires_at);
+    apply_bearer_metadata(client_table, &metadata);
+    client_table.remove("api_key");
+    client_table.remove("api_key_expires_at");
     match &client.access {
         ClientAccessUpsert::Group(group) => {
             set_string(client_table, "group", group);
@@ -212,14 +205,92 @@ fn write_loaded_config(
     Ok(())
 }
 
-fn render_initial_config() -> Result<String, WriteConfigError> {
-    let signing_secret = generate_secret(24)?;
-    let api_key = generate_secret(18)?;
-    let api_key_expires_at = default_api_key_expires_at()?;
+pub fn generate_bearer_token() -> Result<String, WriteConfigError> {
+    Ok(format!("{}.{}", generate_secret(8)?, generate_secret(18)?))
+}
+
+pub fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex_encode(&digest)
+}
+
+fn render_initial_config(default_bearer_token: &str) -> Result<String, WriteConfigError> {
+    let metadata = bearer_token_metadata(default_bearer_token, default_bearer_token_expires_at()?)?;
 
     Ok(format!(
-        "[auth]\nissuer = \"{DEFAULT_AUTH_ISSUER}\"\naudience = \"{DEFAULT_AUTH_AUDIENCE}\"\nsigning_secret = \"{signing_secret}\"\n\n[clients.default]\napi_key = \"{api_key}\"\napi_key_expires_at = \"{api_key_expires_at}\"\napi_access = {{}}\n\n[groups]\n\n[apis]\n"
+        "[clients.default]\nbearer_token_id = \"{}\"\nbearer_token_hash = \"{}\"\nbearer_token_expires_at = \"{}\"\napi_access = {{}}\n\n[groups]\n\n[apis]\n",
+        metadata.id, metadata.hash, metadata.expires_at,
     ))
+}
+
+fn resolve_bearer_token_metadata(
+    client: &ClientUpsert,
+    existing_client: Option<&Table>,
+) -> Result<BearerTokenMetadata, WriteConfigError> {
+    let existing_metadata = existing_client.and_then(find_existing_bearer_token_metadata);
+    let expires_at = match client
+        .bearer_token_expires_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(expires_at) => expires_at.to_owned(),
+        None => existing_metadata
+            .as_ref()
+            .map(|metadata| metadata.expires_at.clone())
+            .unwrap_or(default_bearer_token_expires_at()?),
+    };
+
+    match client
+        .bearer_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(bearer_token) => bearer_token_metadata(bearer_token, expires_at),
+        None => match existing_metadata {
+            Some(mut metadata) => {
+                metadata.expires_at = expires_at;
+                Ok(metadata)
+            }
+            None => bearer_token_metadata(&generate_bearer_token()?, expires_at),
+        },
+    }
+}
+
+fn find_existing_bearer_token_metadata(table: &Table) -> Option<BearerTokenMetadata> {
+    Some(BearerTokenMetadata {
+        id: find_string_value(table, "bearer_token_id")?,
+        hash: find_string_value(table, "bearer_token_hash")?,
+        expires_at: find_string_value(table, "bearer_token_expires_at")?,
+    })
+}
+
+fn bearer_token_metadata(
+    bearer_token: &str,
+    expires_at: String,
+) -> Result<BearerTokenMetadata, WriteConfigError> {
+    let (id, _) = split_bearer_token(bearer_token)?;
+
+    Ok(BearerTokenMetadata {
+        id: id.to_owned(),
+        hash: sha256_hex(bearer_token),
+        expires_at,
+    })
+}
+
+fn split_bearer_token(bearer_token: &str) -> Result<(&str, &str), WriteConfigError> {
+    let (id, secret) = bearer_token.split_once('.').ok_or_else(|| {
+        WriteConfigError::new("bearer token must be formatted as <lookup-id>.<secret>")
+    })?;
+
+    if id.is_empty() || secret.is_empty() || secret.contains('.') {
+        return Err(WriteConfigError::new(
+            "bearer token must be formatted as <lookup-id>.<secret>",
+        ));
+    }
+
+    Ok((id, secret))
 }
 
 fn parse_config(path: &Path, contents: &str) -> Result<DocumentMut, WriteConfigError> {
@@ -259,6 +330,31 @@ fn find_string_value(table: &Table, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(str::to_owned)
 }
 
+fn ensure_unique_bearer_token_id(
+    clients: &Table,
+    client_name: &str,
+    bearer_token_id: &str,
+) -> Result<(), WriteConfigError> {
+    for (existing_name, item) in clients.iter() {
+        if existing_name == client_name {
+            continue;
+        }
+
+        let Some(existing_table) = item.as_table() else {
+            continue;
+        };
+
+        if find_string_value(existing_table, "bearer_token_id").as_deref() == Some(bearer_token_id)
+        {
+            return Err(WriteConfigError::new(format!(
+                "clients.{client_name}.bearer_token_id duplicates another configured client bearer_token_id"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn set_string(table: &mut Table, key: &str, value_str: &str) {
     table[key] = value(value_str);
 }
@@ -288,6 +384,12 @@ fn set_api_access_inline_table(
     table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
 }
 
+fn apply_bearer_metadata(table: &mut Table, metadata: &BearerTokenMetadata) {
+    set_string(table, "bearer_token_id", &metadata.id);
+    set_string(table, "bearer_token_hash", &metadata.hash);
+    set_string(table, "bearer_token_expires_at", &metadata.expires_at);
+}
+
 fn generate_secret(byte_len: usize) -> Result<String, WriteConfigError> {
     let mut bytes = vec![0_u8; byte_len];
     let mut file = fs::File::open("/dev/urandom")
@@ -309,12 +411,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-fn default_api_key_expires_at() -> Result<String, WriteConfigError> {
+fn default_bearer_token_expires_at() -> Result<String, WriteConfigError> {
     let expires_at = SystemTime::now()
         .checked_add(Duration::from_secs(
-            DEFAULT_API_KEY_VALIDITY_DAYS * 24 * 60 * 60,
+            DEFAULT_BEARER_TOKEN_VALIDITY_DAYS * 24 * 60 * 60,
         ))
-        .ok_or_else(|| WriteConfigError::new("failed to compute api key expiration"))?;
+        .ok_or_else(|| WriteConfigError::new("failed to compute bearer token expiration"))?;
 
     let unix_seconds = expires_at
         .duration_since(UNIX_EPOCH)
