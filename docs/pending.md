@@ -16,22 +16,24 @@ They must be treated as:
 
 They must not be described elsewhere as already implemented.
 
+## Build tooling
+
+- add linux/osx/windows builds to github releases
+- Update readme to use the built file on instructions
+- Update readme with binary install instructions
+- Add development section where we run command through cargo instead
+
 ## Auth and security
 
 - support additional upstream auth injection modes beyond static header injection
   - examples: basic auth, signed headers, query-param auth, and provider-specific schemes
-- support external secret backends such as environment variables, OS keychain, Vault, or cloud secret managers
 - support non-HS256 token verification models such as JWKS or remote issuer validation
 - support TLS or mTLS on the local listener when deployment requirements need it
-- add audit logging for who called which upstream API and when
-
-## Runtime and operations
-
-- add richer per-client auth policies only if they become necessary
 
 ## Product and operator surface
 
 - add a tool or API registry endpoint such as `/tools` if discovery becomes necessary
+- add docs/examples with configuration examples
 
 ## Notes
 
