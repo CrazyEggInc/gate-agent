@@ -29,17 +29,6 @@ fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
     Ok(AppState::from_config(&config)?)
 }
 
-fn load_config(contents: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let (_temp_dir, config_file) = write_secrets_file(contents)?;
-
-    Ok(AppConfig::new(
-        "127.0.0.1:0".parse()?,
-        "debug",
-        ConfigSource::Path(config_file.clone()),
-        SecretsConfig::load_from_file(&config_file)?,
-    ))
-}
-
 const VALID_SECRETS: &str = r#"
 [auth]
 issuer = "gate-agent-dev"
@@ -49,12 +38,12 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects", "billing"]
+api_access = { projects = "write", billing = "write" }
 
 [clients.partner]
 api_key = "partner-key"
 api_key_expires_at = "2026-10-09T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -91,9 +80,60 @@ fn app_state_resolves_client_by_api_key() -> Result<(), Box<dyn std::error::Erro
     let state = load_state(VALID_SECRETS)?;
 
     let client = state.client_for_api_key("partner-key")?;
+    let projects_access = state.client_api_access(client, "projects")?;
 
     assert_eq!(client.slug, "partner");
-    assert!(client.allowed_apis.contains("projects"));
+    assert_eq!(
+        projects_access,
+        gate_agent::config::secrets::AccessLevel::Write
+    );
+
+    Ok(())
+}
+
+#[test]
+fn app_state_exposes_group_derived_client_access() -> Result<(), Box<dyn std::error::Error>> {
+    let state = load_state(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.partner]
+api_key = "partner-key"
+api_key_expires_at = "2026-10-09T12:00:00Z"
+group = "shared-read"
+
+[groups.shared-read]
+api_access = { projects = "read", billing = "write" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let client = state.client_for_api_key("partner-key")?;
+
+    assert_eq!(client.slug, "partner");
+    assert_eq!(
+        state.client_api_access(client, "projects")?,
+        gate_agent::config::secrets::AccessLevel::Read
+    );
+    assert_eq!(
+        state.client_api_access(client, "billing")?,
+        gate_agent::config::secrets::AccessLevel::Write
+    );
 
     Ok(())
 }
@@ -132,7 +172,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "expired-key"
 api_key_expires_at = "2020-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -151,7 +191,7 @@ timeout_ms = 5000
 
 #[test]
 fn app_state_fails_fast_on_duplicate_api_keys() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config(
+    let (_temp_dir, config_file) = write_secrets_file(
         r#"
 [auth]
 issuer = "gate-agent-dev"
@@ -161,12 +201,12 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "shared-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
 
 [clients.partner]
 api_key = "shared-key"
 api_key_expires_at = "2026-10-09T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -176,10 +216,11 @@ timeout_ms = 5000
 "#,
     )?;
 
-    let error = AppState::from_config(&config).unwrap_err();
+    let error = SecretsConfig::load_from_file(&config_file).unwrap_err();
 
-    assert!(
-        matches!(error, AppError::Internal(message) if message.contains("duplicate client api_key"))
+    assert_eq!(
+        error.to_string(),
+        "clients.partner.api_key duplicates another configured client api_key"
     );
 
     Ok(())

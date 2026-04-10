@@ -21,7 +21,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -39,7 +39,7 @@ signing_secret = "replace-me-with-a-long-enough-secret"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -211,7 +211,8 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
             name: "mobile-app".to_owned(),
             api_key: Some("client-secret".to_owned()),
             api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-            allowed_api: vec!["projects".to_owned(), "reports".to_owned()],
+            group: None,
+            api_access: vec!["projects=read,reports=write".to_owned()],
         }),
     }))?;
 
@@ -232,10 +233,17 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
     );
     assert_eq!(
         client
-            .get("allowed_apis")
-            .and_then(Value::as_array)
-            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
-        Some(vec!["projects", "reports"])
+            .get("api_access")
+            .and_then(|value| value.get("projects"))
+            .and_then(Value::as_str),
+        Some("read")
+    );
+    assert_eq!(
+        client
+            .get("api_access")
+            .and_then(|value| value.get("reports"))
+            .and_then(Value::as_str),
+        Some("write")
     );
 
     Ok(())
@@ -292,7 +300,7 @@ fn config_command_dispatch_validate_returns_json_shaped_error_text()
 
     assert_eq!(
         error.to_string(),
-        r#"{"errors":[{"message":"clients.default.allowed_apis contains unknown api 'projects'"}]}"#
+        r#"{"errors":[{"message":"clients.default.api_access contains unknown api 'projects'"}]}"#
     );
 
     let output = AssertCommand::cargo_bin("gate-agent")?
@@ -310,7 +318,7 @@ fn config_command_dispatch_validate_returns_json_shaped_error_text()
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr)?,
-        "{\"errors\":[{\"message\":\"clients.default.allowed_apis contains unknown api 'projects'\"}]}\n"
+        "{\"errors\":[{\"message\":\"clients.default.api_access contains unknown api 'projects'\"}]}\n"
     );
 
     Ok(())

@@ -119,6 +119,48 @@ Behavior:
 - when encrypted init succeeds, stores that password in the system keyring for the selected config path
 - only this explicit encrypted init flow may store credentials in the keyring; later runtime and config reads may reuse the stored password but must not silently backfill it
 
+### Auth mode
+
+Behavior:
+
+- loads config using the same config-path logic as `start`
+- selects the configured client by slug using `--client`
+- uses `default` when `--client` is omitted
+- rejects unknown clients
+- rejects clients with no `api_access`
+- rejects combinations that also provide `--jwt`, `--api`, or `--path`
+- prints a `POST /auth/exchange` request with:
+  - `x-api-key`
+  - `content-type: application/json`
+  - JSON body containing the client effective API access map
+
+Auth payload shape:
+
+```json
+{
+  "apis": {
+    "projects": "read",
+    "billing": "write"
+  }
+}
+```
+
+Client access for auth mode comes from the effective runtime config:
+
+- inline `api_access = { ... }`, or
+- a referenced `group = "..."`
+
+### Proxy mode
+
+Behavior:
+
+- requires `--jwt`, `--api`, and `--path`
+- rejects empty `--jwt`, `--api`, and `--path` values after trimming
+- rejects paths that do not start with `/`
+- rejects unknown API slugs
+- prints a request to `http://{bind}/proxy/{api}{path}`
+- sets `Authorization: Bearer <jwt>`
+
 ### `config show`
 
 Must accept:
@@ -172,7 +214,16 @@ Must accept:
 - `--name`
 - `--api-key`
 - `--api-key-expires-at`
-- repeated `--allowed-api`
+- `--group <slug>`
+- repeated `--api-access <api=level[,api=level...]>`
+
+Rules:
+
+- exactly one of `--group` or `--api-access` is required
+- `--group` and `--api-access` are mutually exclusive
+- `--api-access` accepts `read` and `write`
+- repeated `--api-access` flags are merged
+- one flag may contain comma-separated pairs such as `--api-access projects=read,billing=write`
 
 ## Logging control
 

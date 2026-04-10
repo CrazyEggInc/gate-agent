@@ -8,7 +8,7 @@ use keyring::Credential;
 use keyring::credential::{CredentialApi, CredentialBuilderApi, CredentialPersistence};
 use secrecy::{ExposeSecret, SecretString};
 
-use gate_agent::config::secrets::SecretsConfig;
+use gate_agent::config::secrets::{AccessLevel, SecretsConfig};
 use gate_agent::config::{
     crypto,
     password::{PASSWORD_ENV_VAR, PasswordArgs, PasswordSource, resolve_for_encrypted_create},
@@ -241,9 +241,13 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     assert_eq!(config.auth.issuer, "gate-agent-dev");
     assert_eq!(config.auth.audience, "gate-agent-clients");
     assert_eq!(client.api_key_expires_at.as_str(), "2026-10-08T12:00:00Z");
+    assert!(sample_contents.contains("group = \"local-default\""));
+    assert!(sample_contents.contains("[groups.local-default]"));
     assert_eq!(
-        client.allowed_apis.iter().collect::<Vec<_>>(),
-        vec![&"projects"]
+        client.api_access,
+        [("projects".to_string(), AccessLevel::Read)]
+            .into_iter()
+            .collect()
     );
     assert_eq!(api.base_url.as_str(), "http://127.0.0.1:18081/api");
     assert_eq!(api.auth_header.as_str(), "authorization");
@@ -266,7 +270,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "write" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -294,8 +298,10 @@ timeout_ms = 5000
     assert_eq!(client.api_key_expires_at.unix_timestamp(), 1_791_460_800);
     assert_eq!(client.api_key_expires_at.nanosecond(), 0);
     assert_eq!(
-        client.allowed_apis.iter().collect::<Vec<_>>(),
-        vec![&"billing"]
+        client.api_access,
+        [("billing".to_string(), AccessLevel::Write)]
+            .into_iter()
+            .collect()
     );
     assert_eq!(api.slug, "billing");
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
@@ -319,7 +325,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -344,8 +350,10 @@ timeout_ms = 5000
     assert_eq!(client.api_key.expose_secret(), "client-api-key");
     assert_eq!(client.api_key_expires_at.as_str(), "2026-10-08T12:00:00Z");
     assert_eq!(
-        client.allowed_apis.iter().collect::<Vec<_>>(),
-        vec![&"billing"]
+        client.api_access,
+        [("billing".to_string(), AccessLevel::Read)]
+            .into_iter()
+            .collect()
     );
     assert_eq!(api.slug, "billing");
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
@@ -369,7 +377,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"
+api_access = { billing = "write"
 "#,
         "stdin",
     )
@@ -394,7 +402,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -442,7 +450,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = []
+api_access = {}
 
 [apis]
 "#;
@@ -478,7 +486,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -523,7 +531,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = []
+api_access = {}
 
 [apis]
 "#;
@@ -563,7 +571,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -614,7 +622,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["billing"]
+api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -656,7 +664,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "client-api-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = []
+api_access = {}
 
 [apis]
 "#;
@@ -719,12 +727,15 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [clients.partner]
 api_key = "partner-key"
 api_key_expires_at = "2026-10-09T12:00:00Z"
-allowed_apis = ["projects"]
+group = "shared-read"
+
+[groups.shared-read]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -742,17 +753,320 @@ timeout_ms = 5000
             .clients
             .get("default")
             .expect("default client")
-            .allowed_apis
-            .contains("projects")
+            .api_access
+            .get("projects")
+            == Some(&AccessLevel::Read)
     );
     assert!(
         config
             .clients
             .get("partner")
             .expect("partner client")
-            .allowed_apis
-            .contains("projects")
+            .api_access
+            .get("projects")
+            == Some(&AccessLevel::Read)
     );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_client_with_both_group_and_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "shared-read"
+api_access = { projects = "read" }
+
+[groups.shared-read]
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "clients.default must specify exactly one of group or api_access"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_client_with_neither_group_nor_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "clients.default must specify exactly one of group or api_access"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_unknown_group_reference() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "missing-group"
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "clients.default.group references unknown group 'missing-group'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_group_with_extra_fields() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "shared-read"
+
+[groups.shared-read]
+api_access = { projects = "read" }
+description = "readonly"
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `description`"));
+    assert!(error.to_string().contains("expected `api_access`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_legacy_allowed_apis_field() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+allowed_apis = ["projects"]
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `allowed_apis`"));
+    assert!(
+        error
+            .to_string()
+            .contains("expected one of `api_key`, `api_key_expires_at`, `group`, `api_access`")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_unknown_access_level_in_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "admin" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown variant `admin`"));
+    assert!(error.to_string().contains("expected `read` or `write`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_unknown_access_level_in_group_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "shared-access"
+
+[groups.shared-access]
+api_access = { projects = "admin" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown variant `admin`"));
+    assert!(error.to_string().contains("expected `read` or `write`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_unknown_api_in_group_api_access() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "shared-access"
+
+[groups.shared-access]
+api_access = { unknown = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "groups.shared-access.api_access contains unknown api 'unknown'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_requires_group_api_access() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "shared-access"
+
+[groups.shared-access]
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("missing field `api_access`"));
 
     Ok(())
 }
@@ -787,8 +1101,8 @@ timeout_ms = 5000
 }
 
 #[test]
-fn secrets_config_allows_empty_apis_and_empty_allowed_apis()
--> Result<(), Box<dyn std::error::Error>> {
+fn secrets_config_allows_empty_apis_and_empty_api_access() -> Result<(), Box<dyn std::error::Error>>
+{
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [auth]
@@ -799,7 +1113,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = []
+api_access = {}
 
 [apis]
 "#,
@@ -813,7 +1127,7 @@ allowed_apis = []
             .clients
             .get("default")
             .expect("default client")
-            .allowed_apis
+            .api_access
             .is_empty()
     );
 
@@ -832,7 +1146,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.Projects]
 base_url = "https://projects.internal.example"
@@ -861,7 +1175,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis."projects/api"]
 base_url = "https://projects.internal.example"
@@ -893,7 +1207,7 @@ signing_secret = "rotate-me"
 [clients.Default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -923,7 +1237,7 @@ signing_secret = "rotate-me"
 [clients."default "]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -944,7 +1258,40 @@ timeout_ms = 5000
 }
 
 #[test]
-fn secrets_config_rejects_non_lowercase_allowed_api_entries()
+fn secrets_config_rejects_non_lowercase_api_access_keys() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "default-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+api_access = { Projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "clients.default.api_access contains invalid api slug 'Projects'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_api_access_keys_with_trailing_space()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
@@ -956,7 +1303,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["Projects"]
+api_access = { "projects " = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -970,15 +1317,14 @@ timeout_ms = 5000
 
     assert_eq!(
         error.to_string(),
-        "clients.default.allowed_apis[0] must be lowercase"
+        "clients.default.api_access contains invalid api slug 'projects '"
     );
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_rejects_allowed_api_entries_with_trailing_space()
--> Result<(), Box<dyn std::error::Error>> {
+fn secrets_config_rejects_unknown_api_in_api_access() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [auth]
@@ -989,7 +1335,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects "]
+api_access = { unknown = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1003,14 +1349,14 @@ timeout_ms = 5000
 
     assert_eq!(
         error.to_string(),
-        "clients.default.allowed_apis[0] must contain only lowercase letters, digits, or hyphen"
+        "clients.default.api_access contains unknown api 'unknown'"
     );
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_rejects_unknown_api_in_allowed_apis() -> Result<(), Box<dyn std::error::Error>> {
+fn secrets_config_rejects_duplicate_api_access_keys() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [auth]
@@ -1021,7 +1367,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["unknown"]
+api_access = { projects = "read", projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1033,16 +1379,18 @@ timeout_ms = 5000
 
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
-    assert_eq!(
-        error.to_string(),
-        "clients.default.allowed_apis contains unknown api 'unknown'"
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to parse config file '")
     );
+    assert!(error.to_string().contains("duplicate key `projects`"));
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_rejects_duplicate_allowed_apis() -> Result<(), Box<dyn std::error::Error>> {
+fn secrets_config_rejects_duplicate_client_api_keys() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [auth]
@@ -1051,9 +1399,14 @@ audience = "gate-agent-clients"
 signing_secret = "rotate-me"
 
 [clients.default]
-api_key = "default-key"
+api_key = "shared-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects", "projects"]
+api_access = { projects = "read" }
+
+[clients.partner]
+api_key = "shared-key"
+api_key_expires_at = "2026-10-09T12:00:00Z"
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1067,7 +1420,7 @@ timeout_ms = 5000
 
     assert_eq!(
         error.to_string(),
-        "clients.default.allowed_apis contains duplicate api 'projects'"
+        "clients.partner.api_key duplicates another configured client api_key"
     );
 
     Ok(())
@@ -1087,7 +1440,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1103,7 +1456,7 @@ timeout_ms = 5000
     assert!(
         error
             .to_string()
-            .contains("expected one of `auth`, `clients`, `apis`")
+            .contains("expected one of `auth`, `clients`, `groups`, `apis`")
     );
 
     Ok(())
@@ -1123,7 +1476,7 @@ algorithm = "HS256"
 issuer = "gate-agent-dev"
 audience = "gate-agent-clients"
 shared_secret = "replace-me"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1139,7 +1492,7 @@ timeout_ms = 5000
     assert!(
         error
             .to_string()
-            .contains("expected one of `api_key`, `api_key_expires_at`, `allowed_apis`")
+            .contains("expected one of `api_key`, `api_key_expires_at`, `group`, `api_access`")
     );
 
     Ok(())
@@ -1157,7 +1510,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1191,7 +1544,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "ftp://projects.internal.example"
@@ -1223,7 +1576,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1255,7 +1608,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1283,7 +1636,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1316,7 +1669,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00+00:00"
-allowed_apis = []
+api_access = {}
 "#,
     )?;
 
@@ -1342,7 +1695,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-key"
 api_key_expires_at = "2026-10-08 12:00:00Z"
-allowed_apis = []
+api_access = {}
 "#,
     )?;
 

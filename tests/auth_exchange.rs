@@ -6,12 +6,22 @@ use axum::{
 };
 use gate_agent::{
     app::AppState,
-    auth::{exchange::ExchangeResponse, jwt::validate_token},
+    auth::{AccessLevel, exchange::ExchangeResponse, jwt::validate_token},
     config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
     proxy::router::build_router,
 };
 use http_body_util::BodyExt;
+use std::collections::BTreeMap;
 use tower::ServiceExt;
+
+fn api_access(
+    entries: impl IntoIterator<Item = (&'static str, AccessLevel)>,
+) -> BTreeMap<String, AccessLevel> {
+    entries
+        .into_iter()
+        .map(|(api, level)| (api.to_owned(), level))
+        .collect()
+}
 
 fn write_secrets_file(
     contents: &str,
@@ -42,12 +52,17 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects", "billing"]
+api_access = { projects = "write", billing = "write" }
 
 [clients.partner]
 api_key = "partner-client-key"
 api_key_expires_at = "2030-01-03T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
+
+[clients.readonly]
+api_key = "readonly-client-key"
+api_key_expires_at = "2030-01-04T03:04:05Z"
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -64,7 +79,7 @@ timeout_ms = 5000
 "#;
 
 #[tokio::test]
-async fn auth_exchange_returns_server_signed_token_for_one_api()
+async fn auth_exchange_returns_server_signed_token_for_requested_read_access()
 -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(VALID_SECRETS)?;
     let app = build_router(AppState::from_config(&config)?);
@@ -76,7 +91,7 @@ async fn auth_exchange_returns_server_signed_token_for_one_api()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["PROJECTS"]}"#))?,
+                .body(Body::from(r#"{"apis":{"projects":"read"}}"#))?,
         )
         .await?;
 
@@ -89,7 +104,7 @@ async fn auth_exchange_returns_server_signed_token_for_one_api()
     assert_eq!(exchange.token_type, "Bearer");
     assert_eq!(exchange.expires_in, 600);
     assert_eq!(claims.sub, "default");
-    assert_eq!(claims.apis(), vec!["projects"]);
+    assert_eq!(claims.apis, api_access([("projects", AccessLevel::Read)]));
     assert_eq!(claims.iss, "gate-agent-dev");
     assert_eq!(claims.aud, "gate-agent-clients");
     assert_eq!(claims.exp - claims.iat, 600);
@@ -110,7 +125,9 @@ async fn auth_exchange_normalizes_multiple_requested_apis_before_signing()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["Projects","billing","projects"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{" Projects ":"read","billing":"write"}}"#,
+                ))?,
         )
         .await?;
 
@@ -121,7 +138,13 @@ async fn auth_exchange_normalizes_multiple_requested_apis_before_signing()
     let claims = validate_token(&exchange.access_token, config.secrets())?;
 
     assert_eq!(claims.sub, "default");
-    assert_eq!(claims.apis(), vec!["billing", "projects"]);
+    assert_eq!(
+        claims.apis,
+        api_access([
+            ("billing", AccessLevel::Write),
+            ("projects", AccessLevel::Read),
+        ])
+    );
     assert_eq!(claims.exp - claims.iat, 600);
 
     Ok(())
@@ -139,7 +162,7 @@ async fn auth_exchange_rejects_empty_api_list() -> Result<(), Box<dyn std::error
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":[]}"#))?,
+                .body(Body::from(r#"{"apis":{}}"#))?,
         )
         .await?;
 
@@ -166,7 +189,9 @@ async fn auth_exchange_rejects_unknown_api_for_entire_request()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects","missing"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{"projects":"write","missing":"write"}}"#,
+                ))?,
         )
         .await?;
 
@@ -193,7 +218,36 @@ async fn auth_exchange_rejects_unauthorized_api_for_entire_request()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "partner-client-key")
-                .body(Body::from(r#"{"apis":["projects","billing"]}"#))?,
+                .body(Body::from(
+                    r#"{"apis":{"projects":"write","billing":"write"}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "forbidden_api");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_write_upgrade_against_readonly_client()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "readonly-client-key")
+                .body(Body::from(r#"{"apis":{"projects":"write"}}"#))?,
         )
         .await?;
 
@@ -219,7 +273,7 @@ signing_secret = "rotate-me"
 [clients.default]
 api_key = "expired-client-key"
 api_key_expires_at = "2020-01-02T03:04:05Z"
-allowed_apis = ["projects"]
+api_access = { projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -237,7 +291,7 @@ timeout_ms = 5000
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "expired-client-key")
-                .body(Body::from(r#"{"apis":["projects"]}"#))?,
+                .body(Body::from(r#"{"apis":{"projects":"write"}}"#))?,
         )
         .await?;
 
@@ -261,7 +315,7 @@ async fn auth_exchange_rejects_duplicate_x_api_key_headers()
         .uri("/auth/exchange")
         .header("content-type", "application/json")
         .header("x-request-id", "req-duplicate-key")
-        .body(Body::from(r#"{"apis":["projects"]}"#))?;
+        .body(Body::from(r#"{"apis":{"projects":"write"}}"#))?;
     request
         .headers_mut()
         .append("x-api-key", HeaderValue::from_static("default-client-key"));
@@ -298,7 +352,7 @@ async fn auth_exchange_rejects_blank_x_api_key_header() -> Result<(), Box<dyn st
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "   ")
-                .body(Body::from(r#"{"apis":["projects"]}"#))?,
+                .body(Body::from(r#"{"apis":{"projects":"write"}}"#))?,
         )
         .await?;
 
@@ -325,7 +379,7 @@ async fn auth_exchange_rejects_api_slug_with_slash_as_bad_request()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects/api"]}"#))?,
+                .body(Body::from(r#"{"apis":{"projects/api":"write"}}"#))?,
         )
         .await?;
 
@@ -352,7 +406,35 @@ async fn auth_exchange_rejects_api_slug_with_trailing_space_as_bad_request()
                 .uri("/auth/exchange")
                 .header("content-type", "application/json")
                 .header("x-api-key", "default-client-key")
-                .body(Body::from(r#"{"apis":["projects "]}"#))?,
+                .body(Body::from(r#"{"apis":{"projects ":"write"}}"#))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let exchange: ExchangeResponse =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    let claims = validate_token(&exchange.access_token, config.secrets())?;
+
+    assert_eq!(claims.apis, api_access([("projects", AccessLevel::Write)]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_exchange_rejects_malformed_access_level_as_bad_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(VALID_SECRETS)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/exchange")
+                .header("content-type", "application/json")
+                .header("x-api-key", "default-client-key")
+                .body(Body::from(r#"{"apis":{"projects":"admin"}}"#))?,
         )
         .await?;
 
@@ -372,7 +454,7 @@ async fn auth_exchange_rejects_oversized_body_as_bad_request()
     let config = load_config(VALID_SECRETS)?;
     let app = build_router(AppState::from_config(&config)?);
     let oversized_api = "a".repeat(20_000);
-    let payload = serde_json::json!({ "apis": [oversized_api] }).to_string();
+    let payload = serde_json::json!({ "apis": { oversized_api: "write" } }).to_string();
 
     let response = app
         .oneshot(

@@ -43,7 +43,7 @@ signing_secret = "replace-me"
 [clients.default]
 api_key = "default-client-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -61,7 +61,7 @@ signing_secret = "stdin-replace-me"
 [clients.default]
 api_key = "stdin-default-client-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
-allowed_apis = ["projects"]
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://stdin-projects.internal.example"

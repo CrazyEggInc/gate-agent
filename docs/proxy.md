@@ -33,11 +33,20 @@ For proxy routes, the expected flow is:
 2. Reject missing, repeated, or malformed authorization headers.
 3. Validate the bearer token.
 4. Extract the route `{api}` slug.
-5. Require that `{api}` is included in the token’s authorized API list.
-6. Resolve the upstream API config.
-7. Map the inbound request to an outbound upstream request.
-8. Execute the upstream request with the configured per-API timeout.
-9. Map the upstream response back to the client.
+5. Derive required access from the inbound HTTP method.
+6. Require that `{api}` is included in the token’s authorized API map at sufficient access.
+7. Resolve the upstream API config.
+8. Map the inbound request to an outbound upstream request.
+9. Execute the upstream request with the configured per-API timeout.
+10. Map the upstream response back to the client.
+
+Method authorization rules:
+
+- `GET`, `HEAD`, `OPTIONS` require `read`
+- `POST`, `PUT`, `PATCH`, `DELETE` require `write`
+- every other method also requires `write`
+- `write` satisfies `read`
+- non-listed methods fail closed unless the token grants `write`
 
 Expected error classes:
 

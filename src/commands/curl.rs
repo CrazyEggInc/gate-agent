@@ -50,16 +50,16 @@ fn render_auth_payload(args: &CurlArgs, config: &AppConfig) -> Result<String, Co
         .clients
         .get(&args.client)
         .ok_or_else(|| CommandError::new(format!("unknown client '{}'", args.client)))?;
-    let apis = client.allowed_apis.iter().cloned().collect::<Vec<_>>();
+    let api_access = client.api_access.clone();
 
-    if apis.is_empty() {
+    if api_access.is_empty() {
         return Err(CommandError::new(format!(
-            "client '{}' has no allowed_apis configured",
+            "client '{}' has no api_access configured",
             client.slug
         )));
     }
 
-    let body = json!({ "apis": apis }).to_string();
+    let body = json!({ "apis": api_access }).to_string();
 
     Ok(format!(
         concat!(

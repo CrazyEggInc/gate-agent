@@ -397,7 +397,7 @@ async fn auth_exchange_logs_do_not_leak_api_key_or_query_values()
                     .header("x-request-id", "req-auth-log")
                     .header("content-type", "application/json")
                     .header("x-api-key", "default-client-key")
-                    .body(Body::from(r#"{"apis":["billing"]}"#))?,
+                    .body(Body::from(r#"{"apis":{"billing":"write"}}"#))?,
             )
             .await?;
 

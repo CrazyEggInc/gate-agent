@@ -46,7 +46,7 @@ signing_secret = "replace-me"
 [clients.default]
 api_key = "default-client-api-key"
 api_key_expires_at = "2030-01-02T03:04:05Z"
-allowed_apis = ["projects", "billing"]
+api_access = {{ projects = "read", billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"

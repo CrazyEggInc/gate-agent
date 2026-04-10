@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 use crate::commands;
 use crate::config::app_config::{DEFAULT_BIND, DEFAULT_LOG_LEVEL};
@@ -188,6 +188,12 @@ pub struct ConfigAddApiArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(group(
+    ArgGroup::new("client_access")
+        .required(true)
+        .multiple(false)
+        .args(["group", "api_access"])
+))]
 pub struct ConfigAddClientArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
@@ -207,8 +213,14 @@ pub struct ConfigAddClientArgs {
     #[arg(long, help = "API key expiry timestamp")]
     pub api_key_expires_at: Option<String>,
 
-    #[arg(long, help = "Allowed API slug; repeat for more")]
-    pub allowed_api: Vec<String>,
+    #[arg(long, help = "Group slug to assign to the client")]
+    pub group: Option<String>,
+
+    #[arg(
+        long = "api-access",
+        help = "Inline API access entries as api=level pairs; levels: read, write. Repeat the flag or comma-separate pairs"
+    )]
+    pub api_access: Vec<String>,
 }
 
 pub fn run() -> Result<(), commands::CommandError> {

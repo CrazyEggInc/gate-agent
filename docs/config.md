@@ -79,6 +79,7 @@ Behavior:
 The config model must use these top-level tables:
 
 - `[auth]`
+- `[groups.<slug>]`
 - `[clients.<slug>]`
 - `[apis.<slug>]`
 
@@ -100,16 +101,36 @@ Required fields:
 
 - `api_key: String`
 - `api_key_expires_at: RFC3339 UTC timestamp`
-- `allowed_apis: Vec<String>`
+- exactly one of:
+  - `group: String`
+  - `api_access: { <api-slug> = "read" | "write", ... }`
 
 Validation expectations:
 
 - client slug must be lowercase and contain only lowercase letters, digits, or hyphen
 - `api_key` must be non-empty
 - `api_key_expires_at` must be an RFC3339 UTC timestamp ending in `Z`
-- allowed API slugs must be lowercase valid slugs
-- duplicates in `allowed_apis` are rejected
-- every allowed API must exist in `[apis.*]`
+- clients must declare exactly one of `group` or `api_access`
+- `group` must reference an existing `[groups.<slug>]`
+- `api_access` keys must be lowercase valid API slugs
+- `api_access` values must be `read` or `write`
+- every referenced API must exist in `[apis.*]`
+
+### `[groups.<slug>]`
+
+Each group entry defines a reusable API access map that clients can reference.
+
+Required fields:
+
+- `api_access: { <api-slug> = "read" | "write", ... }`
+
+Validation expectations:
+
+- group slug must be lowercase and contain only lowercase letters, digits, or hyphen
+- unknown fields are rejected
+- `api_access` keys must be lowercase valid API slugs
+- `api_access` values must be `read` or `write`
+- every referenced API must exist in `[apis.*]`
 
 ### `[apis.<slug>]`
 
@@ -130,6 +151,50 @@ Validation expectations:
 - omitted `timeout_ms` falls back to `5000`
 - `timeout_ms` must be greater than zero when explicitly provided or written through CLI commands
 
+## Operational expectations
+
+At least one client is required.
+
+The product must treat `clients.default` as the conventional local/dev client when a default client is needed.
+
+`[apis]` may be empty in generated configs, but real proxy and exchange behavior remains fail-closed until APIs are added.
+
+## Sample config
+
+The committed `.secrets.example` is the runnable local/dev sample.
+
+Expected shape:
+
+```toml
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "local-dev-api-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "local-default"
+
+[groups.local-default]
+api_access = { projects = "read" }
+
+[groups.partner-readonly]
+api_access = { projects = "read" }
+
+[clients.partner]
+api_key = "partner-api-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+group = "partner-readonly"
+
+[apis.projects]
+base_url = "http://127.0.0.1:18081/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "local-upstream-token"
+timeout_ms = 5000
+```
+
 ## CLI-assisted config management
 
 ### `config init`
@@ -142,7 +207,8 @@ Validation expectations:
   - generated signing secret
   - generated `clients.default.api_key`
   - generated `api_key_expires_at` about 180 days in the future
-  - empty `allowed_apis`
+  - empty `api_access = {}`
+  - empty `[groups]`
   - empty `[apis]`
 
 Generated secrets are hex-encoded bytes read from `/dev/urandom`.
@@ -204,18 +270,26 @@ This command must accept:
 - `--name`
 - `--api-key`
 - `--api-key-expires-at`
-- repeated `--allowed-api`
+- `--group <slug>`
+- repeated `--api-access <api=level[,api=level...]>`
 
 Behavior:
 
 - validates slug and timestamp inputs
-- sorts and deduplicates allowed APIs before writing
+- requires exactly one of `--group` or `--api-access`
+- `--group` must be a valid slug
+- `--api-access` accepts `read` and `write`
+- repeated `--api-access` flags are merged
+- comma-separated entries inside one `--api-access` flag are supported
+- conflicting duplicate `api=level` entries fail
+- inline `api_access` is written in stable order
 - creates config if it does not exist yet
 - preserves existing `api_key` and `api_key_expires_at` when omitted on update
 - generates missing `api_key` / expiration when creating a new client without them
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
-- does not verify that `allowed_apis` already exist in `[apis.*]` at write time; that is enforced by runtime config loading
+- writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
+- does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
 
 ## Mutation expectations
 
@@ -235,7 +309,8 @@ Runtime loading is stricter than CLI writing:
 
 - at least one `[clients.*]` entry is required
 - unknown fields are rejected
-- client `allowed_apis` must refer to known `[apis.*]`
+- clients must declare exactly one of `group` or `api_access`
+- client and group `api_access` entries must refer to known `[apis.*]`
 - malformed timestamps and invalid slugs are rejected during parse/load
 
 ## `config validate`

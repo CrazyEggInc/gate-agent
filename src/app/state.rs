@@ -7,7 +7,7 @@ use secrecy::ExposeSecret;
 
 use crate::config::ConfigSource;
 use crate::config::app_config::AppConfig;
-use crate::config::secrets::{ApiConfig, AuthConfig, ClientConfig, SecretsConfig};
+use crate::config::secrets::{AccessLevel, ApiConfig, AuthConfig, ClientConfig, SecretsConfig};
 use crate::error::AppError;
 use crate::time::unix_timestamp_secs_i64;
 
@@ -77,6 +77,26 @@ impl AppState {
         }
 
         Ok(client)
+    }
+
+    pub fn client_api_access(
+        &self,
+        client: &ClientConfig,
+        api: &str,
+    ) -> Result<AccessLevel, AppError> {
+        if !self.secrets().apis.contains_key(api) {
+            return Err(AppError::ForbiddenApi {
+                api: api.to_owned(),
+            });
+        }
+
+        client
+            .api_access
+            .get(api)
+            .copied()
+            .ok_or_else(|| AppError::ForbiddenApi {
+                api: api.to_owned(),
+            })
     }
 
     pub fn api_config(&self, api: &str) -> Result<&ApiConfig, AppError> {
