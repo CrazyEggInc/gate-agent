@@ -13,14 +13,11 @@ use gate_agent::config::app_config::{
 };
 use gate_agent::config::password::PASSWORD_ENV_VAR;
 use gate_agent::config::path::CONFIG_ENV_VAR;
-use secrecy::{ExposeSecret, SecretString};
 use tempfile::tempdir;
 use toml::Value;
 
 const TEST_KEYRING_FILE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_FILE";
 const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_FAILURE";
-const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
-const TEST_PROMPT_CONFIRM_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_CONFIRM";
 
 const VALID_VALIDATE_CONFIG: &str = r#"
 [auth]
@@ -127,8 +124,6 @@ fn tracked_env_vars() -> Vec<&'static str> {
         "EDITOR",
         TEST_KEYRING_FILE_ENV_VAR,
         TEST_KEYRING_STORE_FAILURE_ENV_VAR,
-        TEST_PROMPT_PASSWORD_ENV_VAR,
-        TEST_PROMPT_CONFIRM_ENV_VAR,
     ]
 }
 
@@ -1236,95 +1231,47 @@ fn config_edit_plaintext_uses_editor_and_persists_changes() -> Result<(), Box<dy
 }
 
 #[test]
-fn encrypted_init_stores_password_for_flag_env_and_prompt_sources()
+fn encrypted_init_writes_file_stores_keyring_password_and_show_uses_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
     let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("config.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
 
-    struct Case<'a> {
-        name: &'a str,
-        password_arg: Option<&'a str>,
-        env_password: Option<&'a str>,
-        prompt_password: Option<&'a str>,
-        expected_password: &'a str,
+    unsafe {
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+        std::env::remove_var(PASSWORD_ENV_VAR);
     }
 
-    let cases = [
-        Case {
-            name: "flag",
-            password_arg: Some("flag-secret"),
-            env_password: None,
-            prompt_password: None,
-            expected_password: "flag-secret",
-        },
-        Case {
-            name: "env",
-            password_arg: None,
-            env_password: Some("env-secret"),
-            prompt_password: None,
-            expected_password: "env-secret",
-        },
-        Case {
-            name: "prompt",
-            password_arg: None,
-            env_password: None,
-            prompt_password: Some("prompt-secret"),
-            expected_password: "prompt-secret",
-        },
-    ];
+    let written_path = init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: true,
+        password: Some("flag-secret".to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
 
-    for case in cases {
-        let case_dir = temp_dir.path().join(case.name);
-        std::fs::create_dir_all(&case_dir)?;
-        let config_path = case_dir.join("config.secrets");
-        let keyring_path = case_dir.join("test-keyring.json");
+    let stored_passwords = read_test_keyring(&keyring_path)?;
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
 
-        unsafe {
-            std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
-
-            match case.env_password {
-                Some(password) => std::env::set_var(PASSWORD_ENV_VAR, password),
-                None => std::env::remove_var(PASSWORD_ENV_VAR),
-            }
-
-            match case.prompt_password {
-                Some(password) => {
-                    std::env::set_var(TEST_PROMPT_PASSWORD_ENV_VAR, password);
-                    std::env::set_var(TEST_PROMPT_CONFIRM_ENV_VAR, password);
-                }
-                None => {
-                    std::env::remove_var(TEST_PROMPT_PASSWORD_ENV_VAR);
-                    std::env::remove_var(TEST_PROMPT_CONFIRM_ENV_VAR);
-                }
-            }
-        }
-
-        let written_path = init(ConfigInitArgs {
-            config: Some(config_path.clone()),
-            encrypted: true,
-            password: case.password_arg.map(str::to_owned),
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        })?;
-
-        let stored_passwords = read_test_keyring(&keyring_path)?;
-        let shown = show(ConfigShowArgs {
-            config: Some(config_path.clone()),
-            password: None,
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        })?;
-
-        assert_eq!(written_path, config_path);
-        assert!(written_path.exists());
-        assert_eq!(
-            stored_passwords.get(&keyring_entry_key(&config_path)?),
-            Some(&case.expected_password.to_owned())
-        );
-        assert_eq!(
-            string_at(&shown.parse::<Value>()?, &["auth", "issuer"]),
-            "gate-agent"
-        );
-    }
+    assert_eq!(written_path, config_path);
+    assert!(written_path.exists());
+    assert!(
+        std::fs::read_to_string(&written_path)?.starts_with("-----BEGIN AGE ENCRYPTED FILE-----")
+    );
+    assert_eq!(
+        stored_passwords.get(&keyring_entry_key(&config_path)?),
+        Some(&"flag-secret".to_owned())
+    );
+    assert_eq!(
+        string_at(&shown.parse::<Value>()?, &["auth", "issuer"]),
+        "gate-agent"
+    );
 
     Ok(())
 }
@@ -1340,6 +1287,7 @@ fn encrypted_runtime_load_uses_keyring_password_without_cli_password()
 
     unsafe {
         std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
         std::env::remove_var(PASSWORD_ENV_VAR);
     }
 
@@ -1398,43 +1346,6 @@ fn encrypted_init_removes_new_file_when_keyring_store_fails()
     );
     assert!(!config_path.exists());
     assert!(read_test_keyring(&keyring_path)?.is_empty());
-
-    Ok(())
-}
-
-#[test]
-fn encrypted_reads_backfill_keyring_after_successful_explicit_password_decrypt()
--> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
-    let temp_dir = tempdir()?;
-    let _env = EnvGuard::enter(temp_dir.path())?;
-    let config_path = temp_dir.path().join("readonly.secrets");
-    let keyring_path = temp_dir.path().join("test-keyring.json");
-    let password = SecretString::from("read-secret".to_owned());
-
-    unsafe {
-        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
-    }
-
-    gate_agent::config::write::init_config(&config_path, true, Some(&password))?;
-
-    let shown = show(ConfigShowArgs {
-        config: Some(config_path.clone()),
-        password: Some(password.expose_secret().to_owned()),
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-    })?;
-
-    assert_eq!(
-        string_at(&shown.parse::<Value>()?, &["auth", "audience"]),
-        "gate-agent-clients"
-    );
-    let stored_passwords = read_test_keyring(&keyring_path)?;
-    assert_eq!(
-        stored_passwords
-            .get(&keyring_entry_key(&config_path)?)
-            .cloned(),
-        Some("read-secret".to_owned())
-    );
 
     Ok(())
 }

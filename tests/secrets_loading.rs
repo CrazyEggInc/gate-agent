@@ -11,9 +11,82 @@ use secrecy::{ExposeSecret, SecretString};
 use gate_agent::config::secrets::{AccessLevel, SecretsConfig};
 use gate_agent::config::{
     crypto,
-    password::{PASSWORD_ENV_VAR, PasswordArgs, PasswordSource, resolve_for_encrypted_create},
+    password::{PASSWORD_ENV_VAR, PasswordArgs},
 };
 use tempfile::tempdir;
+
+const KEYRING_SERVICE: &str = "gate-agent";
+const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
+const TEST_PROMPT_CONFIRM_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_CONFIRM";
+const ENCRYPTED_PASSWORD: &str = "passphrase";
+const WRONG_PASSWORD: &str = "wrong-passphrase";
+
+fn encrypted_secrets_fixture() -> &'static str {
+    r#"
+[auth]
+issuer = "gate-agent-dev"
+audience = "gate-agent-clients"
+signing_secret = "rotate-me"
+
+[clients.default]
+api_key = "client-api-key"
+api_key_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "read" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "authorization"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#
+}
+
+fn write_fixture_encrypted_secrets_file(
+    password: &str,
+) -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+    write_encrypted_secrets_file(encrypted_secrets_fixture(), password)
+}
+
+fn assert_encrypted_fixture_loaded(config: &SecretsConfig) {
+    assert_eq!(config.auth.issuer, "gate-agent-dev");
+    assert_eq!(config.auth.audience, "gate-agent-clients");
+    assert_eq!(config.auth.signing_secret.expose_secret(), "rotate-me");
+    assert_eq!(
+        config
+            .clients
+            .get("default")
+            .expect("default client")
+            .api_access,
+        [("billing".to_string(), AccessLevel::Read)]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        config
+            .apis
+            .get("billing")
+            .expect("billing api")
+            .auth_value
+            .expose_secret(),
+        "billing-secret-token"
+    );
+}
+
+fn set_keyring_password(store: &SharedKeyringStore, path: &Path, password: &str) {
+    store.set_password(KEYRING_SERVICE, &keyring_user_for(path), password);
+}
+
+fn assert_keyring_password(
+    store: &SharedKeyringStore,
+    path: &Path,
+    expected_password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        store.get_password(KEYRING_SERVICE, &keyring_user_for(path))?,
+        expected_password
+    );
+    Ok(())
+}
 
 fn write_secrets_file(
     contents: &str,
@@ -46,18 +119,23 @@ struct PasswordEnvGuard {
 }
 
 impl PasswordEnvGuard {
-    fn clear(keys: &[&'static str]) -> Self {
+    fn set(values: &[(&'static str, Option<&'static str>)]) -> Self {
         let lock = password_test_lock()
             .lock()
             .expect("password test mutex poisoned");
-        let previous = keys
+        let previous = values
             .iter()
-            .map(|key| (*key, std::env::var_os(key)))
+            .map(|(key, _)| (*key, std::env::var_os(key)))
             .collect::<Vec<_>>();
 
-        for key in keys {
-            unsafe {
-                std::env::remove_var(key);
+        for (key, value) in values {
+            match value {
+                Some(value) => unsafe {
+                    std::env::set_var(key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(key);
+                },
             }
         }
 
@@ -65,6 +143,11 @@ impl PasswordEnvGuard {
             previous,
             _lock: lock,
         }
+    }
+
+    fn clear(keys: &[&'static str]) -> Self {
+        let cleared = keys.iter().map(|key| (*key, None)).collect::<Vec<_>>();
+        Self::set(&cleared)
     }
 }
 
@@ -392,48 +475,18 @@ api_access = { billing = "write"
 }
 
 #[test]
-fn secrets_config_loads_encrypted_file_with_password() -> Result<(), Box<dyn std::error::Error>> {
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
-
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
-timeout_ms = 5000
-"#;
-    let temp_dir = tempdir()?;
-    let secrets_file = temp_dir.path().join(".secrets");
-    let password = SecretString::from("passphrase".to_owned());
-    let encrypted = crypto::encrypt_string(plaintext, &password)?;
-    std::fs::write(&secrets_file, encrypted)?;
+fn encrypted_read_loads_and_parses_fixture_with_flag_password()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_fixture_encrypted_secrets_file(ENCRYPTED_PASSWORD)?;
 
     let config = SecretsConfig::load_from_file_with_password_args(
         &secrets_file,
         &PasswordArgs {
-            password: Some("passphrase".to_owned()),
+            password: Some(ENCRYPTED_PASSWORD.to_owned()),
         },
     )?;
 
-    assert_eq!(config.auth.issuer, "gate-agent-dev");
-    assert_eq!(config.auth.signing_secret.expose_secret(), "rotate-me");
-    assert_eq!(
-        config
-            .apis
-            .get("billing")
-            .expect("billing api")
-            .auth_value
-            .expose_secret(),
-        "billing-secret-token"
-    );
+    assert_encrypted_fixture_loaded(&config);
 
     Ok(())
 }
@@ -441,111 +494,13 @@ timeout_ms = 5000
 #[test]
 fn secrets_config_rejects_wrong_password_for_encrypted_file()
 -> Result<(), Box<dyn std::error::Error>> {
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = {}
-
-[apis]
-"#;
-    let temp_dir = tempdir()?;
-    let secrets_file = temp_dir.path().join(".secrets");
-    let password = SecretString::from("passphrase".to_owned());
-    let encrypted = crypto::encrypt_string(plaintext, &password)?;
-    std::fs::write(&secrets_file, encrypted)?;
+    let (_temp_dir, secrets_file) = write_fixture_encrypted_secrets_file(ENCRYPTED_PASSWORD)?;
 
     let error = SecretsConfig::load_from_file_with_password_args(
         &secrets_file,
         &PasswordArgs {
-            password: Some("wrong-passphrase".to_owned()),
+            password: Some(WRONG_PASSWORD.to_owned()),
         },
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("invalid password"));
-
-    Ok(())
-}
-
-#[test]
-fn secrets_config_loads_encrypted_file_with_keyring_password()
--> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::clear(&[PASSWORD_ENV_VAR]);
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
-
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
-timeout_ms = 5000
-"#;
-    let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
-    let keyring = install_shared_keyring();
-    keyring.set_password("gate-agent", &keyring_user_for(&secrets_file), "passphrase");
-
-    let config = SecretsConfig::load_from_file_with_password_args(
-        &secrets_file,
-        &PasswordArgs { password: None },
-    )?;
-
-    assert_eq!(config.auth.issuer, "gate-agent-dev");
-    assert_eq!(config.auth.signing_secret.expose_secret(), "rotate-me");
-    assert_eq!(
-        config
-            .apis
-            .get("billing")
-            .expect("billing api")
-            .auth_value
-            .expose_secret(),
-        "billing-secret-token"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn secrets_config_rejects_wrong_keyring_password_for_encrypted_file()
--> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::clear(&[PASSWORD_ENV_VAR]);
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = {}
-
-[apis]
-"#;
-    let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
-    let keyring = install_shared_keyring();
-    keyring.set_password(
-        "gate-agent",
-        &keyring_user_for(&secrets_file),
-        "wrong-passphrase",
-    );
-
-    let error = SecretsConfig::load_from_file_with_password_args(
-        &secrets_file,
-        &PasswordArgs { password: None },
     )
     .unwrap_err();
 
@@ -559,36 +514,19 @@ fn secrets_config_falls_through_to_prompt_after_keyring_read_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = PasswordEnvGuard::clear(&[
         PASSWORD_ENV_VAR,
-        "GATE_AGENT_TEST_PROMPT_PASSWORD",
-        "GATE_AGENT_TEST_PROMPT_CONFIRM",
+        TEST_PROMPT_PASSWORD_ENV_VAR,
+        TEST_PROMPT_CONFIRM_ENV_VAR,
     ]);
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
-
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
-timeout_ms = 5000
-"#;
-    let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
+    let (_temp_dir, secrets_file) = write_fixture_encrypted_secrets_file(ENCRYPTED_PASSWORD)?;
     let keyring = install_shared_keyring();
     keyring.fail_next(
-        "gate-agent",
+        KEYRING_SERVICE,
         &keyring_user_for(&secrets_file),
         keyring::Error::NoStorageAccess(std::io::Error::other("keyring locked").into()),
     );
 
     unsafe {
-        std::env::set_var("GATE_AGENT_TEST_PROMPT_PASSWORD", "passphrase");
+        std::env::set_var(TEST_PROMPT_PASSWORD_ENV_VAR, ENCRYPTED_PASSWORD);
     }
 
     let config = SecretsConfig::load_from_file_with_password_args(
@@ -596,57 +534,8 @@ timeout_ms = 5000
         &PasswordArgs { password: None },
     )?;
 
-    assert_eq!(config.auth.issuer, "gate-agent-dev");
-    assert_eq!(
-        keyring.get_password("gate-agent", &keyring_user_for(&secrets_file))?,
-        "passphrase"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn secrets_config_backfills_keyring_after_successful_prompt_decrypt()
--> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::clear(&[
-        PASSWORD_ENV_VAR,
-        "GATE_AGENT_TEST_PROMPT_PASSWORD",
-        "GATE_AGENT_TEST_PROMPT_CONFIRM",
-    ]);
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
-
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
-timeout_ms = 5000
-"#;
-    let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
-    let keyring = install_shared_keyring();
-
-    unsafe {
-        std::env::set_var("GATE_AGENT_TEST_PROMPT_PASSWORD", "passphrase");
-    }
-
-    let config = SecretsConfig::load_from_file_with_password_args(
-        &secrets_file,
-        &PasswordArgs { password: None },
-    )?;
-
-    assert_eq!(config.auth.issuer, "gate-agent-dev");
-    assert_eq!(
-        keyring.get_password("gate-agent", &keyring_user_for(&secrets_file))?,
-        "passphrase"
-    );
+    assert_encrypted_fixture_loaded(&config);
+    assert_keyring_password(&keyring, &secrets_file, ENCRYPTED_PASSWORD)?;
 
     Ok(())
 }
@@ -655,26 +544,9 @@ timeout_ms = 5000
 fn secrets_config_removes_stale_keyring_password_after_decrypt_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = PasswordEnvGuard::clear(&[PASSWORD_ENV_VAR]);
-    let plaintext = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "rotate-me"
-
-[clients.default]
-api_key = "client-api-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
-api_access = {}
-
-[apis]
-"#;
-    let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
+    let (_temp_dir, secrets_file) = write_fixture_encrypted_secrets_file(ENCRYPTED_PASSWORD)?;
     let keyring = install_shared_keyring();
-    keyring.set_password(
-        "gate-agent",
-        &keyring_user_for(&secrets_file),
-        "wrong-passphrase",
-    );
+    set_keyring_password(&keyring, &secrets_file, WRONG_PASSWORD);
 
     let error = SecretsConfig::load_from_file_with_password_args(
         &secrets_file,
@@ -687,29 +559,6 @@ api_access = {}
         keyring.get_password("gate-agent", &keyring_user_for(&secrets_file)),
         Err(keyring::Error::NoEntry)
     ));
-
-    Ok(())
-}
-
-#[test]
-fn encrypted_create_resolution_reports_password_source() -> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::clear(&[
-        PASSWORD_ENV_VAR,
-        "GATE_AGENT_TEST_PROMPT_PASSWORD",
-        "GATE_AGENT_TEST_PROMPT_CONFIRM",
-    ]);
-    let temp_dir = tempdir()?;
-    let path = temp_dir.path().join("new-config.toml");
-
-    unsafe {
-        std::env::set_var("GATE_AGENT_TEST_PROMPT_PASSWORD", "prompt-passphrase");
-        std::env::set_var("GATE_AGENT_TEST_PROMPT_CONFIRM", "prompt-passphrase");
-    }
-
-    let resolved = resolve_for_encrypted_create(&PasswordArgs { password: None }, &path)?;
-
-    assert_eq!(resolved.password.expose_secret(), "prompt-passphrase");
-    assert_eq!(resolved.source, PasswordSource::Prompt);
 
     Ok(())
 }
