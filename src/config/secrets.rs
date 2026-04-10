@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -9,6 +8,13 @@ use serde::Deserialize;
 use url::Url;
 
 use super::ConfigError;
+use super::crypto::load_config_text;
+use super::password::{
+    PasswordArgs, PasswordSource, forget_keyring_password_if_present, remember_password_if_needed,
+    resolve_for_encrypted_read_with_source,
+};
+
+pub const DEFAULT_API_TIMEOUT_MS: u64 = 5_000;
 
 pub(crate) fn is_valid_slug(value: &str) -> bool {
     !value.is_empty()
@@ -89,24 +95,73 @@ struct RawApiConfig {
     auth_header: String,
     auth_scheme: Option<String>,
     auth_value: String,
+    #[serde(default = "default_api_timeout_ms")]
     timeout_ms: u64,
+}
+
+fn default_api_timeout_ms() -> u64 {
+    DEFAULT_API_TIMEOUT_MS
 }
 
 impl SecretsConfig {
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
-        let contents = fs::read_to_string(path).map_err(|error| {
+        Self::load_from_file_with_password_args(path, &PasswordArgs { password: None })
+    }
+
+    pub fn load_from_file_with_password_args(
+        path: &Path,
+        password_args: &PasswordArgs,
+    ) -> Result<Self, ConfigError> {
+        let raw_contents = std::fs::read_to_string(path).map_err(|error| {
             ConfigError::new(format!(
                 "failed to read config file '{}': {error}",
                 path.display()
             ))
         })?;
 
-        Self::parse(&contents, &format!("file '{}'", path.display()))
+        if super::crypto::detect_format(&raw_contents)
+            == super::crypto::ConfigFileFormat::AgeEncryptedToml
+        {
+            let resolved = resolve_for_encrypted_read_with_source(password_args, path)?;
+
+            match load_config_text(path, Some(&resolved.password)) {
+                Ok(loaded) => {
+                    remember_password_if_needed(path, &resolved);
+                    return Self::parse_from_str(&loaded.toml, path);
+                }
+                Err(error) => {
+                    if matches!(resolved.source, PasswordSource::Keyring)
+                        && error.to_string().contains(&format!(
+                            "invalid password for config file '{}'",
+                            path.display()
+                        ))
+                    {
+                        forget_keyring_password_if_present(path);
+                    }
+
+                    return Err(error);
+                }
+            }
+        }
+
+        let loaded = load_config_text(path, None)?;
+        Self::parse_from_str(&loaded.toml, path)
     }
 
     pub fn parse(contents: &str, source_label: &str) -> Result<Self, ConfigError> {
         let raw_config: RawSecretsConfig = toml::from_str(contents).map_err(|error| {
             ConfigError::new(format!("failed to parse config {source_label}: {error}"))
+        })?;
+
+        Self::try_from_raw(raw_config)
+    }
+
+    pub fn parse_from_str(contents: &str, path: &Path) -> Result<Self, ConfigError> {
+        let raw_config: RawSecretsConfig = toml::from_str(contents).map_err(|error| {
+            ConfigError::new(format!(
+                "failed to parse config file '{}': {error}",
+                path.display()
+            ))
         })?;
 
         Self::try_from_raw(raw_config)

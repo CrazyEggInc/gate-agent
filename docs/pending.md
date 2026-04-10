@@ -20,7 +20,6 @@ They must not be described elsewhere as already implemented.
 
 - support additional upstream auth injection modes beyond static header injection
   - examples: basic auth, signed headers, query-param auth, and provider-specific schemes
-- support encrypted config or secret storage at rest
 - support external secret backends such as environment variables, OS keychain, Vault, or cloud secret managers
 - support non-HS256 token verification models such as JWKS or remote issuer validation
 - support TLS or mTLS on the local listener when deployment requirements need it

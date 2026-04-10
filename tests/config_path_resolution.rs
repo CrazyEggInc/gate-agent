@@ -210,14 +210,29 @@ fn missing_home_is_reported_when_home_fallback_is_needed() -> Result<(), Box<dyn
 }
 
 #[test]
-fn config_update_uses_local_new_file_target_when_neither_location_exists()
+fn config_update_uses_home_new_file_target_when_neither_location_exists_and_home_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
     let current_dir = tempdir()?;
     let home_dir = tempdir()?;
-    let local_candidate = current_dir.path().join(".secrets");
+    let home_candidate = home_dir.path().join(".config/gate-agent/secrets");
 
     let resolved =
         resolve_config_path_for_update_with(None, None, current_dir.path(), Some(home_dir.path()))?;
+
+    assert_eq!(resolved.path, home_candidate);
+    assert_eq!(resolved.source, ConfigPathSource::Home);
+    assert!(!resolved.exists);
+
+    Ok(())
+}
+
+#[test]
+fn config_update_uses_local_new_file_target_when_home_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let current_dir = tempdir()?;
+    let local_candidate = current_dir.path().join(".secrets");
+
+    let resolved = resolve_config_path_for_update_with(None, None, current_dir.path(), None)?;
 
     assert_eq!(resolved.path, local_candidate);
     assert_eq!(resolved.source, ConfigPathSource::CurrentDirectory);

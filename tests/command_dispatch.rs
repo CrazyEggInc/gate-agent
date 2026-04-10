@@ -7,6 +7,7 @@ use gate_agent::cli::{
     Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
     ConfigValidateArgs,
 };
+use gate_agent::commands::config::{ConfigEditArgs, ConfigShowArgs};
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use tempfile::tempdir;
 use toml::Value;
@@ -109,6 +110,8 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
     gate_agent::commands::run(Command::Config(ConfigArgs {
         command: ConfigCommand::Init(ConfigInitArgs {
             config: Some(config_path.clone()),
+            encrypted: false,
+            password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
         }),
     }))?;
@@ -145,6 +148,7 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
     gate_agent::commands::run(Command::Config(ConfigArgs {
         command: ConfigCommand::AddApi(ConfigAddApiArgs {
             config: Some(config_path.clone()),
+            password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             name: "projects".to_owned(),
             base_url: "https://example.test/api".to_owned(),
@@ -202,6 +206,7 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
     gate_agent::commands::run(Command::Config(ConfigArgs {
         command: ConfigCommand::AddClient(ConfigAddClientArgs {
             config: Some(config_path.clone()),
+            password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             name: "mobile-app".to_owned(),
             api_key: Some("client-secret".to_owned()),
@@ -309,6 +314,25 @@ fn config_command_dispatch_validate_returns_json_shaped_error_text()
     );
 
     Ok(())
+}
+
+#[test]
+fn config_command_dispatch_structs_cover_show_and_edit_args() {
+    let show_args = ConfigShowArgs {
+        config: Some(PathBuf::from(".secrets")),
+        password: Some("secret".to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    };
+    let edit_args = ConfigEditArgs {
+        config: Some(PathBuf::from(".secrets")),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    };
+
+    assert_eq!(show_args.config.as_deref(), Some(Path::new(".secrets")));
+    assert_eq!(show_args.password.as_deref(), Some("secret"));
+    assert_eq!(edit_args.config.as_deref(), Some(Path::new(".secrets")));
+    assert!(edit_args.password.is_none());
 }
 
 #[test]

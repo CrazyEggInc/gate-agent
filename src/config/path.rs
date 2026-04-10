@@ -132,6 +132,14 @@ fn resolve_config_path_with_mode_and_inputs(
     }
 
     if matches!(mode, ResolveMode::WriteTarget) {
+        if let Some(path) = home_config_path {
+            return Ok(ResolvedConfigPath {
+                path,
+                source: ConfigPathSource::Home,
+                exists: false,
+            });
+        }
+
         return Ok(ResolvedConfigPath {
             path: current_directory_path,
             source: ConfigPathSource::CurrentDirectory,

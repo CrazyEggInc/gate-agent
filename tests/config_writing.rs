@@ -1,11 +1,9 @@
-#[path = "../src/config/write.rs"]
-mod write;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use write::{ApiUpsert, ClientUpsert};
+use gate_agent::config::write::{self, ApiUpsert, ClientUpsert};
+use secrecy::SecretString;
 
 #[test]
 fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
@@ -13,7 +11,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("nested/config/gate-agent.toml");
 
-    write::init_config(&config_path)?;
+    write::init_config(&config_path, false, None)?;
 
     assert!(config_path.exists());
 
@@ -64,6 +62,24 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 }
 
 #[test]
+fn init_config_can_write_encrypted_document() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("nested/config/gate-agent.secrets");
+    let password = SecretString::from("super-secret-passphrase".to_owned());
+
+    write::init_config(&config_path, true, Some(&password))?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    assert!(contents.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+
+    let loaded = write::load_display_text(&config_path, Some(&password))?;
+    assert!(loaded.toml.contains("[auth]"));
+    assert!(loaded.toml.contains("[clients.default]"));
+
+    Ok(())
+}
+
+#[test]
 fn add_api_upserts_single_entry_without_clobbering_unrelated_content()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
@@ -95,6 +111,7 @@ allowed_apis = []
             auth_value: "first-token".to_string(),
             timeout_ms: 5_000,
         },
+        None,
     )?;
 
     let first_contents = fs::read_to_string(&config_path)?;
@@ -124,6 +141,7 @@ allowed_apis = []
             auth_value: "second-token".to_string(),
             timeout_ms: 7_500,
         },
+        None,
     )?;
 
     let contents = fs::read_to_string(&config_path)?;
@@ -185,6 +203,7 @@ allowed_apis = []
             api_key_expires_at: None,
             allowed_apis: vec!["projects".to_string()],
         },
+        None,
     )?;
 
     let first_contents = fs::read_to_string(&config_path)?;
@@ -219,6 +238,7 @@ allowed_apis = []
             api_key_expires_at: None,
             allowed_apis: vec!["billing".to_string(), "projects".to_string()],
         },
+        None,
     )?;
 
     let contents = fs::read_to_string(&config_path)?;
@@ -318,74 +338,65 @@ fn find_array_value(section_body: &str, key: &str) -> Option<Vec<String>> {
     }
 
     let inner = trimmed[1..trimmed.len() - 1].trim();
+
     if inner.is_empty() {
         return Some(Vec::new());
     }
 
-    inner
-        .split(',')
-        .map(|item| unquote(item.trim()))
-        .collect::<Option<Vec<_>>>()
+    inner.split(',').map(|part| unquote(part.trim())).collect()
 }
 
 fn unquote(value: &str) -> Option<String> {
-    if !(value.starts_with('"') && value.ends_with('"')) {
-        return None;
-    }
-
-    let mut result = String::new();
-    let mut chars = value[1..value.len() - 1].chars();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            result.push(chars.next()?);
-        } else {
-            result.push(ch);
-        }
-    }
-
-    Some(result)
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .map(str::to_owned)
 }
 
-fn parse_rfc3339_z(timestamp: &str) -> Option<u64> {
-    if timestamp.len() != 20 || !timestamp.ends_with('Z') {
-        return None;
+fn parse_rfc3339_z(value: &str) -> Result<u64, &'static str> {
+    if value.len() != 20 {
+        return Err("unexpected timestamp length");
     }
 
-    let year = timestamp.get(0..4)?.parse::<i32>().ok()?;
-    let month = timestamp.get(5..7)?.parse::<u32>().ok()?;
-    let day = timestamp.get(8..10)?.parse::<u32>().ok()?;
-    let hour = timestamp.get(11..13)?.parse::<u64>().ok()?;
-    let minute = timestamp.get(14..16)?.parse::<u64>().ok()?;
-    let second = timestamp.get(17..19)?.parse::<u64>().ok()?;
+    let year: i32 = value[0..4].parse().map_err(|_| "invalid year")?;
+    let month: u32 = value[5..7].parse().map_err(|_| "invalid month")?;
+    let day: u32 = value[8..10].parse().map_err(|_| "invalid day")?;
+    let hour: u64 = value[11..13].parse().map_err(|_| "invalid hour")?;
+    let minute: u64 = value[14..16].parse().map_err(|_| "invalid minute")?;
+    let second: u64 = value[17..19].parse().map_err(|_| "invalid second")?;
 
-    if timestamp.as_bytes().get(4) != Some(&b'-')
-        || timestamp.as_bytes().get(7) != Some(&b'-')
-        || timestamp.as_bytes().get(10) != Some(&b'T')
-        || timestamp.as_bytes().get(13) != Some(&b':')
-        || timestamp.as_bytes().get(16) != Some(&b':')
+    if &value[4..5] != "-"
+        || &value[7..8] != "-"
+        || &value[10..11] != "T"
+        || &value[13..14] != ":"
+        || &value[16..17] != ":"
+        || &value[19..20] != "Z"
     {
-        return None;
+        return Err("unexpected timestamp format");
     }
 
     let days = days_from_civil(year, month, day)?;
-    Some(days * 24 * 60 * 60 + hour * 60 * 60 + minute * 60 + second)
+    Ok(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> Option<u64> {
+fn days_from_civil(year: i32, month: u32, day: u32) -> Result<u64, &'static str> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
+        return Err("invalid calendar date");
     }
 
-    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let month_of_year = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_of_year + 2) / 5 + day - 1;
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        (adjusted_year - 399) / 400
+    };
+    let year_of_era = adjusted_year - era * 400;
+    let month_index = month as i32;
+    let day_index = day as i32;
+    let day_of_year =
+        (153 * (month_index + if month_index > 2 { -3 } else { 9 }) + 2) / 5 + day_index - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
 
-    u64::try_from(days).ok()
+    u64::try_from(days).map_err(|_| "date predates unix epoch")
 }

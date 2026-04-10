@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::cli::{
-    Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
-    ConfigValidateArgs, CurlArgs, StartArgs,
+    Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigEditArgs,
+    ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs, CurlArgs, StartArgs,
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
@@ -67,6 +67,15 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
             config::init(map_config_init_args(args))
                 .map_err(|error| CommandError::new(error.to_string()))?;
         }
+        ConfigCommand::Show(args) => {
+            let contents = config::show(map_config_show_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+            print!("{contents}");
+        }
+        ConfigCommand::Edit(args) => {
+            config::edit(map_config_edit_args(args))
+                .map_err(|error| CommandError::new(error.to_string()))?;
+        }
         ConfigCommand::Validate(args) => {
             let message = config::validate(map_config_validate_args(args))
                 .map_err(|error| CommandError::new(error.to_string()))?;
@@ -93,6 +102,24 @@ fn run_start(args: StartArgs) -> Result<(), CommandError> {
 fn map_config_init_args(args: ConfigInitArgs) -> config::ConfigInitArgs {
     config::ConfigInitArgs {
         config: args.config,
+        encrypted: args.encrypted,
+        password: args.password,
+        log_level: args.log_level,
+    }
+}
+
+fn map_config_show_args(args: ConfigShowArgs) -> config::ConfigShowArgs {
+    config::ConfigShowArgs {
+        config: args.config,
+        password: args.password,
+        log_level: args.log_level,
+    }
+}
+
+fn map_config_edit_args(args: ConfigEditArgs) -> config::ConfigEditArgs {
+    config::ConfigEditArgs {
+        config: args.config,
+        password: args.password,
         log_level: args.log_level,
     }
 }
@@ -107,6 +134,7 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
 fn map_config_add_api_args(args: ConfigAddApiArgs) -> config::ConfigAddApiArgs {
     config::ConfigAddApiArgs {
         config: args.config,
+        password: args.password,
         log_level: args.log_level,
         name: args.name,
         base_url: args.base_url,
@@ -120,6 +148,7 @@ fn map_config_add_api_args(args: ConfigAddApiArgs) -> config::ConfigAddApiArgs {
 fn map_config_add_client_args(args: ConfigAddClientArgs) -> config::ConfigAddClientArgs {
     config::ConfigAddClientArgs {
         config: args.config,
+        password: args.password,
         log_level: args.log_level,
         name: args.name,
         api_key: args.api_key,

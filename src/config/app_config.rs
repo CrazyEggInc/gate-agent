@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::cli::StartArgs;
 
+use super::password::PasswordArgs;
 use super::path::{LOCAL_CONFIG_FILE, resolve_config_path};
 use super::secrets::SecretsConfig;
 use super::{ConfigError, ConfigSource};
@@ -232,7 +233,12 @@ impl AppConfig {
             ),
             None => {
                 let config_path = resolve_config_path(args.config.as_deref())?.path;
-                let secrets = SecretsConfig::load_from_file(&config_path)?;
+                let secrets = SecretsConfig::load_from_file_with_password_args(
+                    &config_path,
+                    &PasswordArgs {
+                        password: args.password.clone(),
+                    },
+                )?;
 
                 (ConfigSource::Path(config_path), secrets)
             }

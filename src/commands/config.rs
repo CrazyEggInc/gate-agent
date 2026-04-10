@@ -1,12 +1,22 @@
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use secrecy::ExposeSecret;
 use serde::Serialize;
 
 use crate::cli::StartArgs;
+use crate::config::ConfigError;
 use crate::config::app_config::{AppConfig, DEFAULT_BIND};
-use crate::config::path::resolve_config_path_for_update;
+use crate::config::keyring::{ConfigKeyring, KeyringStoreOutcome};
+use crate::config::password::{
+    PasswordArgs, PasswordSource, forget_keyring_password_if_present, remember_password_if_needed,
+    resolve_for_encrypted_create, resolve_for_encrypted_read,
+    resolve_for_encrypted_read_with_source,
+};
+use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
+use crate::config::secrets::SecretsConfig;
 use crate::config::write::{self, ApiUpsert, ClientUpsert, WriteConfigError};
 
 #[derive(Debug)]
@@ -57,9 +67,30 @@ fn serialize_json_error(message: String) -> String {
     .expect("validate error payload should serialize")
 }
 
+impl From<ConfigError> for ConfigCommandError {
+    fn from(error: ConfigError) -> Self {
+        Self::new(error.to_string())
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigInitArgs {
     pub config: Option<PathBuf>,
+    pub encrypted: bool,
+    pub password: Option<String>,
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigShowArgs {
+    pub config: Option<PathBuf>,
+    pub password: Option<String>,
+    pub log_level: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigEditArgs {
+    pub config: Option<PathBuf>,
+    pub password: Option<String>,
     pub log_level: String,
 }
 
@@ -72,6 +103,7 @@ pub struct ConfigValidateArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigAddApiArgs {
     pub config: Option<PathBuf>,
+    pub password: Option<String>,
     pub log_level: String,
     pub name: String,
     pub base_url: String,
@@ -84,6 +116,7 @@ pub struct ConfigAddApiArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigAddClientArgs {
     pub config: Option<PathBuf>,
+    pub password: Option<String>,
     pub log_level: String,
     pub name: String,
     pub api_key: Option<String>,
@@ -93,8 +126,161 @@ pub struct ConfigAddClientArgs {
 
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
     let path = resolve_target_path(args.config.as_deref())?;
-    write::init_config(&path)?;
+
+    if path.exists() {
+        return Err(ConfigCommandError::new(format!(
+            "config file '{}' already exists",
+            path.display()
+        )));
+    }
+
+    let password_args = PasswordArgs {
+        password: args.password,
+    };
+    let password = if args.encrypted {
+        Some(resolve_for_encrypted_create(&password_args, &path)?.password)
+    } else {
+        None
+    };
+
+    write::init_config(&path, args.encrypted, password.as_ref())?;
+
+    if let Some(password) = password.as_ref() {
+        match ConfigKeyring::default().store_password(&path, password.expose_secret()) {
+            KeyringStoreOutcome::Stored => {}
+            KeyringStoreOutcome::SoftFailure(error) => {
+                let cleanup_note = match std::fs::remove_file(&path) {
+                    Ok(()) => " removed the newly created encrypted config file".to_owned(),
+                    Err(remove_error) => format!(
+                        " failed to remove the newly created encrypted config file '{}': {remove_error}",
+                        path.display()
+                    ),
+                };
+
+                return Err(ConfigCommandError::new(format!("{error};{cleanup_note}")));
+            }
+        }
+    }
+
     Ok(path)
+}
+
+pub fn show(args: ConfigShowArgs) -> Result<String, ConfigCommandError> {
+    let path = resolve_existing_path(args.config.as_deref())?;
+    let password_args = PasswordArgs {
+        password: args.password,
+    };
+    let raw_contents = std::fs::read_to_string(&path).map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to read config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let password = if crate::config::crypto::detect_format(&raw_contents)
+        == crate::config::crypto::ConfigFileFormat::AgeEncryptedToml
+    {
+        let resolved = resolve_for_encrypted_read_with_source(&password_args, &path)?;
+
+        match write::load_display_text(&path, Some(&resolved.password)) {
+            Ok(loaded) => {
+                remember_password_if_needed(&path, &resolved);
+                return Ok(loaded.toml);
+            }
+            Err(error) => {
+                if matches!(resolved.source, PasswordSource::Keyring)
+                    && error.to_string().contains(&format!(
+                        "invalid password for config file '{}'",
+                        path.display()
+                    ))
+                {
+                    forget_keyring_password_if_present(&path);
+                }
+
+                return Err(error.into());
+            }
+        }
+    } else {
+        None
+    };
+
+    let loaded = write::load_display_text(&path, password.as_ref())?;
+    Ok(loaded.toml)
+}
+
+pub fn edit(args: ConfigEditArgs) -> Result<PathBuf, ConfigCommandError> {
+    let path = resolve_existing_path(args.config.as_deref())?;
+    let password_args = PasswordArgs {
+        password: args.password,
+    };
+    let raw_contents = std::fs::read_to_string(&path).map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to read config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let encrypted = crate::config::crypto::detect_format(&raw_contents)
+        == crate::config::crypto::ConfigFileFormat::AgeEncryptedToml;
+    if encrypted {
+        let resolved = resolve_for_encrypted_read_with_source(&password_args, &path)?;
+
+        match write::load_display_text(&path, Some(&resolved.password)) {
+            Ok(loaded) => {
+                remember_password_if_needed(&path, &resolved);
+
+                let mut temp_file = tempfile::NamedTempFile::new().map_err(|error| {
+                    ConfigCommandError::new(format!(
+                        "failed to create temporary edit file: {error}"
+                    ))
+                })?;
+                std::io::Write::write_all(&mut temp_file, loaded.toml.as_bytes()).map_err(
+                    |error| {
+                        ConfigCommandError::new(format!(
+                            "failed to write temporary edit file: {error}"
+                        ))
+                    },
+                )?;
+
+                open_in_editor(temp_file.path())?;
+
+                let edited = std::fs::read_to_string(temp_file.path()).map_err(|error| {
+                    ConfigCommandError::new(format!(
+                        "failed to read edited temporary config: {error}"
+                    ))
+                })?;
+                SecretsConfig::parse_from_str(&edited, &path)?;
+                write::replace_config_contents(&path, &edited, Some(&resolved.password))?;
+
+                return Ok(path);
+            }
+            Err(error) => {
+                if matches!(resolved.source, PasswordSource::Keyring)
+                    && error.to_string().contains(&format!(
+                        "invalid password for config file '{}'",
+                        path.display()
+                    ))
+                {
+                    forget_keyring_password_if_present(&path);
+                }
+
+                return Err(error.into());
+            }
+        }
+    }
+
+    if !encrypted {
+        open_in_editor(&path)?;
+        SecretsConfig::parse_from_str(
+            &std::fs::read_to_string(&path).map_err(|error| {
+                ConfigCommandError::new(format!(
+                    "failed to read edited config file '{}': {error}",
+                    path.display()
+                ))
+            })?,
+            &path,
+        )?;
+        return Ok(path);
+    }
+    unreachable!("encrypted edit path returns earlier")
 }
 
 pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> {
@@ -103,6 +289,7 @@ pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> 
             .parse()
             .expect("default bind address should parse"),
         config: args.config,
+        password: None,
         log_level: args.log_level,
     };
 
@@ -134,6 +321,7 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
 
     let path = resolve_target_path(args.config.as_deref())?;
     ensure_config_exists(&path)?;
+    let password = password_for_existing_encrypted_file(&path, args.password)?;
     write::upsert_api(
         &path,
         &ApiUpsert {
@@ -144,6 +332,7 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
             auth_value,
             timeout_ms: args.timeout_ms,
         },
+        password.as_ref(),
     )?;
 
     Ok(path)
@@ -178,6 +367,7 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
 
     let path = resolve_target_path(args.config.as_deref())?;
     ensure_config_exists(&path)?;
+    let password = password_for_existing_encrypted_file(&path, args.password)?;
     write::upsert_client(
         &path,
         &ClientUpsert {
@@ -186,6 +376,7 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
             api_key_expires_at,
             allowed_apis,
         },
+        password.as_ref(),
     )?;
 
     Ok(path)
@@ -200,12 +391,67 @@ fn resolve_target_path(
     Ok(resolved.path)
 }
 
+fn resolve_existing_path(
+    cli_override: Option<&std::path::Path>,
+) -> Result<PathBuf, ConfigCommandError> {
+    resolve_config_path(cli_override)
+        .map(|resolved| resolved.path)
+        .map_err(|error| ConfigCommandError::new(error.to_string()))
+}
+
 fn ensure_config_exists(path: &std::path::Path) -> Result<(), ConfigCommandError> {
     if path.exists() {
         return Ok(());
     }
 
-    write::init_config(path)?;
+    write::init_config(path, false, None)?;
+    Ok(())
+}
+
+fn password_for_existing_encrypted_file(
+    path: &Path,
+    password: Option<String>,
+) -> Result<Option<secrecy::SecretString>, ConfigCommandError> {
+    let raw_contents = std::fs::read_to_string(path).map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to read config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if crate::config::crypto::detect_format(&raw_contents)
+        != crate::config::crypto::ConfigFileFormat::AgeEncryptedToml
+    {
+        return Ok(None);
+    }
+
+    resolve_for_encrypted_read(&PasswordArgs { password }, path)
+        .map(Some)
+        .map_err(|error| ConfigCommandError::new(error.to_string()))
+}
+
+fn open_in_editor(path: &Path) -> Result<(), ConfigCommandError> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            ConfigCommandError::new("config edit requires VISUAL or EDITOR to be set")
+        })?;
+
+    let status = Command::new(&editor).arg(path).status().map_err(|error| {
+        ConfigCommandError::new(format!("failed to launch editor '{editor}': {error}"))
+    })?;
+
+    if !status.success() {
+        return Err(ConfigCommandError::new(format!(
+            "editor '{editor}' exited with status {status}"
+        )));
+    }
+
     Ok(())
 }
 
@@ -305,6 +551,16 @@ fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, &'static str> {
         return Err("timestamp contains out-of-range values");
     }
 
+    let days = days_from_civil(year, month, day)?;
+    let total_seconds = days
+        .checked_mul(86_400)
+        .and_then(|seconds| seconds.checked_add(hour * 3_600 + minute * 60 + second))
+        .ok_or("timestamp is out of supported range")?;
+
+    Ok(UNIX_EPOCH + Duration::from_secs(total_seconds))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Result<u64, &'static str> {
     let adjusted_year = year - if month <= 2 { 1 } else { 0 };
     let era = if adjusted_year >= 0 {
         adjusted_year / 400
@@ -327,14 +583,7 @@ fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, &'static str> {
         return Err("invalid calendar date");
     }
 
-    if days < 0 {
-        return Err("timestamp predates unix epoch");
-    }
-
-    Ok(
-        UNIX_EPOCH
-            + Duration::from_secs(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second),
-    )
+    u64::try_from(days).map_err(|_| "timestamp predates unix epoch")
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {

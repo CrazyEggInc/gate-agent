@@ -43,6 +43,7 @@ fn start_help_uses_config_flag() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(stdout.contains("--bind"));
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(!stdout.contains("--secrets-file"));
     assert!(!stdout.contains("SECRETS_FILE"));
@@ -58,6 +59,10 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("Create a new config file"));
     assert!(stdout.contains("validate"));
     assert!(stdout.contains("Validate config from stdin or file"));
+    assert!(stdout.contains("show"));
+    assert!(stdout.contains("Print the current config contents"));
+    assert!(stdout.contains("edit"));
+    assert!(stdout.contains("Open the config in your editor"));
     assert!(stdout.contains("add-api"));
     assert!(stdout.contains("Add an upstream API entry"));
     assert!(stdout.contains("add-client"));
@@ -72,6 +77,7 @@ fn curl_help_lists_auth_and_proxy_flags() -> Result<(), Box<dyn std::error::Erro
 
     assert!(stdout.contains("--bind"));
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--client"));
     assert!(stdout.contains("--auth"));
@@ -90,6 +96,8 @@ fn config_init_help_uses_config_flag_without_secrets_file_placeholder()
     let stdout = help_output(&["config", "init", "--help"])?;
 
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
+    assert!(stdout.contains("--encrypted"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("Create a new config file"));
     assert!(!stdout.contains("--secrets-file"));
@@ -116,6 +124,7 @@ fn config_add_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::
     let stdout = help_output(&["config", "add-api", "--help"])?;
 
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--base-url"));
@@ -123,8 +132,28 @@ fn config_add_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::
     assert!(stdout.contains("--auth-scheme"));
     assert!(stdout.contains("--auth-value"));
     assert!(stdout.contains("--timeout-ms"));
+    assert!(stdout.contains("[default: 5000]"));
 
     Ok(())
+}
+
+#[test]
+fn config_add_api_accepts_missing_timeout_ms() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "add-api",
+        "--name",
+        "projects",
+        "--base-url",
+        "https://projects.internal.example",
+        "--auth-header",
+        "authorization",
+        "--auth-value",
+        "projects-secret-value",
+    ]);
+
+    assert!(parsed.is_ok());
 }
 
 #[test]
@@ -132,11 +161,34 @@ fn config_add_client_help_lists_expected_flags() -> Result<(), Box<dyn std::erro
     let stdout = help_output(&["config", "add-client", "--help"])?;
 
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--api-key"));
     assert!(stdout.contains("--api-key-expires-at"));
     assert!(stdout.contains("--allowed-api"));
+
+    Ok(())
+}
+
+#[test]
+fn config_show_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "show", "--help"])?;
+
+    assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
+    assert!(stdout.contains("--log-level"));
+
+    Ok(())
+}
+
+#[test]
+fn config_edit_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "edit", "--help"])?;
+
+    assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
+    assert!(stdout.contains("--log-level"));
 
     Ok(())
 }

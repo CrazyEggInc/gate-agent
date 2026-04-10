@@ -178,6 +178,7 @@ fn start_config_loads_runtime_flags_and_resolved_config_path()
     let args = StartArgs {
         bind: "127.0.0.1:9898".parse::<SocketAddr>()?,
         config: Some(config_file.clone()),
+        password: None,
         log_level: " debug ".to_string(),
     };
 
@@ -200,6 +201,7 @@ fn start_config_exposes_stable_config_source_accessors() -> Result<(), Box<dyn s
     let args = StartArgs {
         bind: "127.0.0.1:9898".parse::<SocketAddr>()?,
         config: Some(config_file.clone()),
+        password: None,
         log_level: "debug".to_string(),
     };
 
@@ -230,6 +232,7 @@ fn start_config_rejects_blank_log_level() -> Result<(), Box<dyn std::error::Erro
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: Some(config_file),
+        password: None,
         log_level: "   ".to_string(),
     };
 
@@ -253,6 +256,7 @@ fn start_config_uses_env_resolved_path_when_cli_omits_config_override()
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -282,6 +286,7 @@ fn start_config_uses_local_default_before_home_fallback() -> Result<(), Box<dyn 
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -307,6 +312,7 @@ fn start_config_uses_home_fallback_when_local_default_is_missing()
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -331,6 +337,7 @@ fn start_config_fails_fast_when_no_resolved_config_exists() -> Result<(), Box<dy
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -356,6 +363,7 @@ fn start_config_prefers_stdin_over_cli_config_path() -> Result<(), Box<dyn std::
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: Some(config_file),
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -380,6 +388,7 @@ fn start_config_prefers_stdin_over_env_config_path() -> Result<(), Box<dyn std::
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -400,6 +409,7 @@ fn start_config_ignores_empty_piped_stdin_and_falls_back_to_file()
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: Some(config_file.clone()),
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -418,6 +428,7 @@ fn start_config_reports_stdin_as_chosen_source() -> Result<(), Box<dyn std::erro
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: None,
+        password: None,
         log_level: "info".to_string(),
     };
 
@@ -442,6 +453,7 @@ fn start_config_cli_path_still_beats_env_when_stdin_is_absent()
     let args = StartArgs {
         bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
         config: Some(cli_config.clone()),
+        password: None,
         log_level: "info".to_string(),
     };
 
