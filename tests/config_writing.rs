@@ -66,15 +66,18 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 }
 
 #[test]
-fn init_config_can_write_encrypted_document() -> Result<(), Box<dyn std::error::Error>> {
+fn init_config_writes_encrypted_document_and_reads_it_back()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("nested/config/gate-agent.secrets");
     let password = SecretString::from("super-secret-passphrase".to_owned());
 
     write::init_config(&config_path, true, Some(&password))?;
 
-    let contents = fs::read_to_string(&config_path)?;
-    assert!(contents.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+    let raw_contents = fs::read_to_string(&config_path)?;
+    assert!(raw_contents.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+    assert!(!raw_contents.contains("[auth]"));
+    assert!(!raw_contents.contains("[clients.default]"));
 
     let loaded = write::load_display_text(&config_path, Some(&password))?;
     assert!(loaded.toml.contains("[auth]"));
