@@ -38,7 +38,7 @@ fn dependency_bool(dependencies: &Table, name: &str, key: &str) -> Option<bool> 
 }
 
 #[test]
-fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
+fn cargo_toml_includes_bearer_hashing_and_config_dependencies() {
     let dependencies = dependencies_table();
 
     assert!(
@@ -54,12 +54,16 @@ fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
         "expected rand for secure secret generation"
     );
     assert!(
+        dependencies.contains_key("sha2"),
+        "expected sha2 for persisted bearer token hashing"
+    );
+    assert!(
         dependencies.contains_key("time"),
         "expected time for RFC3339 parsing and formatting"
     );
     assert!(
-        dependencies.contains_key("jsonwebtoken"),
-        "expected jsonwebtoken for auth exchange JWT issuance"
+        !dependencies.contains_key("jsonwebtoken"),
+        "did not expect jsonwebtoken in the direct bearer-token runtime"
     );
     assert!(
         dependencies.contains_key("age"),
@@ -92,12 +96,6 @@ fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
         "expected time to enable serde"
     );
 
-    let jsonwebtoken_features = dependency_features(&dependencies, "jsonwebtoken");
-    assert!(
-        jsonwebtoken_features.contains("rust_crypto"),
-        "expected jsonwebtoken to use rust_crypto"
-    );
-
     let keyring_features = dependency_features(&dependencies, "keyring");
     assert_eq!(
         dependency_bool(&dependencies, "keyring", "default-features"),
@@ -114,7 +112,7 @@ fn cargo_toml_includes_plan_dependencies_for_config_and_exchange() {
     for unexpected_dep in ["chrono", "ring", "openssl"] {
         assert!(
             !dependencies.contains_key(unexpected_dep),
-            "did not expect auth dependency {unexpected_dep}"
+            "did not expect extra crypto/runtime dependency {unexpected_dep}"
         );
     }
 

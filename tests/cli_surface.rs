@@ -11,15 +11,14 @@ fn help_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn top_level_help_lists_config_and_curl() -> Result<(), Box<dyn std::error::Error>> {
+fn top_level_help_lists_only_supported_commands() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = help_output(&["--help"])?;
 
     assert!(stdout.contains("start"));
     assert!(stdout.contains("Start the local proxy server"));
     assert!(stdout.contains("config"));
     assert!(stdout.contains("Create or update config entries"));
-    assert!(stdout.contains("curl"));
-    assert!(stdout.contains("Print a curl command for the proxy"));
+    assert!(!stdout.contains("curl"));
     assert!(!stdout.contains("\n  help  "));
 
     Ok(())
@@ -67,25 +66,6 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("Add an upstream API entry"));
     assert!(stdout.contains("add-client"));
     assert!(stdout.contains("Add a client entry"));
-
-    Ok(())
-}
-
-#[test]
-fn curl_help_lists_auth_and_proxy_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = help_output(&["curl", "--help"])?;
-
-    assert!(stdout.contains("--bind"));
-    assert!(stdout.contains("--config"));
-    assert!(stdout.contains("--password"));
-    assert!(stdout.contains("--log-level"));
-    assert!(stdout.contains("--client"));
-    assert!(stdout.contains("--auth"));
-    assert!(stdout.contains("--proxy"));
-    assert!(stdout.contains("--jwt"));
-    assert!(stdout.contains("--api"));
-    assert!(stdout.contains("--path"));
-    assert!(!stdout.contains("--secrets-file"));
 
     Ok(())
 }
@@ -164,12 +144,13 @@ fn config_add_client_help_lists_expected_flags() -> Result<(), Box<dyn std::erro
     assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
-    assert!(stdout.contains("--api-key"));
-    assert!(stdout.contains("--api-key-expires-at"));
+    assert!(stdout.contains("--bearer-token-expires-at"));
     assert!(stdout.contains("--group"));
     assert!(stdout.contains("--api-access"));
     assert!(stdout.contains("levels: read, write"));
     assert!(stdout.contains("Repeat the flag or comma-separate pairs"));
+    assert!(!stdout.contains("--api-key"));
+    assert!(!stdout.contains("--api-key-expires-at"));
 
     Ok(())
 }
@@ -197,7 +178,7 @@ fn config_edit_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn config_add_client_accepts_missing_api_key_with_group() {
+fn config_add_client_accepts_missing_bearer_token_with_group() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
@@ -209,6 +190,25 @@ fn config_add_client_accepts_missing_api_key_with_group() {
     ]);
 
     assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_add_client_rejects_bearer_token_flag() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "add-client",
+        "--name",
+        "partner",
+        "--bearer-token",
+        "partner-token",
+        "--bearer-token-expires-at",
+        "2026-01-01T00:00:00Z",
+        "--group",
+        "partner-readonly",
+    ]);
+
+    assert!(parsed.is_err());
 }
 
 #[test]
@@ -253,17 +253,15 @@ fn config_add_client_rejects_missing_group_and_api_access() {
 }
 
 #[test]
-fn config_add_client_rejects_duplicate_api_key_expires_at() {
+fn config_add_client_rejects_removed_api_key_flags() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
         "add-client",
         "--name",
         "partner",
-        "--api-key-expires-at",
-        "2026-01-01T00:00:00Z",
-        "--api-key-expires-at",
-        "2026-02-01T00:00:00Z",
+        "--api-key",
+        "legacy-key",
         "--group",
         "partner-readonly",
     ]);
@@ -272,48 +270,8 @@ fn config_add_client_rejects_duplicate_api_key_expires_at() {
 }
 
 #[test]
-fn curl_accepts_auth_mode_without_proxy_flags() {
-    let parsed = Cli::try_parse_from(["gate-agent", "curl", "--auth"]);
-
-    assert!(parsed.is_ok());
-}
-
-#[test]
-fn curl_accepts_proxy_mode_with_jwt_api_and_path() {
-    let parsed = Cli::try_parse_from([
-        "gate-agent",
-        "curl",
-        "--jwt",
-        "test-token",
-        "--api",
-        "projects",
-        "--path",
-        "/v1/projects/1/tasks",
-    ]);
-
-    assert!(parsed.is_ok());
-}
-
-#[test]
-fn curl_accepts_explicit_proxy_mode() {
-    let parsed = Cli::try_parse_from([
-        "gate-agent",
-        "curl",
-        "--proxy",
-        "--jwt",
-        "test-token",
-        "--api",
-        "projects",
-        "--path",
-        "/v1/projects/1/tasks",
-    ]);
-
-    assert!(parsed.is_ok());
-}
-
-#[test]
-fn curl_rejects_auth_and_proxy_together() {
-    let parsed = Cli::try_parse_from(["gate-agent", "curl", "--auth", "--proxy"]);
+fn removed_curl_subcommand_is_rejected() {
+    let parsed = Cli::try_parse_from(["gate-agent", "curl"]);
 
     assert!(parsed.is_err());
 }

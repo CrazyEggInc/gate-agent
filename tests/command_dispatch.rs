@@ -13,14 +13,10 @@ use tempfile::tempdir;
 use toml::Value;
 
 const VALID_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent"
-audience = "gate-agent-clients"
-signing_secret = "replace-me-with-a-long-enough-secret"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { projects = "read" }
 
 [apis.projects]
@@ -31,14 +27,10 @@ timeout_ms = 5000
 "#;
 
 const INVALID_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent"
-audience = "gate-agent-clients"
-signing_secret = "replace-me-with-a-long-enough-secret"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = { projects = "read" }
 
 [apis.billing]
@@ -96,7 +88,9 @@ impl Drop for EnvGuard {
 
 #[test]
 fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -117,16 +111,42 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("default"))
+        .and_then(Value::as_table)
+        .expect("default client config");
 
     assert!(config_path.exists());
-    assert_eq!(
-        written
-            .get("auth")
-            .and_then(|value| value.get("issuer"))
-            .and_then(Value::as_str),
-        Some("gate-agent")
+    assert!(written.get("auth").is_none());
+    assert!(
+        client
+            .get("bearer_token_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
     );
+    assert_eq!(
+        client
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(64)
+    );
+    assert!(
+        client
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.chars().all(|char| char.is_ascii_hexdigit()))
+    );
+    assert!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+    assert!(client.get("api_access").and_then(Value::as_table).is_some());
     assert!(written.get("clients").and_then(Value::as_table).is_some());
+    assert!(written.get("groups").and_then(Value::as_table).is_some());
     assert!(written.get("apis").and_then(Value::as_table).is_some());
 
     Ok(())
@@ -134,7 +154,9 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
 
 #[test]
 fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -192,7 +214,9 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
 
 #[test]
 fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -209,8 +233,7 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             name: "mobile-app".to_owned(),
-            api_key: Some("client-secret".to_owned()),
-            api_key_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+            bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
             group: None,
             api_access: vec!["projects=read,reports=write".to_owned()],
         }),
@@ -223,14 +246,33 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
         .and_then(Value::as_table)
         .expect("mobile-app client config");
 
-    assert_eq!(
-        client.get("api_key").and_then(Value::as_str),
-        Some("client-secret")
+    assert!(
+        client
+            .get("bearer_token_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
     );
     assert_eq!(
-        client.get("api_key_expires_at").and_then(Value::as_str),
+        client
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(64)
+    );
+    assert!(
+        client
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.chars().all(|char| char.is_ascii_hexdigit()))
+    );
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
         Some("2030-01-02T03:04:05Z")
     );
+    assert!(client.get("api_key").is_none());
+    assert!(client.get("api_key_expires_at").is_none());
     assert_eq!(
         client
             .get("api_access")
@@ -250,8 +292,64 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn cli_rejects_obsolete_curl_subcommand() {
+    assert_eq!(
+        Cli::try_parse_from(["gate-agent", "curl"])
+            .expect_err("curl subcommand should be removed")
+            .kind(),
+        ErrorKind::InvalidSubcommand
+    );
+}
+
+#[test]
+fn cli_rejects_bearer_token_flag_for_config_add_client() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "add-client",
+        "--name",
+        "partner",
+        "--bearer-token",
+        "partner-secret",
+        "--bearer-token-expires-at",
+        "2030-01-02T03:04:05Z",
+        "--api-access",
+        "projects=read",
+    ]);
+
+    assert_eq!(
+        parsed
+            .expect_err("bearer-token flag should be removed")
+            .kind(),
+        ErrorKind::UnknownArgument
+    );
+}
+
+#[test]
+fn cli_rejects_removed_api_key_flags_for_config_add_client() {
+    assert_eq!(
+        Cli::try_parse_from([
+            "gate-agent",
+            "config",
+            "add-client",
+            "--name",
+            "partner",
+            "--api-key",
+            "partner-secret",
+            "--api-access",
+            "projects=read",
+        ])
+        .expect_err("api-key flag should be removed")
+        .kind(),
+        ErrorKind::UnknownArgument
+    );
+}
+
+#[test]
 fn config_command_dispatch_runs_validate_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -277,7 +375,9 @@ fn config_command_dispatch_runs_validate_subcommand() -> Result<(), Box<dyn std:
 #[test]
 fn config_command_dispatch_validate_returns_json_shaped_error_text()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = env_lock().lock().expect("lock env");
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;

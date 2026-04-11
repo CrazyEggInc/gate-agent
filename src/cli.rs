@@ -20,9 +20,6 @@ pub struct Cli {
 pub enum Command {
     #[command(about = "Start the local proxy server")]
     Start(StartArgs),
-    #[command(name = "curl")]
-    #[command(about = "Print a curl command for the proxy")]
-    Curl(CurlArgs),
     #[command(name = "config")]
     #[command(about = "Create or update config entries")]
     Config(ConfigArgs),
@@ -41,47 +38,6 @@ pub struct StartArgs {
 
     #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for server output")]
     pub log_level: String,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct CurlArgs {
-    #[arg(long, default_value = DEFAULT_BIND, help = "Bind address of the local proxy")]
-    pub bind: SocketAddr,
-
-    #[arg(long, help = "Path to the config file")]
-    pub config: Option<PathBuf>,
-
-    #[arg(short = 'p', long, help = "Password for encrypted config files")]
-    pub password: Option<String>,
-
-    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
-    pub log_level: String,
-
-    #[arg(
-        long,
-        default_value = "default",
-        help = "Client slug to use for auth exchange; defaults to 'default'"
-    )]
-    pub client: String,
-
-    #[arg(
-        long,
-        conflicts_with = "proxy",
-        help = "Call the auth endpoint instead of /proxy"
-    )]
-    pub auth: bool,
-
-    #[arg(long, conflicts_with = "auth", help = "Call the /proxy route")]
-    pub proxy: bool,
-
-    #[arg(long, help = "Use this JWT instead of generating one")]
-    pub jwt: Option<String>,
-
-    #[arg(long, help = "API slug to target")]
-    pub api: Option<String>,
-
-    #[arg(long, help = "Request path to append")]
-    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -207,11 +163,11 @@ pub struct ConfigAddClientArgs {
     #[arg(long, help = "Client name to create")]
     pub name: String,
 
-    #[arg(long, help = "Shared API key for the client")]
-    pub api_key: Option<String>,
-
-    #[arg(long, help = "API key expiry timestamp")]
-    pub api_key_expires_at: Option<String>,
+    #[arg(
+        long = "bearer-token-expires-at",
+        help = "Bearer token expiry timestamp"
+    )]
+    pub bearer_token_expires_at: Option<String>,
 
     #[arg(long, help = "Group slug to assign to the client")]
     pub group: Option<String>,
@@ -232,7 +188,6 @@ impl Command {
     pub fn log_level(&self) -> &str {
         match self {
             Self::Start(args) => &args.log_level,
-            Self::Curl(args) => &args.log_level,
             Self::Config(args) => match &args.command {
                 ConfigCommand::Init(args) => &args.log_level,
                 ConfigCommand::Validate(args) => &args.log_level,

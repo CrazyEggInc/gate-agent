@@ -3,11 +3,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use reqwest::{Client, redirect};
-use secrecy::ExposeSecret;
 
 use crate::config::ConfigSource;
 use crate::config::app_config::AppConfig;
-use crate::config::secrets::{AccessLevel, ApiConfig, AuthConfig, ClientConfig, SecretsConfig};
+use crate::config::secrets::{AccessLevel, ApiConfig, ClientConfig, SecretsConfig};
 use crate::error::AppError;
 use crate::time::unix_timestamp_secs_i64;
 
@@ -21,14 +20,14 @@ pub struct StartupSettings {
 #[derive(Clone, Debug)]
 pub struct AppState {
     secrets: Arc<SecretsConfig>,
-    client_slugs_by_api_key: Arc<BTreeMap<String, String>>,
+    client_slugs_by_bearer_token_id: Arc<BTreeMap<String, String>>,
     client: Client,
     startup: StartupSettings,
 }
 
 impl AppState {
     pub fn from_config(config: &AppConfig) -> Result<Self, AppError> {
-        let client_slugs_by_api_key = index_client_api_keys(config.secrets())?;
+        let client_slugs_by_bearer_token_id = index_client_bearer_token_ids(config.secrets())?;
         let client = Client::builder()
             .redirect(redirect::Policy::none())
             .build()
@@ -36,7 +35,7 @@ impl AppState {
 
         Ok(Self {
             secrets: Arc::new(config.secrets().clone()),
-            client_slugs_by_api_key: Arc::new(client_slugs_by_api_key),
+            client_slugs_by_bearer_token_id: Arc::new(client_slugs_by_bearer_token_id),
             client,
             startup: StartupSettings::from(config),
         })
@@ -44,10 +43,6 @@ impl AppState {
 
     pub fn secrets(&self) -> &SecretsConfig {
         self.secrets.as_ref()
-    }
-
-    pub fn auth_config(&self) -> &AuthConfig {
-        &self.secrets().auth
     }
 
     pub fn client(&self) -> &Client {
@@ -58,21 +53,26 @@ impl AppState {
         &self.startup
     }
 
-    pub fn client_for_api_key(&self, api_key: &str) -> Result<&ClientConfig, AppError> {
-        if api_key.trim().is_empty() {
+    pub fn client_for_bearer_token(&self, token: &str) -> Result<&ClientConfig, AppError> {
+        if token.trim().is_empty() {
             return Err(AppError::InvalidToken);
         }
 
+        let bearer_token_id = parse_bearer_token_id(token)?;
         let current_timestamp = unix_timestamp_secs_i64()?;
         let client_slug = self
-            .client_slugs_by_api_key
-            .get(api_key)
+            .client_slugs_by_bearer_token_id
+            .get(bearer_token_id)
             .ok_or(AppError::InvalidToken)?;
         let client = self.secrets().clients.get(client_slug).ok_or_else(|| {
             AppError::Internal(format!("missing client config for '{client_slug}'"))
         })?;
 
-        if client.api_key_expires_at.unix_timestamp() <= current_timestamp {
+        if client.bearer_token_expires_at.unix_timestamp() <= current_timestamp {
+            return Err(AppError::InvalidToken);
+        }
+
+        if !client.bearer_token_hash.matches_token(token) {
             return Err(AppError::InvalidToken);
         }
 
@@ -109,23 +109,37 @@ impl AppState {
     }
 }
 
-fn index_client_api_keys(secrets: &SecretsConfig) -> Result<BTreeMap<String, String>, AppError> {
-    let mut client_slugs_by_api_key = BTreeMap::new();
+fn index_client_bearer_token_ids(
+    secrets: &SecretsConfig,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut client_slugs_by_bearer_token_id = BTreeMap::new();
 
     for client in secrets.clients.values() {
-        let api_key = client.api_key.expose_secret().to_owned();
+        let client_slug = secrets.client_slug(client).ok_or_else(|| {
+            AppError::Internal("missing client slug for configured bearer token".to_owned())
+        })?;
 
-        if let Some(existing_client_slug) =
-            client_slugs_by_api_key.insert(api_key, client.slug.clone())
+        if let Some(existing_client_slug) = client_slugs_by_bearer_token_id
+            .insert(client.bearer_token_id.clone(), client_slug.to_owned())
         {
             return Err(AppError::Internal(format!(
-                "duplicate client api_key for '{}' and '{}'",
-                existing_client_slug, client.slug,
+                "duplicate client bearer token id for '{}' and '{}'",
+                existing_client_slug, client_slug,
             )));
         }
     }
 
-    Ok(client_slugs_by_api_key)
+    Ok(client_slugs_by_bearer_token_id)
+}
+
+fn parse_bearer_token_id(token: &str) -> Result<&str, AppError> {
+    let (token_id, secret) = token.split_once('.').ok_or(AppError::InvalidToken)?;
+
+    if token_id.is_empty() || secret.is_empty() || secret.contains('.') {
+        return Err(AppError::InvalidToken);
+    }
+
+    Ok(token_id)
 }
 
 impl From<&AppConfig> for StartupSettings {

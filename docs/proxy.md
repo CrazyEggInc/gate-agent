@@ -12,7 +12,6 @@ The system must expose:
 
 Routes:
 
-- `POST /auth/exchange`
 - `/proxy/{api}`
 - `/proxy/{api}/`
 - `/proxy/{api}/{*path}`
@@ -31,14 +30,23 @@ For proxy routes, the expected flow is:
 
 1. Read `Authorization` header.
 2. Reject missing, repeated, or malformed authorization headers.
-3. Validate the bearer token.
+3. Validate the presented bearer token as an opaque credential.
 4. Extract the route `{api}` slug.
 5. Derive required access from the inbound HTTP method.
-6. Require that `{api}` is included in the token’s authorized API map at sufficient access.
+6. Require that `{api}` is allowed by the matched client's configured `api_access` at sufficient access.
 7. Resolve the upstream API config.
 8. Map the inbound request to an outbound upstream request.
 9. Execute the upstream request with the configured per-API timeout.
 10. Map the upstream response back to the client.
+
+Bearer validation expectations:
+
+- clients send exactly one `Authorization: Bearer <token>` header
+- the token is treated as opaque input
+- validation is server-side lookup and hash verification, not token self-inspection
+- expired, unknown, malformed, or mismatched bearer credentials fail authentication
+- a validated bearer token resolves to one configured client
+- that client's configured `api_access` is the only authorization scope model
 
 Method authorization rules:
 
@@ -51,6 +59,7 @@ Method authorization rules:
 Expected error classes:
 
 - invalid/missing bearer token → `401 invalid_token`
+- every `401 invalid_token` response includes `WWW-Authenticate: Bearer`
 - forbidden API access → `403 forbidden_api`
 - bad proxy path → `400 bad_proxy_path`
 - upstream build/request failures → `502`
@@ -118,9 +127,10 @@ Response expectations:
 Proxy completion logs must include:
 
 - `client_id` on every request completion log
-- the authenticated client slug when JWT validation succeeds, otherwise `<unknown>`
+- the authenticated client slug when bearer validation succeeds, otherwise `<unknown>`
 - safe upstream metadata for proxied requests: API slug, outbound method, outbound URL, upstream status, and timeout
 - `error_code` only when the response came from an application error
+- no bearer token values, token identifiers, hashes, or upstream secrets
 
 ## Hop-by-hop header logic
 

@@ -41,15 +41,17 @@ Keyring backend policy is platform-specific but explicit:
 Runtime state must contain:
 
 - parsed secrets/config
-- an index from API key to client slug
+- an in-memory bearer-token lookup indexed by `bearer_token_id`
 - a shared reqwest client
 - startup settings such as bind address, log level, and the explicit config source (`Path(...)` or `Stdin`)
 
 Runtime rules:
 
-- duplicate client API keys are rejected at state construction time
+- the bearer-token lookup must resolve each token ID to the owning client and its stored bearer credential metadata
+- server-side bearer credential material is limited to `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
+- duplicate configured bearer token identifiers are rejected at state construction time
 - API config lookup is fail-closed
-- client lookup by API key checks expiration on every auth exchange
+- bearer-token lookup checks expiration on every proxy request
 
 ## HTTP client behavior
 
@@ -82,8 +84,7 @@ Expected properties:
 
 The system must use shared timestamp helpers for:
 
-- JWT issuance/validation
-- API key expiration checks
+- bearer-token expiration checks
 
 This keeps auth behavior consistent and reduces duplicated time logic.
 
@@ -110,12 +111,12 @@ Expected logging behavior:
 - dependency targets must remain limited to warning and error output even when the application runs at `debug`
 - startup logs must use the same newline-delimited JSON policy as request logs
 - each HTTP request must emit a completion log with method, URI, status, latency, and request ID
-- authenticated auth-exchange and proxy completion logs must include the authorized client slug as the top-level `client` field
+- authenticated proxy completion logs must include the authorized client slug as the top-level `client` field
 - proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
 - completion logs must include `error_code` only when the response came from an application error
 - when a top-level `status` field is present for an HTTP completion log, it represents the HTTP response status and may be rendered as a standard status line string such as `201 Created`; consumers that need only the numeric code should read that value portably rather than depend on formatter-specific duplicate fields
 - logs must not include formatter-added `span` or `spans` metadata
 - logs must include only sanitized, safe-to-ship values
-- logs must not include API keys, bearer tokens, JWTs, or upstream secret values
+- logs must not include bearer tokens, bearer token identifiers, bearer token hashes, or upstream secret values
 - logged request URIs and upstream URLs must exclude query strings, fragments, and userinfo
 - redaction and sanitization rules apply equally to startup and request-completion logs

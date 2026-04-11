@@ -10,15 +10,12 @@ use axum::{
     extract::State,
     http::{Request, StatusCode},
 };
-use gate_agent::{
-    auth::{
-        claims::JwtClaims,
-        jwt::{sign_local_test_token_for_client_with_access_at, sign_local_test_token_with_access},
-    },
-    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
+use gate_agent::config::{
+    ConfigSource,
+    app_config::AppConfig,
+    secrets::{AccessLevel, BearerTokenHash, SecretsConfig},
 };
 use http_body_util::BodyExt;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -80,20 +77,35 @@ pub fn load_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error:
 pub fn load_multi_api_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_secrets_file(&format!(
         r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "replace-me"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default-billing-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = {{ projects = "write", billing = "write" }}
 
 [clients.partner]
-api_key = "partner-client-key"
-api_key_expires_at = "2030-01-03T03:04:05Z"
+bearer_token_id = "partner-projects-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-03T03:04:05Z"
 api_access = {{ projects = "write" }}
+
+[clients.read-billing]
+bearer_token_id = "read-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-04T03:04:05Z"
+api_access = {{ billing = "read" }}
+
+[clients.read-projects]
+bearer_token_id = "read-projects"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-05T03:04:05Z"
+api_access = {{ projects = "read" }}
+
+[clients.expired-billing]
+bearer_token_id = "expired-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2020-01-01T00:00:00Z"
+api_access = {{ billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -107,7 +119,13 @@ auth_header = "authorization"
 auth_scheme = "Bearer"
 auth_value = "billing-secret-token"
 timeout_ms = 5000
-"#
+"#,
+        BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),
+        BearerTokenHash::from_token("partner-projects-write.partner-projects-write-secret")
+            .as_str(),
+        BearerTokenHash::from_token("read-billing.read-billing-secret").as_str(),
+        BearerTokenHash::from_token("read-projects.read-projects-secret").as_str(),
+        BearerTokenHash::from_token("expired-billing.expired-billing-secret").as_str(),
     ))?;
 
     Ok(AppConfig::new(
@@ -124,20 +142,35 @@ pub fn load_test_config_with_billing_timeout(
 ) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, config_file) = write_secrets_file(&format!(
         r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "replace-me"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default-billing-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = {{ billing = "write" }}
 
 [clients.partner]
-api_key = "partner-client-key"
-api_key_expires_at = "2030-01-03T03:04:05Z"
+bearer_token_id = "partner-projects-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-03T03:04:05Z"
 api_access = {{ projects = "write" }}
+
+[clients.read-billing]
+bearer_token_id = "read-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-04T03:04:05Z"
+api_access = {{ billing = "read" }}
+
+[clients.read-projects]
+bearer_token_id = "read-projects"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-05T03:04:05Z"
+api_access = {{ projects = "read" }}
+
+[clients.expired-billing]
+bearer_token_id = "expired-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2020-01-01T00:00:00Z"
+api_access = {{ billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -151,7 +184,13 @@ auth_header = "authorization"
 auth_scheme = "Bearer"
 auth_value = "billing-secret-token"
 timeout_ms = {billing_timeout_ms}
-"#
+"#,
+        BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),
+        BearerTokenHash::from_token("partner-projects-write.partner-projects-write-secret")
+            .as_str(),
+        BearerTokenHash::from_token("read-billing.read-billing-secret").as_str(),
+        BearerTokenHash::from_token("read-projects.read-projects-secret").as_str(),
+        BearerTokenHash::from_token("expired-billing.expired-billing-secret").as_str(),
     ))?;
 
     Ok(AppConfig::new(
@@ -162,76 +201,69 @@ timeout_ms = {billing_timeout_ms}
     ))
 }
 
-pub fn signed_token(
+pub fn bearer_token(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    signed_token_with_access(api, gate_agent::auth::AccessLevel::Write, secrets)
+    bearer_token_with_access(api, AccessLevel::Write, secrets)
 }
 
-pub fn signed_token_with_access(
+pub fn bearer_token_with_access(
     api: &str,
-    access: gate_agent::auth::AccessLevel,
+    access: AccessLevel,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(sign_local_test_token_with_access(api, access, secrets)?)
+    if access == AccessLevel::Write {
+        bearer_token_for_client(write_client_for_api(api, secrets)?, api, secrets)
+    } else {
+        Ok(read_only_bearer_token(api))
+    }
 }
 
-pub fn signed_token_for_client(
+pub fn bearer_token_for_client(
     client_slug: &str,
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    signed_token_for_client_with_access(
-        client_slug,
-        api,
-        gate_agent::auth::AccessLevel::Write,
-        secrets,
-    )
+    let client = secrets
+        .clients
+        .get(client_slug)
+        .ok_or_else(|| format!("missing test client '{client_slug}'"))?;
+    let access = client
+        .api_access
+        .get(api)
+        .copied()
+        .ok_or_else(|| format!("client '{client_slug}' missing api '{api}' access"))?;
+
+    if access != AccessLevel::Write {
+        return Err(
+            format!("client '{client_slug}' does not have write access for '{api}'").into(),
+        );
+    }
+
+    Ok(match client_slug {
+        "default" => "default-billing-write.default-billing-write-secret".to_owned(),
+        "partner" => "partner-projects-write.partner-projects-write-secret".to_owned(),
+        _ => {
+            return Err(format!("unsupported test client '{client_slug}'").into());
+        }
+    })
 }
 
-pub fn signed_token_for_client_with_access(
-    client_slug: &str,
+pub fn expired_bearer_token(
     api: &str,
-    access: gate_agent::auth::AccessLevel,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let issued_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    Ok(sign_local_test_token_for_client_with_access_at(
-        client_slug,
-        api,
-        access,
-        secrets,
-        issued_at,
-        600,
-    )?)
-}
+    let client = secrets
+        .clients
+        .get("expired-billing")
+        .ok_or("missing expired-billing test client")?;
 
-pub fn signed_token_with_subject_and_secret(
-    subject_client_slug: &str,
-    api: &str,
-    signing_secret: &str,
-    secrets: &SecretsConfig,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let issued_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let claims = JwtClaims::new(
-        subject_client_slug.to_owned(),
-        [(api.to_owned(), gate_agent::auth::AccessLevel::Write)],
-        secrets.auth.issuer.clone(),
-        secrets.auth.audience.clone(),
-        issued_at,
-        issued_at + 600,
-    )?;
+    if !client.api_access.contains_key(api) {
+        return Err(format!("expired test client missing api '{api}'").into());
+    }
 
-    Ok(encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(signing_secret.as_bytes()),
-    )?)
+    Ok("expired-billing.expired-billing-secret".to_owned())
 }
 
 pub async fn spawn_chunked_upstream(
@@ -323,6 +355,33 @@ fn write_secrets_file(
     let secrets_file = temp_dir.path().join(".secrets");
     std::fs::write(&secrets_file, contents)?;
     Ok((temp_dir, secrets_file))
+}
+
+fn write_client_for_api(
+    api: &str,
+    secrets: &SecretsConfig,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+    for client_slug in ["default", "partner"] {
+        if secrets
+            .clients
+            .get(client_slug)
+            .and_then(|client| client.api_access.get(api))
+            .copied()
+            == Some(AccessLevel::Write)
+        {
+            return Ok(client_slug);
+        }
+    }
+
+    Err(format!("no write client configured for api '{api}'").into())
+}
+
+fn read_only_bearer_token(api: &str) -> String {
+    match api {
+        "billing" => "read-billing.read-billing-secret".to_owned(),
+        "projects" => "read-projects.read-projects-secret".to_owned(),
+        other => format!("read-{other}.read-{other}-secret"),
+    }
 }
 
 async fn read_http_request(

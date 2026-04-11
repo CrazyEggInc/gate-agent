@@ -35,14 +35,10 @@ fn write_config_at(path: &Path, contents: &str) -> Result<(), Box<dyn std::error
 }
 
 const VALID_CONFIG: &str = r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "replace-me"
-
 [clients.default]
-api_key = "default-client-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
 api_access = { projects = "read" }
 
 [apis.projects]
@@ -53,14 +49,10 @@ timeout_ms = 5000
 "#;
 
 const STDIN_CONFIG: &str = r#"
-[auth]
-issuer = "stdin-gate-agent-dev"
-audience = "stdin-gate-agent-clients"
-signing_secret = "stdin-replace-me"
-
 [clients.default]
-api_key = "stdin-default-client-key"
-api_key_expires_at = "2026-10-08T12:00:00Z"
+bearer_token_id = "stdin-default"
+bearer_token_hash = "5fd8d7dc05bd649e11e71f60b6bd897ea7d35857c133ccfc74a06537e2ec4f38"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
 api_access = { projects = "read" }
 
 [apis.projects]
@@ -370,8 +362,10 @@ fn start_config_prefers_stdin_over_cli_config_path() -> Result<(), Box<dyn std::
     let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
 
     assert_eq!(config.config_source(), &ConfigSource::Stdin);
-    assert_eq!(config.secrets().auth.issuer, "stdin-gate-agent-dev");
-    assert_eq!(config.secrets().auth.audience, "stdin-gate-agent-clients");
+    assert_eq!(
+        config.secrets().clients["default"].bearer_token_id,
+        "stdin-default"
+    );
 
     Ok(())
 }
@@ -395,7 +389,10 @@ fn start_config_prefers_stdin_over_env_config_path() -> Result<(), Box<dyn std::
     let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
 
     assert_eq!(config.config_source(), &ConfigSource::Stdin);
-    assert_eq!(config.secrets().auth.issuer, "stdin-gate-agent-dev");
+    assert_eq!(
+        config.secrets().clients["default"].bearer_token_id,
+        "stdin-default"
+    );
 
     Ok(())
 }
@@ -416,7 +413,10 @@ fn start_config_ignores_empty_piped_stdin_and_falls_back_to_file()
     let config = load_config_with_stdin(&args, "  \n\t  ")?;
 
     assert_eq!(config.config_source(), &ConfigSource::Path(config_file));
-    assert_eq!(config.secrets().auth.issuer, "gate-agent-dev");
+    assert_eq!(
+        config.secrets().clients["default"].bearer_token_id,
+        "default"
+    );
 
     Ok(())
 }
@@ -460,7 +460,10 @@ fn start_config_cli_path_still_beats_env_when_stdin_is_absent()
     let config = load_config(&args)?;
 
     assert_eq!(config.config_source(), &ConfigSource::Path(cli_config));
-    assert_eq!(config.secrets().auth.issuer, "gate-agent-dev");
+    assert_eq!(
+        config.secrets().clients["default"].bearer_token_id,
+        "default"
+    );
 
     Ok(())
 }

@@ -1,134 +1,83 @@
 # Local testing environment
 
-This document describes the local testing environment as a product workflow.
+This document defines the local operator workflow.
 
 ## Goal
 
-The repository must provide a repeatable local environment for exercising:
+The repository provides a repeatable local environment for exercising:
 
-- auth exchange
+- bearer-token authentication
 - proxy authorization
 - upstream credential injection
-- end-to-end requests through a local dummy upstream
+- end-to-end proxying through the dummy upstream
 
 ## Components
 
-The local testing environment consists of:
+The local environment consists of:
 
 - the `gate-agent` process started with `cargo run -- start`
 - the `dummy-upstream` service started with `docker compose`
-- a local config file derived from `.secrets.example`
-- the `cargo run -- curl ...` helper for generating `curl -K -` requests
+- a local config file derived from `.secrets.example` or created with `config init`
 
 ## Dummy upstream
 
-The local environment must provide a dummy upstream service named `dummy-upstream`.
-
 Expected properties:
 
-- it runs through `docker compose up -d dummy-upstream`
-- it binds `127.0.0.1:18081` on the host
-- it serves an open health endpoint at `http://127.0.0.1:18081/healthz`
-- it serves protected API routes under `http://127.0.0.1:18081/api/...`
-- direct requests to protected API routes require `Authorization: Bearer local-upstream-token`
-
-The dummy upstream exists to validate proxy forwarding behavior and upstream auth injection without depending on a real internal service.
+- start with `docker compose up -d dummy-upstream`
+- binds `127.0.0.1:18081` on the host
+- health endpoint at `http://127.0.0.1:18081/healthz`
+- protected API routes under `http://127.0.0.1:18081/api/...`
+- direct protected requests require `Authorization: Bearer local-upstream-token`
 
 ## Local config
 
-The local testing flow must start from `.secrets.example`.
+`.secrets.example` is the ready-to-run local sample.
+
+Its committed bearer token metadata uses a long-lived sample expiry so the documented local flow does not quietly age out during normal development. If you create a fresh config instead, prefer `config init` and save the printed token immediately.
 
 Expected local defaults:
 
-- a `default` client is available for local use
-- the `default` client has an API key suitable for local auth exchange
-- the `default` client uses `group = "local-default"`
+- a `default` client is available
+- `default` uses `group = "local-default"`
 - `groups.local-default` grants `api_access = { projects = "read" }`
-- the `projects` API points at the dummy upstream base URL
+- the `projects` API points at the dummy upstream
 - the `projects` API injects `Authorization: Bearer local-upstream-token` upstream
-- the sample config demonstrates a reusable group-based access assignment
+
+The committed sample config stores only bearer token metadata. For local testing, the matching bearer token is:
+
+```sh
+export GATE_AGENT_TOKEN='default.s3cr3t'
+```
 
 Typical setup:
 
 ```sh
 cp .secrets.example .secrets
-```
-
-The local proxy must then be started against that config file:
-
-```sh
 cargo run -- start --config .secrets --log-level info
 ```
 
-Stdin-backed startup is also supported. When stdin contains non-whitespace config content, it overrides `--config`, `GATE_AGENT_CONFIG`, `./.secrets`, and the home fallback:
+Stdin-backed startup is also supported:
 
 ```sh
 cat .secrets.example | cargo run -- start --log-level info
 ```
 
-When local debugging needs proxy telemetry, rerun the server with `--log-level debug`. Runtime telemetry is emitted as newline-delimited JSON, with one JSON object per log line. For local inspection with `jq`, prefer `cargo run --quiet -- start ... 2>&1 | jq` or invoke the built binary directly. Plain `cargo run -- start ... 2>&1 | jq` is fragile because Cargo writes its own non-JSON status lines to stderr, which can break `jq`. Debug logging should stay free of noisy `reqwest` or `hyper` connection chatter, while the normal proxy completion info log includes the authenticated `client`, request metadata, and safe upstream request details.
-Encrypted local config is also supported:
+If you create a fresh config instead, `config init` prints the generated default bearer token once. Save it immediately; only the token id, hash, and expiry are persisted.
+
+## Proxy request workflow
+
+Use normal `curl` directly against `gate-agent`:
 
 ```sh
-cargo run -- config init --encrypted --config .secrets.encrypted
-GATE_AGENT_PASSWORD='correct horse battery staple' \
-  cargo run -- start --config .secrets.encrypted --log-level info
-```
-
-Request completion logs also include `client_id` on every request. Successful auth and proxy requests record the authenticated client slug; unauthenticated failures log `client_id = "<unknown>"`.
-
-## `curl` helper
-
-The `curl` command is part of the local testing environment.
-
-It must print curl config suitable for piping into `curl -K -`.
-
-It supports two local workflows:
-
-- auth exchange request generation
-- proxied request generation
-
-### Auth exchange workflow
-
-The auth workflow must produce a request to `POST /auth/exchange` against the local proxy.
-
-Example:
-
-```sh
-JWT_TOKEN=$(
-  cargo run --quiet -- curl --auth --client default --log-level warn | curl -s -K - | jq -r '.access_token'
-)
-```
-
-This flow is used to obtain a short-lived JWT for subsequent proxy requests.
-
-`--client` selects which configured client performs the auth exchange. When omitted, the command uses `default`.
-
-The emitted auth request body uses the effective client access map. For the sample local config that means:
-
-```json
-{
-  "apis": {
-    "projects": "read"
-  }
-}
-```
-
-### Proxy workflow
-
-The proxy workflow must produce a request to `/proxy/{api}{path}` against the local proxy.
-
-Example:
-
-```sh
-cargo run -- curl --jwt "$JWT_TOKEN" --api projects --path /v1/projects/1/tasks --log-level warn | curl -K -
+curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
 ```
 
 Expected behavior:
 
 - the request targets the configured local bind address
-- the request carries `Authorization: Bearer <jwt>` to the proxy
-- the proxy authorizes the requested API slug and required method access
+- the request carries `Authorization: Bearer <token>` to the proxy
+- the proxy authorizes the selected API slug and required method access
 - the proxy injects upstream credentials from config before forwarding the request
 
 Method access rules during local testing:
@@ -137,9 +86,7 @@ Method access rules during local testing:
 - `POST`, `PUT`, `PATCH`, `DELETE` require `write`
 - any other HTTP method also requires `write`
 
-### Config validation workflow
-
-Operators can verify runtime config loading before starting the server.
+## Config validation workflow
 
 Path-backed example:
 
@@ -157,39 +104,47 @@ Expected behavior:
 
 - valid config prints `config is valid`
 - invalid config prints a JSON error payload to stderr and exits non-zero
-- validation uses the same strict parser and source-resolution behavior as `start`
 
 ## Direct config inspection and editing
 
-Operators may inspect the current config with:
+Inspect config:
 
 ```sh
 cargo run -- config show --config .secrets
 ```
 
-For encrypted config:
+Encrypted config:
 
 ```sh
 GATE_AGENT_PASSWORD='correct horse battery staple' \
   cargo run -- config show --config .secrets.encrypted
 ```
 
-Operators may edit the current config with:
+Edit config:
 
 ```sh
 VISUAL=nvim cargo run -- config edit --config .secrets
 ```
 
-For encrypted config:
+Encrypted edit:
 
 ```sh
 VISUAL=nvim GATE_AGENT_PASSWORD='correct horse battery staple' \
   cargo run -- config edit --config .secrets.encrypted
 ```
 
-## Recommended local smoke test
+Add a client with a generated token:
 
-The standard local smoke test must be:
+```sh
+cargo run -- config add-client --config .secrets \
+  --name partner \
+  --bearer-token-expires-at '2031-02-03T04:05:06Z' \
+  --api-access projects=read
+```
+
+That command prints the generated bearer token once and persists only its metadata.
+
+## Recommended local smoke test
 
 ```sh
 cp .secrets.example .secrets
@@ -197,45 +152,29 @@ docker compose up -d dummy-upstream
 curl -i http://127.0.0.1:18081/healthz
 cargo run -- start --config .secrets
 
-JWT_TOKEN=$(
-  cargo run --quiet -- curl --auth --client default | curl -s -K - | jq -r '.access_token'
-)
-
-cargo run -- curl --jwt "$JWT_TOKEN" --api projects --path /v1/projects/1/tasks | curl -K -
+export GATE_AGENT_TOKEN='default.s3cr3t'
+curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
 ```
 
 This verifies:
 
 - the dummy upstream is running
-- auth exchange is working
-- JWT-based proxy authorization is working
-- method-based read/write authorization is working
+- bearer-token auth is working
+- proxy authorization is working
 - upstream auth injection is working
 - proxy path forwarding is working
 
-For telemetry-focused debugging, launch the server with `cargo run --quiet -- start --config .secrets --log-level debug 2>&1 | jq` or use the built binary directly, then repeat the proxy request. Avoid plain `cargo run -- start ... 2>&1 | jq`, because Cargo writes non-JSON status lines to stderr and can break `jq`. Confirm the newline-delimited JSON completion log includes the authenticated `client`, the safe upstream fields, and no `span` or `spans` formatter metadata, and that dependency debug chatter from `reqwest` or `hyper` does not appear.
-
 ## Direct upstream comparison
 
-When debugging proxy behavior, operators may compare proxied requests with direct upstream requests.
-
-Example direct request:
+When debugging proxy behavior, compare the proxied request with a direct upstream request:
 
 ```sh
 curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
 ```
 
-This isolates whether a failure is in:
-
-- the dummy upstream itself
-- proxy auth exchange
-- proxy authorization
-- proxy request mapping
-
 ## Shutdown
-
-The dummy upstream must be stoppable with:
 
 ```sh
 docker compose down

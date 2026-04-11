@@ -1,72 +1,74 @@
 # Authentication
 
-This document describes the authentication feature as a product contract. A new implementation must be able to reproduce the auth behavior from this document without relying on the current source layout.
+This document describes the authentication feature as a product contract. A new implementation must be able to reproduce this behavior without relying on the current source layout.
 
 ## Goal
 
-The proxy must support a server-owned authentication model.
+The proxy must use a clean-break single-bearer model.
 
-- Clients authenticate with long-lived API keys.
-- The server exchanges those API keys for short-lived bearer tokens.
-- Proxy access is granted only to APIs explicitly authorized for that client.
-- Clients never provide upstream credentials directly.
+- clients authenticate directly with one opaque bearer token
+- clients send that bearer token only on proxy routes
+- the server validates bearer credentials against server-side state
+- API authorization comes only from the matched client's configured `api_access`
+- clients never provide upstream credentials directly
+
+Authentication happens only through bearer credentials presented on proxy routes.
 
 ## Required workflow
 
 The workflow must be:
 
-1. A client sends its API key to `POST /auth/exchange`.
-2. The request body contains the API access map the client wants to use.
-3. The server validates the API key, its expiration, and the requested API access map.
-4. The server returns a short-lived JWT.
-5. The client uses that JWT as a bearer token when calling `/proxy/{api}` routes.
-6. The proxy authorizes the route-selected API and required method access, then forwards the request upstream using configured upstream auth.
+1. A client sends exactly one `Authorization: Bearer <token>` header to a `/proxy/{api}` route.
+2. The server validates the bearer token as an opaque credential.
+3. The validated token resolves to one configured client.
+4. The server authorizes the selected API and required method access from that client's configured `api_access`.
+5. The proxy forwards the request upstream using configured upstream authentication.
 
-Clients do not sign their own proxy tokens.
+The bearer token is not a scope container. It is only a credential that identifies an allowed client session.
 
-## Exchange contract
+## Bearer credential contract
 
-The system must expose:
+Bearer credentials are server-owned and validated server-side.
 
-- `POST /auth/exchange`
+The server-side bearer credential material must be limited to:
 
-The request must:
+- `bearer_token_id`
+- `bearer_token_hash`
+- `bearer_token_expires_at`
 
-- require `x-api-key`
-- reject missing, blank, non-UTF8, or repeated `x-api-key` headers
-- require a JSON body
-- accept a body shaped like:
+The server must not rely on self-describing token contents for authorization.
 
-```json
-{
-  "apis": {
-    "projects": "read"
-  }
-}
-```
+The owning client's configured `api_access` is the only scope model.
 
-The exchange behavior must:
+## Client authorization model
 
-- normalize requested API slugs to lowercase
-- reject empty API access maps
-- reject malformed API slugs
-- reject unknown access levels
-- authorize requested access against the client's effective configured access
-- allow a client configured for `write` to request `read`
-- reject a client configured for `read` that requests `write`
-- reject any request where at least one requested API is unknown or not allowed for the client
-- issue one token covering the approved API access map
-- use a token lifetime of 10 minutes
+Clients are configured by slug and bearer credential.
 
-The response must be JSON shaped like:
+The system must:
 
-```json
-{
-  "access_token": "<jwt>",
-  "token_type": "Bearer",
-  "expires_in": 600
-}
-```
+- reject blank bearer token identifiers
+- reject blank bearer token hashes
+- reject duplicate configured bearer token identifiers
+- reject expired bearer credentials
+- require each client to declare exactly one of `group` or inline `api_access`
+- resolve group references to an effective per-client `api_access` map at load time
+- authorize proxy access only against that effective `api_access` map for the matched client
+
+## Bearer-token validation expectations
+
+Bearer-token validation must:
+
+- require exactly one `Authorization` header
+- require the header value to be exactly `Bearer <token>` with exactly two parts
+- reject blank bearer token values
+- treat the bearer token as opaque input
+- resolve the presented token to a stored `bearer_token_id`
+- look up the stored bearer credential by `bearer_token_id`
+- compare the presented token against the stored `bearer_token_hash`
+- check `bearer_token_expires_at`
+- require that the matched client still exists in config
+
+Successful validation authenticates the owning client. It does not add or narrow scopes beyond configured `api_access`.
 
 ## Failure expectations
 
@@ -74,97 +76,10 @@ The feature must fail closed.
 
 Expected classes of failures:
 
-- missing or invalid `x-api-key` yields `401 invalid_api_key`
-- malformed JSON, malformed API slugs, oversized exchange bodies, empty API access maps, or invalid access levels yield `400 bad_request`
-- requesting unknown or unauthorized APIs yields `403 forbidden_api`
+- missing, repeated, malformed, unknown, mismatched, or expired bearer credentials yield `401 invalid_token`
+- every `401 invalid_token` response on proxy routes includes `WWW-Authenticate: Bearer`
+- requests for unknown or unauthorized APIs yield `403 forbidden_api`
 - internal failures yield `500 internal`
-
-Unlike invalid bearer-token responses, invalid API key responses do not add a `WWW-Authenticate` header.
-
-## Client authorization model
-
-Clients are configured by slug and API key.
-
-The system must:
-
-- reject blank API keys
-- reject expired API keys
-- reject duplicate configured API keys
-- require each client to declare exactly one of `group` or inline `api_access`
-- resolve group references to an effective per-client `api_access` map at load time
-- authorize requested APIs against that effective `api_access` map for the matched client
-
-API key lookup and expiration failures must surface as authentication failures during exchange.
-
-## Token contract
-
-Issued JWTs must contain:
-
-- `sub` — client slug
-- `apis` — authorized API access as an object map
-- `iss`
-- `aud`
-- `iat`
-- `exp`
-
-Token expectations:
-
-- `apis` is serialized as a JSON object map from API slug to access level
-- `apis` is normalized into deterministic key order
-- the token is signed by the server using the configured signing secret
-- token validation checks issuer, audience, timing claims, and API access
-
-Example JWT claim shape:
-
-```json
-{
-  "sub": "default",
-  "apis": {
-    "projects": "write",
-    "billing": "read"
-  },
-  "iss": "gate-agent-dev",
-  "aud": "gate-agent-clients",
-  "iat": 1712664000,
-  "exp": 1712664600
-}
-```
-
-Before issuing a token, the system must ensure:
-
-- APIs and access levels are normalized and validated
-- every API must be allowed for the client at the requested access level
-- every API must exist in configured upstream APIs
-
-## Bearer-token validation expectations
-
-Bearer-token validation must:
-
-- authorization header must be exactly one `Bearer <token>` header with exactly two parts
-- JWT header algorithm must be HS256
-- `sub` must be a valid slug
-- `apis` must be a non-empty object map of valid slugs to `read` or `write`
-- the client named by `sub` must exist in config
-- verify the token against:
-  - signing secret
-  - issuer
-  - audience
-  - required claims: `sub`, `apis`, `exp`, `iat`, `iss`, `aud`
-- `iat` must not be in the future
-- every API in the token must still be both:
-  - allowed for the client at the claimed access level
-  - present in configured upstream APIs
-
-Access compatibility rules:
-
-- token `read` is valid when the configured client access is `read` or `write`
-- token `write` is valid only when the configured client access is `write`
-
-Error behavior for bearer-token validation:
-
-- malformed or invalid bearer tokens yield `401 invalid_token`
-- invalid token responses include `WWW-Authenticate: Bearer`
-- tokens that are structurally valid but request unauthorized APIs must yield `403 forbidden_api`
 
 ## Proxy authorization rule
 
@@ -174,26 +89,24 @@ The route itself selects the API being accessed.
   - `/proxy/{api}`
   - `/proxy/{api}/`
   - `/proxy/{api}/{*path}`
-- after bearer token validation, the selected route `{api}` must be present in the token’s `apis` claim
+- after bearer-token validation, the selected route `{api}` must be allowed by the matched client's configured `api_access`
 - the required access level is derived from the inbound HTTP method:
   - `GET`, `HEAD`, `OPTIONS` require `read`
   - `POST`, `PUT`, `PATCH`, `DELETE` require `write`
-  - every other method requires `write` (fail closed)
-- a token with `write` access satisfies `read`
-- otherwise the request fails with forbidden API
+  - every other method requires `write` and therefore fails closed unless the client has `write`
+- configured `write` access satisfies `read`
+- otherwise the request fails with `403 forbidden_api`
 - when the request includes `x-request-id`, it is copied to the response
 - when it does not, the router stack generates one and propagates it
 
 ## Local testing workflow
 
-The product must support a local workflow for exercising the real auth flow.
+The product must support a local workflow for exercising the real auth path.
 
 Expected helper behavior:
 
-- `--auth` emits a curl config that calls `POST /auth/exchange`
-- `--proxy --jwt ... --api ... --path ...` emits a curl config that calls the proxy with a bearer token
-- proxy mode is the default when neither `--auth` nor `--proxy` is supplied
+- proxy mode uses a caller-provided bearer token directly
+- helper output for proxy requests sends exactly one `Authorization: Bearer <token>` header
+- proxy mode is the default when no alternate mode is selected
 
-In auth mode, the helper must request the effective API access map allowed for the selected client.
-
-The helper must not mint local tokens. It must always exercise the exchange-based flow.
+The helper must exercise direct bearer authentication rather than minting, exchanging, or transforming credentials locally.

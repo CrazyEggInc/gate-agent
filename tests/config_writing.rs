@@ -1,3 +1,4 @@
+use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,27 +18,20 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     assert!(config_path.exists());
 
     let contents = fs::read_to_string(&config_path)?;
-    let auth = section_body(&contents, "auth").unwrap();
-    assert_eq!(
-        find_string_value(auth, "issuer").as_deref(),
-        Some(write::DEFAULT_AUTH_ISSUER)
-    );
-    assert_eq!(
-        find_string_value(auth, "audience").as_deref(),
-        Some(write::DEFAULT_AUTH_AUDIENCE)
-    );
-
-    let signing_secret = find_string_value(auth, "signing_secret").unwrap();
-    assert!(signing_secret.len() >= 32);
-    assert!(signing_secret.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(section_body(&contents, "auth").is_none());
+    assert!(!contents.contains("api_key = "));
 
     let default_client = section_body(&contents, "clients.default").unwrap();
 
-    let api_key = find_string_value(default_client, "api_key").unwrap();
-    assert!(api_key.len() >= 24);
-    assert!(api_key.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let bearer_token_id = find_string_value(default_client, "bearer_token_id").unwrap();
+    assert!(bearer_token_id.len() >= 16);
+    assert!(is_lower_hex(&bearer_token_id));
 
-    let expires_at = find_string_value(default_client, "api_key_expires_at").unwrap();
+    let bearer_token_hash = find_string_value(default_client, "bearer_token_hash").unwrap();
+    assert_eq!(bearer_token_hash.len(), 64);
+    assert!(is_lower_hex(&bearer_token_hash));
+
+    let expires_at = find_string_value(default_client, "bearer_token_expires_at").unwrap();
     let expires_at_unix = parse_rfc3339_z(&expires_at).unwrap();
     let now_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let min_expected = now_unix + Duration::from_secs(170 * 24 * 60 * 60).as_secs();
@@ -80,8 +74,49 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     assert!(!raw_contents.contains("[clients.default]"));
 
     let loaded = write::load_display_text(&config_path, Some(&password))?;
-    assert!(loaded.toml.contains("[auth]"));
     assert!(loaded.toml.contains("[clients.default]"));
+    assert!(loaded.toml.contains("bearer_token_id"));
+    assert!(!loaded.toml.contains("[auth]"));
+    assert!(!loaded.toml.contains("api_key = "));
+
+    Ok(())
+}
+
+#[test]
+fn config_init_prints_default_bearer_token_once_and_persists_only_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let full_token = parse_printed_token(&stdout, "default").ok_or("missing printed token")?;
+    let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
+    assert!(is_lower_hex(token_id));
+    assert!(is_lower_hex(secret));
+
+    let contents = fs::read_to_string(&config_path)?;
+    let default_client = section_body(&contents, "clients.default").unwrap();
+
+    assert_eq!(
+        find_string_value(default_client, "bearer_token_id").as_deref(),
+        Some(token_id)
+    );
+    assert_eq!(
+        find_string_value(default_client, "bearer_token_hash").as_deref(),
+        Some(write::sha256_hex(&full_token).as_str())
+    );
+    assert!(!contents.contains(&full_token));
 
     Ok(())
 }
@@ -94,14 +129,10 @@ fn add_api_upserts_single_entry_without_clobbering_unrelated_content()
     fs::write(
         &config_path,
         r#"# keep this comment
-[auth]
-issuer = "issuer"
-audience = "audience"
-signing_secret = "secret"
-
 [clients.default]
-api_key = "default-key"
-api_key_expires_at = "2030-01-01T00:00:00Z"
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
 api_access = {}
 
 [apis]
@@ -182,20 +213,70 @@ api_access = {}
 }
 
 #[test]
-fn add_client_writes_inline_api_access_in_stable_order_and_preserves_existing_key()
+fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-api",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "projects",
+            "--base-url",
+            "https://projects.internal.example/api",
+            "--auth-header",
+            "authorization",
+            "--auth-scheme",
+            "Bearer",
+            "--auth-value",
+            "upstream-token",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let full_token = parse_printed_token(&stdout, "default").ok_or("missing printed token")?;
+    let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
+    assert!(is_lower_hex(token_id));
+    assert!(is_lower_hex(secret));
+
+    let contents = fs::read_to_string(&config_path)?;
+    let default_client = section_body(&contents, "clients.default").unwrap();
+    let api = section_body(&contents, "apis.projects").unwrap();
+
+    assert_eq!(
+        find_string_value(default_client, "bearer_token_id").as_deref(),
+        Some(token_id)
+    );
+    assert_eq!(
+        find_string_value(default_client, "bearer_token_hash").as_deref(),
+        Some(write::sha256_hex(&full_token).as_str())
+    );
+    assert!(!contents.contains(&full_token));
+    assert_eq!(
+        find_string_value(api, "base_url").as_deref(),
+        Some("https://projects.internal.example/api")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn add_client_writes_inline_api_access_in_stable_order_and_preserves_existing_token_fields()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("gate-agent.toml");
     fs::write(
         &config_path,
-        r#"[auth]
-issuer = "issuer"
-audience = "audience"
-signing_secret = "secret"
-
-[clients.default]
-api_key = "default-key"
-api_key_expires_at = "2030-01-01T00:00:00Z"
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
 api_access = {}
 
 [groups]
@@ -208,8 +289,8 @@ api_access = {}
         &config_path,
         &ClientUpsert {
             name: "partner".to_string(),
-            api_key: None,
-            api_key_expires_at: None,
+            bearer_token: None,
+            bearer_token_expires_at: None,
             access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([(
                 "projects".to_string(),
                 AccessLevel::Read,
@@ -220,11 +301,12 @@ api_access = {}
 
     let first_contents = fs::read_to_string(&config_path)?;
     let first_client = section_body(&first_contents, "clients.partner").unwrap();
-    let original_key = find_string_value(first_client, "api_key").unwrap();
-    let original_expiration = find_string_value(first_client, "api_key_expires_at").unwrap();
+    let original_token_id = find_string_value(first_client, "bearer_token_id").unwrap();
+    let original_token_hash = find_string_value(first_client, "bearer_token_hash").unwrap();
+    let original_expiration = find_string_value(first_client, "bearer_token_expires_at").unwrap();
     let client_with_notes = first_client.replacen(
-        "api_key_expires_at = \"",
-        "# preserve this client comment\napi_key_expires_at = \"",
+        "bearer_token_expires_at = \"",
+        "# preserve this client comment\nbearer_token_expires_at = \"",
         1,
     );
     let client_with_notes = client_with_notes.replacen(
@@ -246,8 +328,8 @@ api_access = {}
         &config_path,
         &ClientUpsert {
             name: "partner".to_string(),
-            api_key: None,
-            api_key_expires_at: None,
+            bearer_token: None,
+            bearer_token_expires_at: None,
             access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([
                 ("projects".to_string(), AccessLevel::Read),
                 ("billing".to_string(), AccessLevel::Write),
@@ -262,11 +344,15 @@ api_access = {}
     assert_eq!(contents.matches("[clients.partner]").count(), 1);
     assert!(contents.contains("# preserve this client comment"));
     assert_eq!(
-        find_string_value(client, "api_key").as_deref(),
-        Some(original_key.as_str())
+        find_string_value(client, "bearer_token_id").as_deref(),
+        Some(original_token_id.as_str())
     );
     assert_eq!(
-        find_string_value(client, "api_key_expires_at").as_deref(),
+        find_string_value(client, "bearer_token_hash").as_deref(),
+        Some(original_token_hash.as_str())
+    );
+    assert_eq!(
+        find_string_value(client, "bearer_token_expires_at").as_deref(),
         Some(original_expiration.as_str())
     );
 
@@ -287,20 +373,91 @@ api_access = {}
 }
 
 #[test]
+fn config_add_client_prints_generated_bearer_token_once_and_persists_only_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = { projects = "read" }
+
+[groups]
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "upstream-token"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "partner",
+            "--api-access",
+            "projects=read",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let full_token = parse_printed_token(&stdout, "partner").ok_or("missing printed token")?;
+    let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
+    assert!(is_lower_hex(token_id));
+    assert!(is_lower_hex(secret));
+
+    let contents = fs::read_to_string(&config_path)?;
+    let client = section_body(&contents, "clients.partner").unwrap();
+
+    assert_eq!(
+        find_string_value(client, "bearer_token_id").as_deref(),
+        Some(token_id)
+    );
+    assert_eq!(
+        find_string_value(client, "bearer_token_hash").as_deref(),
+        Some(write::sha256_hex(&full_token).as_str())
+    );
+    assert!(!contents.contains(&full_token));
+
+    let expires_at = find_string_value(client, "bearer_token_expires_at").unwrap();
+    let expires_at_unix = parse_rfc3339_z(&expires_at).unwrap();
+    let now_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let min_expected = now_unix + Duration::from_secs(170 * 24 * 60 * 60).as_secs();
+    let max_expected = now_unix + Duration::from_secs(190 * 24 * 60 * 60).as_secs();
+    assert!(
+        expires_at_unix >= min_expected,
+        "expiry too early: {expires_at}"
+    );
+    assert!(
+        expires_at_unix <= max_expected,
+        "expiry too late: {expires_at}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn add_client_writes_group_and_removes_stale_inline_api_access()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("gate-agent.toml");
     fs::write(
         &config_path,
-        r#"[auth]
-issuer = "issuer"
-audience = "audience"
-signing_secret = "secret"
-
-[clients.partner]
-api_key = "partner-key"
-api_key_expires_at = "2030-01-01T00:00:00Z"
+        r#"[clients.partner]
+bearer_token_id = "partner-token"
+bearer_token_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
 api_access = { projects = "read" }
 note = "keep-me"
 
@@ -320,8 +477,8 @@ timeout_ms = 5000
         &config_path,
         &ClientUpsert {
             name: "partner".to_string(),
-            api_key: None,
-            api_key_expires_at: None,
+            bearer_token: None,
+            bearer_token_expires_at: None,
             access: write::ClientAccessUpsert::Group("partner-write".to_string()),
         },
         None,
@@ -339,6 +496,48 @@ timeout_ms = 5000
         Some("keep-me")
     );
     assert!(!client.contains("api_access ="));
+
+    Ok(())
+}
+
+#[test]
+fn add_client_rejects_duplicate_bearer_token_id_before_writing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "shared-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[groups]
+
+[apis]
+"#,
+    )?;
+
+    let error = write::upsert_client(
+        &config_path,
+        &ClientUpsert {
+            name: "partner".to_string(),
+            bearer_token: Some("shared-token.partner-secret".to_string()),
+            bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_string()),
+            access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::new()),
+        },
+        None,
+    )
+    .expect_err("duplicate bearer token id should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "clients.partner.bearer_token_id duplicates another configured client bearer_token_id"
+    );
+
+    let contents = fs::read_to_string(&config_path)?;
+    assert!(!contents.contains("[clients.partner]"));
 
     Ok(())
 }
@@ -435,6 +634,35 @@ fn unquote(value: &str) -> Option<String> {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
         .map(str::to_owned)
+}
+
+fn parse_printed_token(stdout: &str, client_name: &str) -> Option<String> {
+    let prefix = format!("generated bearer token for client '{client_name}': ");
+    let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
+    let line = lines.next()?.trim();
+
+    if lines.next().is_some() {
+        return None;
+    }
+
+    line.strip_prefix(&prefix).map(str::to_owned)
+}
+
+fn split_full_token(value: &str) -> Option<(&str, &str)> {
+    let (token_id, secret) = value.split_once('.')?;
+
+    if token_id.is_empty() || secret.is_empty() || secret.contains('.') {
+        return None;
+    }
+
+    Some((token_id, secret))
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
 }
 
 fn parse_rfc3339_z(value: &str) -> Result<u64, &'static str> {

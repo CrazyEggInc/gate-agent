@@ -38,14 +38,10 @@ fn write_secrets_file(
 fn load_test_secrets(base_url: &str) -> Result<SecretsConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(&format!(
         r#"
-[auth]
-issuer = "gate-agent-dev"
-audience = "gate-agent-clients"
-signing_secret = "replace-me"
-
 [clients.default]
-api_key = "default-client-api-key"
-api_key_expires_at = "2030-01-02T03:04:05Z"
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
 api_access = {{ projects = "read", billing = "write" }}
 
 [apis.projects]
@@ -123,7 +119,7 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
     let request = Request::builder()
         .method("POST")
         .uri("/proxy/billing/v1/projects/1/tasks?expand=1")
-        .header("authorization", "Bearer client-jwt")
+        .header("authorization", "Bearer client-token")
         .header("connection", "keep-alive, x-remove-me")
         .header("host", "localhost:8787")
         .header("te", "trailers")
@@ -272,7 +268,7 @@ async fn request_mapping_sets_raw_upstream_auth_header_when_scheme_is_not_config
     let request = Request::builder()
         .method("GET")
         .uri("/proxy/projects")
-        .header("authorization", "Bearer client-jwt")
+        .header("authorization", "Bearer client-token")
         .body(Body::empty())?;
 
     let outbound = map_request(request, "projects", api)?;
