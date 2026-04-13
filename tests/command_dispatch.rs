@@ -4,13 +4,15 @@ use std::sync::{Mutex, OnceLock};
 use assert_cmd::Command as AssertCommand;
 use clap::{Parser, error::ErrorKind};
 use gate_agent::cli::{
-    Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigArgs, ConfigCommand, ConfigInitArgs,
-    ConfigValidateArgs,
+    Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigArgs,
+    ConfigCommand, ConfigInitArgs, ConfigValidateArgs,
 };
 use gate_agent::commands::config::{ConfigEditArgs, ConfigShowArgs};
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use tempfile::tempdir;
 use toml::Value;
+
+const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 
 const VALID_CONFIG: &str = r#"
 [clients.default]
@@ -52,6 +54,19 @@ fn write_config(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::E
 
     std::fs::write(path, contents)?;
     Ok(())
+}
+
+fn add_api_args(config: PathBuf, auth_header: &str, auth_value: &str) -> ConfigAddApiArgs {
+    ConfigAddApiArgs {
+        config: Some(config),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        base_url: "https://example.test/api".to_owned(),
+        auth_header: auth_header.to_owned(),
+        auth_value: auth_value.to_owned(),
+        timeout_ms: 5_000,
+    }
 }
 
 struct EnvGuard {
@@ -168,17 +183,11 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
     }
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddApi(ConfigAddApiArgs {
-            config: Some(config_path.clone()),
-            password: None,
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-            name: "projects".to_owned(),
-            base_url: "https://example.test/api".to_owned(),
-            auth_header: "authorization".to_owned(),
-            auth_scheme: Some("Bearer".to_owned()),
-            auth_value: "top-secret".to_owned(),
-            timeout_ms: 5_000,
-        }),
+        command: ConfigCommand::AddApi(add_api_args(
+            config_path.clone(),
+            "authorization",
+            "top-secret",
+        )),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -197,16 +206,84 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
         Some("authorization")
     );
     assert_eq!(
-        api.get("auth_scheme").and_then(Value::as_str),
-        Some("Bearer")
-    );
-    assert_eq!(
         api.get("auth_value").and_then(Value::as_str),
         Some("top-secret")
     );
+    assert!(api.get("auth_scheme").is_none());
     assert_eq!(
         api.get("timeout_ms").and_then(Value::as_integer),
         Some(5_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_runs_add_api_subcommand_without_upstream_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::AddApi(add_api_args(config_path.clone(), "", "")),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_table)
+        .expect("projects api config");
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://example.test/api")
+    );
+    assert!(api.get("auth_header").is_none());
+    assert!(api.get("auth_scheme").is_none());
+    assert!(api.get("auth_value").is_none());
+    assert_eq!(
+        api.get("timeout_ms").and_then(Value::as_integer),
+        Some(5_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_rejects_add_api_auth_value_without_auth_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::AddApi(add_api_args(config_path, "", "top-secret")),
+    }))
+    .expect_err("auth_value without auth_header should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "auth_value cannot be set without auth_header"
     );
 
     Ok(())
@@ -271,8 +348,6 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
             .and_then(Value::as_str),
         Some("2030-01-02T03:04:05Z")
     );
-    assert!(client.get("api_key").is_none());
-    assert!(client.get("api_key_expires_at").is_none());
     assert_eq!(
         client
             .get("api_access")
@@ -343,6 +418,123 @@ fn cli_rejects_removed_api_key_flags_for_config_add_client() {
         .kind(),
         ErrorKind::UnknownArgument
     );
+}
+
+#[test]
+fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(&config_path, VALID_CONFIG)?;
+
+    let output = AssertCommand::cargo_bin("gate-agent")?
+        .current_dir(&workspace)
+        .env("HOME", temp_dir.path().join("home"))
+        .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path.to_str().expect("utf-8 config path"),
+            "--name",
+            "mobile-app",
+            "--bearer-token-expires-at",
+            "2030-01-02T03:04:05Z",
+            "--api-access",
+            "projects=read,reports=write",
+        ])
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let printed_lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(printed_lines.len(), 1);
+
+    let full_token =
+        parse_printed_token(printed_lines[0], "mobile-app").expect("printed bearer token");
+    let (token_id, secret) = split_full_token(&full_token).expect("full bearer token format");
+    assert!(!secret.is_empty());
+    assert!(!stdout.contains("api_key"));
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(Value::as_table)
+        .expect("mobile-app client config");
+
+    assert_eq!(
+        client.get("bearer_token_id").and_then(Value::as_str),
+        Some(token_id)
+    );
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
+        Some("2030-01-02T03:04:05Z")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_runs_add_group_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::AddGroup(ConfigAddGroupArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            name: "readonly".to_owned(),
+            api_access: vec!["projects=read,reports=write".to_owned()],
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let group = written
+        .get("groups")
+        .and_then(|value| value.get("readonly"))
+        .and_then(Value::as_table)
+        .expect("readonly group config");
+
+    assert_eq!(
+        group
+            .get("api_access")
+            .and_then(|value| value.get("projects"))
+            .and_then(Value::as_str),
+        Some("read")
+    );
+    assert_eq!(
+        group
+            .get("api_access")
+            .and_then(|value| value.get("reports"))
+            .and_then(Value::as_str),
+        Some("write")
+    );
+
+    Ok(())
 }
 
 #[test]
@@ -453,4 +645,21 @@ fn help_command_rejects_explicit_help_subcommands() {
             .kind(),
         ErrorKind::DisplayHelp
     );
+}
+
+fn parse_printed_token(line: &str, client_name: &str) -> Option<String> {
+    let prefix = format!("Generated token for client '{client_name}': ");
+    let token = line.strip_prefix(&prefix)?;
+    split_full_token(token)?;
+    Some(token.to_owned())
+}
+
+fn split_full_token(value: &str) -> Option<(&str, &str)> {
+    let (token_id, secret) = value.split_once('.')?;
+
+    if token_id.is_empty() || secret.is_empty() || secret.contains('.') {
+        return None;
+    }
+
+    Some((token_id, secret))
 }

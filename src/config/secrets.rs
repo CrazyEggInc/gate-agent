@@ -65,9 +65,8 @@ pub struct UtcTimestamp {
 pub struct ApiConfig {
     pub slug: String,
     pub base_url: Url,
-    pub auth_header: HeaderName,
-    pub auth_scheme: Option<String>,
-    pub auth_value: SecretString,
+    pub auth_header: Option<HeaderName>,
+    pub auth_value: Option<SecretString>,
     pub timeout_ms: u64,
 }
 
@@ -102,9 +101,9 @@ struct RawGroupConfig {
 #[serde(deny_unknown_fields)]
 struct RawApiConfig {
     base_url: String,
-    auth_header: String,
+    auth_header: Option<String>,
     auth_scheme: Option<String>,
-    auth_value: String,
+    auth_value: Option<String>,
     #[serde(default = "default_api_timeout_ms")]
     timeout_ms: u64,
 }
@@ -429,20 +428,48 @@ impl ApiConfig {
             )));
         }
 
-        let auth_header = HeaderName::from_bytes(
-            required_string(&format!("apis.{slug}.auth_header"), raw_config.auth_header)?
-                .as_bytes(),
-        )
-        .map_err(|error| {
-            ConfigError::new(format!("apis.{slug}.auth_header is invalid: {error}"))
-        })?;
-
+        let auth_header =
+            optional_string(&format!("apis.{slug}.auth_header"), raw_config.auth_header)?;
         let auth_scheme =
             optional_string(&format!("apis.{slug}.auth_scheme"), raw_config.auth_scheme)?;
-        let auth_value = SecretString::from(required_string(
-            &format!("apis.{slug}.auth_value"),
-            raw_config.auth_value,
-        )?);
+        let auth_value =
+            optional_string(&format!("apis.{slug}.auth_value"), raw_config.auth_value)?;
+
+        if auth_header.is_none() {
+            if auth_value.is_some() {
+                return Err(ConfigError::new(format!(
+                    "apis.{slug}.auth_value requires auth_header"
+                )));
+            }
+
+            if auth_scheme.is_some() {
+                return Err(ConfigError::new(format!(
+                    "apis.{slug}.auth_scheme requires auth_header"
+                )));
+            }
+        }
+
+        if auth_header.is_some() && auth_value.is_none() {
+            return Err(ConfigError::new(format!(
+                "apis.{slug}.auth_value is required when auth_header is configured"
+            )));
+        }
+
+        let auth_header = auth_header
+            .map(|value| {
+                HeaderName::from_bytes(value.as_bytes()).map_err(|error| {
+                    ConfigError::new(format!("apis.{slug}.auth_header is invalid: {error}"))
+                })
+            })
+            .transpose()?;
+
+        let auth_value = match (auth_header.as_ref(), auth_value, auth_scheme) {
+            (Some(_), Some(value), Some(scheme)) => {
+                Some(SecretString::from(format!("{scheme} {value}")))
+            }
+            (Some(_), Some(value), None) => Some(SecretString::from(value)),
+            _ => None,
+        };
 
         if raw_config.timeout_ms == 0 {
             return Err(ConfigError::new(format!(
@@ -454,7 +481,6 @@ impl ApiConfig {
             slug: slug.to_owned(),
             base_url,
             auth_header,
-            auth_scheme,
             auth_value,
             timeout_ms: raw_config.timeout_ms,
         })

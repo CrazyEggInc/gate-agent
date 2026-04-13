@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gate_agent::config::secrets::AccessLevel;
-use gate_agent::config::write::{self, ApiUpsert, ClientUpsert};
+use gate_agent::config::write::{self, ApiUpsert, ClientUpsert, GroupUpsert};
 use secrecy::SecretString;
 
 #[test]
@@ -100,6 +100,12 @@ fn config_init_prints_default_bearer_token_once_and_persists_only_hash()
     assert!(output.status.success(), "{output:?}");
 
     let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(
+        stdout
+            .matches("Generated token for client 'default': ")
+            .count(),
+        1
+    );
     let full_token = parse_printed_token(&stdout, "default").ok_or("missing printed token")?;
     let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
     assert!(is_lower_hex(token_id));
@@ -144,9 +150,8 @@ api_access = {}
         &ApiUpsert {
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/api".to_string(),
-            auth_header: "authorization".to_string(),
-            auth_scheme: Some("Bearer".to_string()),
-            auth_value: "first-token".to_string(),
+            auth_header: Some("authorization".to_string()),
+            auth_value: Some("first-token".to_string()),
             timeout_ms: 5_000,
         },
         None,
@@ -174,9 +179,8 @@ api_access = {}
         &ApiUpsert {
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/v2".to_string(),
-            auth_header: "x-service-token".to_string(),
-            auth_scheme: None,
-            auth_value: "second-token".to_string(),
+            auth_header: Some("x-service-token".to_string()),
+            auth_value: Some("second-token".to_string()),
             timeout_ms: 7_500,
         },
         None,
@@ -213,6 +217,62 @@ api_access = {}
 }
 
 #[test]
+fn add_api_without_auth_header_removes_stale_auth_fields_and_legacy_auth_scheme()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "upstream-token"
+timeout_ms = 5000
+# preserve this api comment
+notes = "keep-me"
+"#,
+    )?;
+
+    write::upsert_api(
+        &config_path,
+        &ApiUpsert {
+            name: "projects".to_string(),
+            base_url: "https://projects.internal.example/v2".to_string(),
+            auth_header: None,
+            auth_value: None,
+            timeout_ms: 7_500,
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let projects = section_body(&contents, "apis.projects").unwrap();
+
+    assert_eq!(
+        find_string_value(projects, "base_url").as_deref(),
+        Some("https://projects.internal.example/v2")
+    );
+    assert_eq!(find_string_value(projects, "auth_header"), None);
+    assert_eq!(find_string_value(projects, "auth_value"), None);
+    assert!(!projects.contains("auth_scheme ="));
+    assert!(contents.contains("# preserve this api comment"));
+    assert_eq!(
+        find_string_value(projects, "notes").as_deref(),
+        Some("keep-me")
+    );
+    assert_eq!(find_integer_value(projects, "timeout_ms"), Some(7_500));
+
+    Ok(())
+}
+
+#[test]
 fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_hash()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
@@ -230,16 +290,20 @@ fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_ha
             "https://projects.internal.example/api",
             "--auth-header",
             "authorization",
-            "--auth-scheme",
-            "Bearer",
             "--auth-value",
-            "upstream-token",
+            "Bearer upstream-token",
         ])
         .output()?;
 
     assert!(output.status.success(), "{output:?}");
 
     let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(
+        stdout
+            .matches("Generated token for client 'default': ")
+            .count(),
+        1
+    );
     let full_token = parse_printed_token(&stdout, "default").ok_or("missing printed token")?;
     let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
     assert!(is_lower_hex(token_id));
@@ -262,6 +326,15 @@ fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_ha
         find_string_value(api, "base_url").as_deref(),
         Some("https://projects.internal.example/api")
     );
+    assert_eq!(
+        find_string_value(api, "auth_header").as_deref(),
+        Some("authorization")
+    );
+    assert_eq!(
+        find_string_value(api, "auth_value").as_deref(),
+        Some("Bearer upstream-token")
+    );
+    assert!(!api.contains("auth_scheme ="));
 
     Ok(())
 }
@@ -285,7 +358,7 @@ api_access = {}
 "#,
     )?;
 
-    write::upsert_client(
+    let first_result = write::upsert_client(
         &config_path,
         &ClientUpsert {
             name: "partner".to_string(),
@@ -304,6 +377,23 @@ api_access = {}
     let original_token_id = find_string_value(first_client, "bearer_token_id").unwrap();
     let original_token_hash = find_string_value(first_client, "bearer_token_hash").unwrap();
     let original_expiration = find_string_value(first_client, "bearer_token_expires_at").unwrap();
+    let generated_bearer_token = first_result
+        .generated_bearer_token
+        .as_deref()
+        .ok_or("missing generated bearer token")?;
+    let (generated_token_id, generated_secret) =
+        split_full_token(generated_bearer_token).ok_or("invalid generated token format")?;
+    assert_eq!(generated_token_id, original_token_id);
+    assert!(is_lower_hex(generated_token_id));
+    assert!(is_lower_hex(generated_secret));
+    assert_eq!(
+        original_token_hash,
+        write::sha256_hex(generated_bearer_token)
+    );
+    assert_eq!(first_result.bearer_token_expires_at, original_expiration);
+    assert!(!first_contents.contains(generated_bearer_token));
+    assert!(!first_client.contains("api_key ="));
+    assert!(!first_client.contains("api_key_expires_at ="));
     let client_with_notes = first_client.replacen(
         "bearer_token_expires_at = \"",
         "# preserve this client comment\nbearer_token_expires_at = \"",
@@ -324,7 +414,7 @@ api_access = {}
     injected_contents.push_str(&first_contents[client_end..]);
     fs::write(&config_path, injected_contents)?;
 
-    write::upsert_client(
+    let second_result = write::upsert_client(
         &config_path,
         &ClientUpsert {
             name: "partner".to_string(),
@@ -355,6 +445,8 @@ api_access = {}
         find_string_value(client, "bearer_token_expires_at").as_deref(),
         Some(original_expiration.as_str())
     );
+    assert!(second_result.generated_bearer_token.is_none());
+    assert_eq!(second_result.bearer_token_expires_at, original_expiration);
 
     let api_access = find_inline_table_value(client, "api_access").unwrap();
     assert_eq!(
@@ -368,6 +460,8 @@ api_access = {}
         find_string_value(client, "label").as_deref(),
         Some("keep-me")
     );
+    assert!(!client.contains("api_key ="));
+    assert!(!client.contains("api_key_expires_at ="));
 
     Ok(())
 }
@@ -412,6 +506,18 @@ timeout_ms = 5000
     assert!(output.status.success(), "{output:?}");
 
     let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(
+        stdout
+            .matches("Generated token for client 'partner': ")
+            .count(),
+        1
+    );
+    assert_eq!(
+        stdout
+            .matches("Generated token for client 'default': ")
+            .count(),
+        0
+    );
     let full_token = parse_printed_token(&stdout, "partner").ok_or("missing printed token")?;
     let (token_id, secret) = split_full_token(&full_token).ok_or("invalid token format")?;
     assert!(is_lower_hex(token_id));
@@ -429,6 +535,8 @@ timeout_ms = 5000
         Some(write::sha256_hex(&full_token).as_str())
     );
     assert!(!contents.contains(&full_token));
+    assert!(!client.contains("api_key ="));
+    assert!(!client.contains("api_key_expires_at ="));
 
     let expires_at = find_string_value(client, "bearer_token_expires_at").unwrap();
     let expires_at_unix = parse_rfc3339_z(&expires_at).unwrap();
@@ -442,6 +550,86 @@ timeout_ms = 5000
     assert!(
         expires_at_unix <= max_expected,
         "expiry too late: {expires_at}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn upsert_group_preserves_unrelated_content_and_writes_stable_api_access_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"# keep this comment
+[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[groups]
+"#,
+    )?;
+
+    write::upsert_group(
+        &config_path,
+        &GroupUpsert {
+            name: "partner-write".to_string(),
+            api_access: std::collections::BTreeMap::from([(
+                "projects".to_string(),
+                AccessLevel::Read,
+            )]),
+        },
+        None,
+    )?;
+
+    let first_contents = fs::read_to_string(&config_path)?;
+    let first_group = section_body(&first_contents, "groups.partner-write").unwrap();
+    let group_with_notes = first_group.replacen(
+        "api_access = { projects = \"read\" }\n",
+        "# preserve this group comment\napi_access = { projects = \"read\" }\nlabel = \"keep-me\"\n",
+        1,
+    );
+    let group_header = "[groups.partner-write]\n";
+    let group_start = first_contents.find(group_header).unwrap();
+    let group_body_start = group_start + group_header.len();
+    let group_end = group_body_start + first_group.len();
+    let mut injected_contents = String::with_capacity(first_contents.len() + 64);
+    injected_contents.push_str(&first_contents[..group_body_start]);
+    injected_contents.push_str(&group_with_notes);
+    injected_contents.push_str(&first_contents[group_end..]);
+    fs::write(&config_path, injected_contents)?;
+
+    write::upsert_group(
+        &config_path,
+        &GroupUpsert {
+            name: "partner-write".to_string(),
+            api_access: std::collections::BTreeMap::from([
+                ("projects".to_string(), AccessLevel::Read),
+                ("billing".to_string(), AccessLevel::Write),
+            ]),
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let group = section_body(&contents, "groups.partner-write").unwrap();
+
+    assert!(contents.starts_with("# keep this comment"));
+    assert_eq!(contents.matches("[groups.partner-write]").count(), 1);
+    assert!(contents.contains("# preserve this group comment"));
+    assert_eq!(
+        find_inline_table_value(group, "api_access"),
+        Some(vec![
+            ("billing".to_string(), "write".to_string()),
+            ("projects".to_string(), "read".to_string()),
+        ])
+    );
+    assert_eq!(
+        find_string_value(group, "label").as_deref(),
+        Some("keep-me")
     );
 
     Ok(())
@@ -637,7 +825,7 @@ fn unquote(value: &str) -> Option<String> {
 }
 
 fn parse_printed_token(stdout: &str, client_name: &str) -> Option<String> {
-    let prefix = format!("generated bearer token for client '{client_name}': ");
+    let prefix = format!("Generated token for client '{client_name}': ");
     let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
     let line = lines.next()?.trim();
 

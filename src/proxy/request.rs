@@ -107,15 +107,30 @@ fn inject_upstream_auth_header(
     headers: &mut HeaderMap,
     api_config: &ApiConfig,
 ) -> Result<(), AppError> {
-    let auth_value = match api_config.auth_scheme.as_deref() {
-        Some(scheme) => format!("{scheme} {}", api_config.auth_value.expose_secret()),
-        None => api_config.auth_value.expose_secret().to_owned(),
+    let (auth_header, auth_value) = match (
+        api_config.auth_header.as_ref(),
+        api_config.auth_value.as_ref(),
+    ) {
+        (None, None) => return Ok(()),
+        (Some(auth_header), Some(auth_value)) => (auth_header, auth_value),
+        (Some(_), None) => {
+            return Err(AppError::UpstreamBuild(
+                "upstream auth config is invalid: auth_header requires auth_value".to_owned(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(AppError::UpstreamBuild(
+                "upstream auth config is invalid: auth_value requires auth_header".to_owned(),
+            ));
+        }
     };
-    let auth_value = HeaderValue::from_str(&auth_value).map_err(|error| {
+
+    let auth_value = auth_value.expose_secret();
+    let auth_value = HeaderValue::from_str(auth_value).map_err(|error| {
         AppError::UpstreamBuild(format!("invalid upstream auth header: {error}"))
     })?;
 
-    headers.insert(api_config.auth_header.clone(), auth_value);
+    headers.insert(auth_header.clone(), auth_value);
 
     Ok(())
 }

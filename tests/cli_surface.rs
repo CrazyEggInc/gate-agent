@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use clap::Parser;
-use gate_agent::cli::Cli;
+use gate_agent::cli::{Cli, Command as CliCommand, ConfigCommand};
 
 fn help_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::cargo_bin("gate-agent")?.args(args).output()?;
@@ -64,6 +64,8 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("Open the config in your editor"));
     assert!(stdout.contains("add-api"));
     assert!(stdout.contains("Add an upstream API entry"));
+    assert!(stdout.contains("add-group"));
+    assert!(stdout.contains("Add a group entry"));
     assert!(stdout.contains("add-client"));
     assert!(stdout.contains("Add a client entry"));
 
@@ -82,6 +84,22 @@ fn config_init_help_uses_config_flag_without_secrets_file_placeholder()
     assert!(stdout.contains("Create a new config file"));
     assert!(!stdout.contains("--secrets-file"));
     assert!(!stdout.contains("SECRETS_FILE"));
+
+    Ok(())
+}
+
+#[test]
+fn config_add_group_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "add-group", "--help"])?;
+
+    assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
+    assert!(stdout.contains("--log-level"));
+    assert!(stdout.contains("--name"));
+    assert!(stdout.contains("--api-access"));
+    assert!(!stdout.contains("--api-key"));
+    assert!(!stdout.contains("--api-key-expires-at"));
+    assert!(!stdout.contains("--group"));
 
     Ok(())
 }
@@ -109,16 +127,16 @@ fn config_add_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--base-url"));
     assert!(stdout.contains("--auth-header"));
-    assert!(stdout.contains("--auth-scheme"));
     assert!(stdout.contains("--auth-value"));
     assert!(stdout.contains("--timeout-ms"));
     assert!(stdout.contains("[default: 5000]"));
+    assert!(!stdout.contains("--auth-scheme"));
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_accepts_missing_timeout_ms() {
+fn config_add_api_accepts_missing_timeout_ms_and_auth_fields() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
@@ -127,11 +145,14 @@ fn config_add_api_accepts_missing_timeout_ms() {
         "projects",
         "--base-url",
         "https://projects.internal.example",
-        "--auth-header",
-        "authorization",
-        "--auth-value",
-        "projects-secret-value",
     ]);
+
+    assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_add_api_accepts_promptable_omissions_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-api"]);
 
     assert!(parsed.is_ok());
 }
@@ -229,6 +250,65 @@ fn config_add_client_accepts_repeated_api_access_flags() {
 }
 
 #[test]
+fn config_add_client_accepts_missing_name_and_access_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-client"]);
+
+    assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_add_group_parses_to_add_group() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-group"]).expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::AddGroup(_) => {}
+            other => panic!("expected add-group variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_add_group_accepts_repeated_api_access_flags() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "add-group",
+        "--name",
+        "readonly",
+        "--api-access",
+        "projects=read,billing=write",
+        "--api-access",
+        "events=read",
+    ]);
+
+    assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_add_group_accepts_missing_name_and_access_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-group"]);
+
+    assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_add_group_rejects_client_only_flags() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "add-group",
+        "--name",
+        "readonly",
+        "--api-key",
+        "client-secret",
+    ]);
+
+    assert!(parsed.is_err());
+}
+
+#[test]
 fn config_add_client_rejects_group_and_api_access_together() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
@@ -241,13 +321,6 @@ fn config_add_client_rejects_group_and_api_access_together() {
         "--api-access",
         "projects=read",
     ]);
-
-    assert!(parsed.is_err());
-}
-
-#[test]
-fn config_add_client_rejects_missing_group_and_api_access() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-client", "--name", "partner"]);
 
     assert!(parsed.is_err());
 }
@@ -274,4 +347,35 @@ fn removed_curl_subcommand_is_rejected() {
     let parsed = Cli::try_parse_from(["gate-agent", "curl"]);
 
     assert!(parsed.is_err());
+}
+
+#[test]
+fn config_init_tracks_explicit_encrypted_flag() {
+    let omitted = Cli::try_parse_from(["gate-agent", "config", "init"]).expect("parses");
+    let omitted_explicit = match omitted.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Init(args) => args.encrypted_was_explicitly_set(),
+            other => panic!("expected init variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    };
+    assert!(!omitted_explicit);
+
+    let explicit =
+        Cli::try_parse_from(["gate-agent", "config", "init", "--encrypted"]).expect("parses");
+    let explicit_flag = match explicit.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Init(args) => args.encrypted_was_explicitly_set(),
+            other => panic!("expected init variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    };
+    assert!(explicit_flag);
+}
+
+#[test]
+fn config_init_accepts_promptable_omissions_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "init"]);
+
+    assert!(parsed.is_ok());
 }

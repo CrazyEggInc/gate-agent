@@ -121,19 +121,22 @@ Validation expectations:
 Required fields:
 
 - `base_url: String`
-- `auth_header: String`
-- `auth_scheme: Option<String>`
-- `auth_value: String`
+- `auth_header: Option<String>`
+- `auth_value: Option<String>`
 - `timeout_ms: u64 | omitted`
 
 Validation expectations:
 
 - slug must be a valid lowercase slug
 - `base_url` must parse as a URL
-- `auth_header` must parse as an HTTP header name
-- required string fields must be non-empty
+- `auth_header`, when present, must parse as an HTTP header name
+- `auth_value` is required when `auth_header` is present
+- `auth_value` must be omitted when `auth_header` is omitted
+- when `auth_header` is omitted, no upstream auth header is injected
+- bearer-style auth is stored as the full header value in `auth_value`, for example `Bearer my-token`
 - omitted `timeout_ms` falls back to `5000`
 - explicit `timeout_ms` must be greater than zero
+- the parser accepts legacy `auth_scheme` on read, composes it into the in-memory `auth_value`, and rewrites config without persisting `auth_scheme`
 
 ## Operational expectations
 
@@ -158,8 +161,7 @@ group = "local-default"
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
 auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "local-upstream-token"
+auth_value = "Bearer local-upstream-token"
 timeout_ms = 5000
 ```
 
@@ -172,6 +174,9 @@ For the committed sample config, the matching local bearer token is `default.s3c
 Behavior:
 
 - resolves the target path using write precedence
+- when `--config` is omitted in an interactive session, prompts for the config path and defaults that prompt to `~/.config/gate-agent/secrets` when `HOME` is available
+- when no `--config` or `GATE_AGENT_CONFIG` is set outside the questionnaire flow, defaults to `~/.config/gate-agent/secrets` when `HOME` is available
+- interactive prompts stay on a single line and keep the wording minimal, using only the question plus inline `(default: ...)`, `(example: ...)`, or `(options: ...)` details when helpful
 - fails if the target file already exists
 - creates parent directories as needed
 - writes a minimal config with:
@@ -183,7 +188,10 @@ Behavior:
 - prints the generated default client bearer token once to stdout
 - persists only the token id, hash, and expiry
 
-When `--encrypted` is supplied:
+- when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
+- explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions
+
+When encryption is enabled:
 
 - the generated config is encrypted immediately
 - password resolution follows the standard password precedence
@@ -211,7 +219,6 @@ Accepted flags:
 - `--name`
 - `--base-url`
 - `--auth-header`
-- `--auth-scheme`
 - `--auth-value`
 - optional `--timeout-ms`
 
@@ -220,9 +227,22 @@ Behavior:
 - validates inputs before writing
 - creates config if it does not exist yet
 - upserts one `[apis.<name>]` entry
-- removes `auth_scheme` when omitted or blank
+- persists `auth_header` only when upstream auth injection is configured
+- persists `auth_value` only when `auth_header` is present
+- persists bearer-style auth as the full header value in `auth_value`, for example `Bearer my-token`
+- when `auth_header` is omitted, writes no upstream auth fields and injects no upstream auth header at runtime
 - uses `5000` when `--timeout-ms` is omitted
 - preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- explicit args keep the command non-interactive
+- when required operator input is missing in an interactive session, prompts for it instead of failing immediately in a single-line format with minimal wording
+
+Interactive questionnaire flow:
+
+- `API name:`
+- `Base URL (example: https://projects.internal.example/api):`
+- `Auth header (default: authorization, use 'none' for no auth):`
+- `Auth value (example: Bearer my-token):` only when auth header was set
 
 ### `config add-client`
 
@@ -240,13 +260,44 @@ Behavior:
 - `--api-access` accepts `read` and `write`
 - repeated `--api-access` flags are merged
 - creates config if it does not exist yet
-- if the client does not already exist, a bearer token is generated and printed once
-- if the client already exists, existing token metadata is preserved
+- if the client does not already exist, a bearer token is generated and printed once so the operator can capture it
+- if the client already exists, existing bearer token metadata is preserved and no plaintext bearer token is reprinted
 - if `--password` is supplied while bootstrapping a missing config, the new config is created encrypted
 - if a config must be created first, the generated default client token is also printed once
 - plaintext bearer tokens are never persisted
 - writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
 - referenced APIs are validated at runtime load, not at write time
+- does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
+- when required operator input is missing in an interactive session, prompts for it instead of failing immediately
+- the access prompt shows existing group slugs as available options when any exist
+- the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`
+- prompts stay single-line and avoid extra descriptive text when the question itself is already clear
+- explicit args keep the command non-interactive
+
+### `config add-group`
+
+This command manages `[groups.<slug>]` entries directly.
+
+Behavior:
+
+- accepts a group name plus repeated `--api-access <api=level[,api=level...]>`
+- prompts for the name and inline `api_access` when that required input is missing in an interactive session, in a single-line format with minimal wording
+- creates config if it does not exist yet
+- preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- explicit args keep the command non-interactive
+
+## Mutation expectations
+
+Config-writing commands must preserve unrelated structure and comments where possible rather than rewriting the file wholesale.
+
+Encrypted updates still follow that rule by:
+
+1. decrypting to TOML in memory
+2. editing TOML
+3. serializing TOML
+4. re-encrypting the whole file
+5. atomically replacing the original file
 
 ## Fail-closed parsing expectations
 

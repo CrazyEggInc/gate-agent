@@ -15,7 +15,8 @@ use gate_agent::{app::AppState, config::secrets::AccessLevel, proxy::router::bui
 use http_body_util::BodyExt;
 use support::{
     bearer_token, bearer_token_for_client, bearer_token_with_access, capture_channel,
-    capture_request, expired_bearer_token, load_multi_api_test_config, load_test_config,
+    capture_request, expired_bearer_token, load_multi_api_test_config,
+    load_multi_api_test_config_without_projects_auth_header, load_test_config,
     load_test_config_with_billing_timeout, spawn_chunked_upstream, spawn_upstream,
 };
 use tower::ServiceExt;
@@ -262,6 +263,39 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
         "projects-secret-value"
     );
     assert!(projects_request.headers.get("authorization").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_does_not_inject_upstream_auth_when_api_has_no_auth_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_multi_api_test_config_without_projects_auth_header(&base_url)?;
+    let token = bearer_token_for_client("default", "projects", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/projects/path?expand=1")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-custom", "preserved")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.path_and_query, "/path?expand=1");
+    assert_eq!(captured.headers.get("x-custom").unwrap(), "preserved");
+    assert!(captured.headers.get("authorization").is_none());
+    assert!(captured.headers.get("x-api-key").is_none());
 
     Ok(())
 }
