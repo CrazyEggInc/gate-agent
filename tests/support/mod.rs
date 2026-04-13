@@ -116,8 +116,68 @@ timeout_ms = 5000
 [apis.billing]
 base_url = "{base_url}/api"
 auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
+auth_value = "Bearer billing-secret-token"
+timeout_ms = 5000
+"#,
+        BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),
+        BearerTokenHash::from_token("partner-projects-write.partner-projects-write-secret")
+            .as_str(),
+        BearerTokenHash::from_token("read-billing.read-billing-secret").as_str(),
+        BearerTokenHash::from_token("read-projects.read-projects-secret").as_str(),
+        BearerTokenHash::from_token("expired-billing.expired-billing-secret").as_str(),
+    ))?;
+
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_file.clone()),
+        SecretsConfig::load_from_file(&config_file)?,
+    ))
+}
+
+pub fn load_multi_api_test_config_without_projects_auth_header(
+    base_url: &str,
+) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let (_temp_dir, config_file) = write_secrets_file(&format!(
+        r#"
+[clients.default]
+bearer_token_id = "default-billing-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = {{ projects = "write", billing = "write" }}
+
+[clients.partner]
+bearer_token_id = "partner-projects-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-03T03:04:05Z"
+api_access = {{ projects = "write" }}
+
+[clients.read-billing]
+bearer_token_id = "read-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-04T03:04:05Z"
+api_access = {{ billing = "read" }}
+
+[clients.read-projects]
+bearer_token_id = "read-projects"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-05T03:04:05Z"
+api_access = {{ projects = "read" }}
+
+[clients.expired-billing]
+bearer_token_id = "expired-billing"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2020-01-01T00:00:00Z"
+api_access = {{ billing = "write" }}
+
+[apis.projects]
+base_url = "{base_url}"
+timeout_ms = 5000
+
+[apis.billing]
+base_url = "{base_url}/api"
+auth_header = "authorization"
+auth_value = "Bearer billing-secret-token"
 timeout_ms = 5000
 "#,
         BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),
@@ -181,8 +241,7 @@ timeout_ms = 5000
 [apis.billing]
 base_url = "{base_url}/api"
 auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
+auth_value = "Bearer billing-secret-token"
 timeout_ms = {billing_timeout_ms}
 "#,
         BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),

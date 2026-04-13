@@ -257,11 +257,13 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
 
     assert!(!sample_contents.contains("[auth]"));
     assert!(!sample_contents.contains("api_key"));
+    assert!(!sample_contents.contains("auth_scheme"));
     assert!(sample_contents.contains("bearer_token_id = \"default\""));
     assert!(sample_contents.contains("bearer_token_hash"));
     assert!(sample_contents.contains("bearer_token_expires_at = \"2036-10-08T12:00:00Z\""));
     assert!(sample_contents.contains("group = \"local-default\""));
     assert!(sample_contents.contains("[groups.local-default]"));
+    assert!(sample_contents.contains("auth_value = \"Bearer local-upstream-token\""));
     assert_eq!(client.bearer_token_id, "default");
     assert_eq!(
         client.bearer_token_hash.as_str(),
@@ -278,9 +280,16 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "http://127.0.0.1:18081/api");
-    assert_eq!(api.auth_header.as_str(), "authorization");
-    assert_eq!(api.auth_scheme.as_deref(), Some("Bearer"));
-    assert_eq!(api.auth_value.expose_secret(), "local-upstream-token");
+    assert_eq!(
+        api.auth_header.as_ref().map(|value| value.to_string()),
+        Some("authorization".to_string())
+    );
+    assert_eq!(
+        api.auth_value
+            .as_ref()
+            .map(|value| value.expose_secret().to_string()),
+        Some("Bearer local-upstream-token".to_string())
+    );
     assert_eq!(api.timeout_ms, 5000);
 
     Ok(())
@@ -320,9 +329,16 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
-    assert_eq!(api.auth_header.as_str(), "authorization");
-    assert_eq!(api.auth_scheme.as_deref(), Some("Bearer"));
-    assert_eq!(api.auth_value.expose_secret(), "billing-secret-token");
+    assert_eq!(
+        api.auth_header.as_ref().map(|value| value.to_string()),
+        Some("authorization".to_string())
+    );
+    assert_eq!(
+        api.auth_value
+            .as_ref()
+            .map(|value| value.expose_secret().to_string()),
+        Some("Bearer billing-secret-token".to_string())
+    );
     assert_eq!(api.timeout_ms, 5000);
     let client_by_token_id = config
         .client_by_bearer_token_id("default")
@@ -347,12 +363,11 @@ bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113c
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
 api_access = { billing = "read" }
 
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
-timeout_ms = 5000
+        [apis.billing]
+        base_url = "https://billing.internal.example"
+        auth_header = "authorization"
+        auth_value = "Bearer billing-secret-token"
+        timeout_ms = 5000
 "#,
         "stdin",
     )?;
@@ -375,9 +390,16 @@ timeout_ms = 5000
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
-    assert_eq!(api.auth_header.as_str(), "authorization");
-    assert_eq!(api.auth_scheme.as_deref(), Some("Bearer"));
-    assert_eq!(api.auth_value.expose_secret(), "billing-secret-token");
+    assert_eq!(
+        api.auth_header.as_ref().map(|value| value.to_string()),
+        Some("authorization".to_string())
+    );
+    assert_eq!(
+        api.auth_value
+            .as_ref()
+            .map(|value| value.expose_secret().to_string()),
+        Some("Bearer billing-secret-token".to_string())
+    );
     assert_eq!(api.timeout_ms, 5000);
 
     Ok(())
@@ -440,6 +462,8 @@ timeout_ms = 5000
             .get("billing")
             .expect("billing api")
             .auth_value
+            .as_ref()
+            .expect("billing auth value")
             .expose_secret(),
         "billing-secret-token"
     );
@@ -511,6 +535,8 @@ timeout_ms = 5000
             .get("billing")
             .expect("billing api")
             .auth_value
+            .as_ref()
+            .expect("billing auth value")
             .expose_secret(),
         "billing-secret-token"
     );
@@ -1583,6 +1609,124 @@ timeout_ms = 5000
         error
             .to_string()
             .starts_with("apis.projects.auth_header is invalid:")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_allows_api_without_upstream_auth_injection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("projects").expect("projects api config");
+
+    assert!(api.auth_header.is_none());
+    assert!(api.auth_value.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_auth_value_without_auth_header() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.auth_value requires auth_header"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_requires_auth_value_when_auth_header_is_configured()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.auth_value is required when auth_header is configured"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_keeps_runtime_auth_value_without_legacy_scheme()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+auth_header = "authorization"
+auth_value = "Bearer billing-secret-token"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+
+    assert_eq!(
+        api.auth_header.as_ref().map(|value| value.to_string()),
+        Some("authorization".to_string())
+    );
+    assert_eq!(
+        api.auth_value
+            .as_ref()
+            .map(|value| value.expose_secret().to_string()),
+        Some("Bearer billing-secret-token".to_string())
     );
 
     Ok(())

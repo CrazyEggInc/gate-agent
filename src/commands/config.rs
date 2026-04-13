@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::ExposeSecret;
@@ -20,7 +22,19 @@ use crate::config::password::{
 use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
 use crate::config::secrets::SecretsConfig;
 use crate::config::secrets::{AccessLevel, is_valid_slug};
-use crate::config::write::{self, ApiUpsert, ClientAccessUpsert, ClientUpsert, WriteConfigError};
+use crate::config::write::{
+    self, ApiUpsert, ClientAccessUpsert, ClientUpsert, GroupUpsert, WriteConfigError,
+};
+
+const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
+
+static TEST_PROMPT_STATE: OnceLock<Mutex<TestPromptState>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct TestPromptState {
+    raw: Option<String>,
+    values: VecDeque<String>,
+}
 
 #[derive(Debug)]
 pub struct ConfigCommandError {
@@ -110,9 +124,8 @@ pub struct ConfigAddApiArgs {
     pub log_level: String,
     pub name: String,
     pub base_url: String,
-    pub auth_header: String,
-    pub auth_scheme: Option<String>,
-    pub auth_value: String,
+    pub auth_header: Option<String>,
+    pub auth_value: Option<String>,
     pub timeout_ms: u64,
 }
 
@@ -125,6 +138,22 @@ pub struct ConfigAddClientArgs {
     pub bearer_token_expires_at: Option<String>,
     pub group: Option<String>,
     pub api_access: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigAddGroupArgs {
+    pub config: Option<PathBuf>,
+    pub password: Option<String>,
+    pub log_level: String,
+    pub name: String,
+    pub api_access: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddClientOutcome {
+    pub path: PathBuf,
+    pub generated_bearer_token: Option<String>,
+    pub bearer_token_expires_at: String,
 }
 
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
@@ -169,6 +198,10 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
     print_generated_bearer_token("default", &default_bearer_token);
 
     Ok(path)
+}
+
+pub(crate) fn default_init_config_path() -> Result<PathBuf, ConfigCommandError> {
+    resolve_target_path(None)
 }
 
 pub fn show(args: ConfigShowArgs) -> Result<String, ConfigCommandError> {
@@ -309,9 +342,33 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
 
     let base_url = trimmed_required("base_url", &args.base_url)?;
     validate_base_url(&base_url, &args.name)?;
-    let auth_header = trimmed_required("auth_header", &args.auth_header)?;
-    validate_header_name(&auth_header, &args.name)?;
-    let auth_value = trimmed_required("auth_value", &args.auth_value)?;
+    let auth_header = args
+        .auth_header
+        .as_deref()
+        .map(|value| trimmed_required("auth_header", value))
+        .transpose()?;
+    if let Some(auth_header) = auth_header.as_deref() {
+        validate_header_name(auth_header, &args.name)?;
+    }
+    let auth_value = args
+        .auth_value
+        .as_deref()
+        .map(|value| trimmed_required("auth_value", value))
+        .transpose()?;
+
+    match (&auth_header, &auth_value) {
+        (None, Some(_)) => {
+            return Err(ConfigCommandError::new(
+                "auth_value cannot be set without auth_header",
+            ));
+        }
+        (Some(_), None) => {
+            return Err(ConfigCommandError::new(
+                "auth_value is required when auth_header is configured",
+            ));
+        }
+        _ => {}
+    }
 
     if args.timeout_ms == 0 {
         return Err(ConfigCommandError::new(format!(
@@ -319,11 +376,6 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
             args.name
         )));
     }
-
-    let auth_scheme = match args.auth_scheme {
-        Some(value) => Some(trimmed_required("auth_scheme", &value)?),
-        None => None,
-    };
 
     let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
@@ -334,7 +386,6 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
             name: args.name,
             base_url,
             auth_header,
-            auth_scheme,
             auth_value,
             timeout_ms: args.timeout_ms,
         },
@@ -349,6 +400,12 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
 }
 
 pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandError> {
+    Ok(add_client_with_result(args)?.path)
+}
+
+pub fn add_client_with_result(
+    args: ConfigAddClientArgs,
+) -> Result<AddClientOutcome, ConfigCommandError> {
     ensure_slug("client", &args.name)?;
 
     let bearer_token_expires_at = args
@@ -376,7 +433,6 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
     let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
     let password = password_for_existing_encrypted_file(&path, args.password)?;
-
     let existing = load_existing_client_bearer_metadata(&path, password.as_ref(), &args.name)?;
     let resolved = resolve_bearer_token_metadata(bearer_token_expires_at, existing)?;
 
@@ -402,6 +458,40 @@ pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandErr
         print_generated_bearer_token(&args.name, token);
     }
 
+    Ok(AddClientOutcome {
+        path,
+        generated_bearer_token: resolved.generated_token,
+        bearer_token_expires_at: resolved.expires_at,
+    })
+}
+
+pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError> {
+    ensure_slug("group", &args.name)?;
+
+    let api_access = parse_api_access_args(&args.api_access)?;
+
+    if api_access.is_empty() {
+        return Err(ConfigCommandError::new(
+            "api_access entries are required for groups",
+        ));
+    }
+
+    let path = resolve_target_path(args.config.as_deref())?;
+    let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
+    let password = password_for_existing_encrypted_file(&path, args.password)?;
+    write::upsert_group(
+        &path,
+        &GroupUpsert {
+            name: args.name,
+            api_access,
+        },
+        password.as_ref(),
+    )?;
+
+    if let Some(token) = generated_default_bearer_token.as_deref() {
+        print_generated_bearer_token("default", token);
+    }
+
     Ok(path)
 }
 
@@ -415,6 +505,142 @@ struct ResolvedBearerMetadata {
     expires_at: String,
     bearer_token: Option<String>,
     generated_token: Option<String>,
+}
+
+pub(crate) fn list_group_slugs(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+) -> Result<Vec<String>, ConfigCommandError> {
+    let path = resolve_target_path(cli_override)?;
+
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let password = password_for_existing_encrypted_file(&path, password)?;
+    let loaded = write::load_display_text(&path, password.as_ref())?;
+    let parsed: toml::Value = loaded.toml.parse().map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to parse config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    let mut groups = parsed
+        .get("groups")
+        .and_then(toml::Value::as_table)
+        .map(|table| table.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    groups.sort();
+
+    Ok(groups)
+}
+
+pub(crate) fn prompt_required_text(
+    prompt: &str,
+    default: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<String, ConfigCommandError> {
+    let response = prompt_text(prompt, default, non_interactive_message)?;
+
+    trimmed_required(prompt_field_name(prompt), &response)
+}
+
+pub(crate) fn prompt_optional_text(
+    prompt: &str,
+    default: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<Option<String>, ConfigCommandError> {
+    let response = prompt_text(prompt, default, non_interactive_message)?;
+    let trimmed = response.trim();
+
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(trimmed.to_owned()))
+}
+
+pub(crate) fn prompt_yes_no(
+    prompt: &str,
+    default: bool,
+    non_interactive_message: &str,
+) -> Result<bool, ConfigCommandError> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    let response = prompt_text(&format!("{prompt} {suffix}"), None, non_interactive_message)?;
+
+    match response.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(default),
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        value => Err(ConfigCommandError::new(format!(
+            "invalid response '{value}'; expected yes or no"
+        ))),
+    }
+}
+
+pub(crate) fn reset_test_prompt_state_if_exhausted() -> Result<(), ConfigCommandError> {
+    let Some(raw) = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok() else {
+        return Ok(());
+    };
+
+    let state = TEST_PROMPT_STATE.get_or_init(|| Mutex::new(TestPromptState::default()));
+    let mut state = state
+        .lock()
+        .map_err(|_| ConfigCommandError::new("failed to lock test prompt state"))?;
+
+    if state.raw.as_deref() == Some(raw.as_str()) && state.values.is_empty() {
+        state.raw = None;
+        state.values.clear();
+    }
+
+    Ok(())
+}
+
+pub(crate) fn prompt_message(
+    question: &str,
+    detail: Option<&str>,
+    default: Option<&str>,
+    example: Option<&str>,
+    options: Option<&str>,
+    note: Option<&str>,
+) -> String {
+    let example = match (default, example) {
+        (Some(default), _) if !default.trim().is_empty() => None,
+        (_, Some(example)) if !example.trim().is_empty() => Some(example),
+        _ => None,
+    };
+
+    let mut prompt = question.trim().to_owned();
+
+    if let Some(detail) = detail.filter(|value| !value.trim().is_empty()) {
+        prompt.push_str(" — ");
+        prompt.push_str(detail.trim());
+    }
+
+    let mut metadata = Vec::new();
+
+    if let Some(default) = default.filter(|value| !value.trim().is_empty()) {
+        metadata.push(format!("default: {default}"));
+    } else if let Some(example) = example {
+        metadata.push(format!("example: {example}"));
+    }
+
+    if let Some(options) = options.filter(|value| !value.trim().is_empty()) {
+        metadata.push(format!("options: {options}"));
+    }
+
+    if let Some(note) = note.filter(|value| !value.trim().is_empty()) {
+        metadata.push(note.trim().to_owned());
+    }
+
+    if !metadata.is_empty() {
+        prompt.push_str(" (");
+        prompt.push_str(&metadata.join("; "));
+        prompt.push(')');
+    }
+
+    prompt
 }
 
 fn resolve_target_path(
@@ -462,7 +688,7 @@ fn ensure_config_exists(
 }
 
 fn print_generated_bearer_token(client_name: &str, token: &str) {
-    println!("generated bearer token for client '{client_name}': {token}");
+    println!("Generated token for client '{client_name}': {token}");
 }
 
 fn load_existing_client_bearer_metadata(
@@ -597,6 +823,112 @@ fn open_in_editor(path: &Path) -> Result<(), ConfigCommandError> {
     }
 
     Ok(())
+}
+
+fn prompt_text(
+    prompt: &str,
+    default: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<String, ConfigCommandError> {
+    if let Some(response) = take_test_prompt_input()? {
+        return Ok(apply_prompt_default(response, default));
+    }
+
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(ConfigCommandError::new(non_interactive_message));
+    }
+
+    std::io::stderr()
+        .write_all(format_prompt(prompt, default).as_bytes())
+        .map_err(|error| ConfigCommandError::new(format!("failed to write prompt: {error}")))?;
+    std::io::stderr()
+        .flush()
+        .map_err(|error| ConfigCommandError::new(format!("failed to flush prompt: {error}")))?;
+
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response).map_err(|error| {
+        ConfigCommandError::new(format!("failed to read prompt response: {error}"))
+    })?;
+
+    Ok(apply_prompt_default(response, default))
+}
+
+fn format_prompt(prompt: &str, default: Option<&str>) -> String {
+    let _ = default;
+    format!("{prompt}: ")
+}
+
+fn prompt_field_name(prompt: &str) -> &str {
+    let first_segment = prompt
+        .split_once(" (")
+        .map(|(segment, _)| segment)
+        .unwrap_or(prompt)
+        .trim();
+
+    first_segment
+        .split_once('—')
+        .map(|(field, _)| field.trim())
+        .unwrap_or(first_segment)
+}
+
+fn apply_prompt_default(response: String, default: Option<&str>) -> String {
+    let trimmed = response.trim();
+
+    if trimmed.is_empty() {
+        return default.unwrap_or_default().to_owned();
+    }
+
+    trimmed.to_owned()
+}
+
+fn take_test_prompt_input() -> Result<Option<String>, ConfigCommandError> {
+    match take_test_prompt_input_state(true)? {
+        TestPromptInput::Value(value) => Ok(Some(value)),
+        TestPromptInput::Unavailable => Ok(None),
+        TestPromptInput::Exhausted => Err(ConfigCommandError::new(format!(
+            "{TEST_PROMPT_INPUTS_ENV_VAR} did not provide enough prompt answers"
+        ))),
+    }
+}
+
+enum TestPromptInput {
+    Unavailable,
+    Value(String),
+    Exhausted,
+}
+
+fn take_test_prompt_input_state(
+    reset_when_exhausted: bool,
+) -> Result<TestPromptInput, ConfigCommandError> {
+    let Some(raw) = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok() else {
+        return Ok(TestPromptInput::Unavailable);
+    };
+
+    let state = TEST_PROMPT_STATE.get_or_init(|| Mutex::new(TestPromptState::default()));
+    let mut state = state
+        .lock()
+        .map_err(|_| ConfigCommandError::new("failed to lock test prompt state"))?;
+
+    if state.raw.as_deref() != Some(raw.as_str()) {
+        let values: Vec<String> = serde_json::from_str(&raw).map_err(|error| {
+            ConfigCommandError::new(format!(
+                "{TEST_PROMPT_INPUTS_ENV_VAR} must be a JSON array of strings: {error}"
+            ))
+        })?;
+        state.raw = Some(raw);
+        state.values = values.into();
+    }
+
+    if let Some(value) = state.values.pop_front() {
+        return Ok(TestPromptInput::Value(value));
+    }
+
+    if reset_when_exhausted {
+        state.raw = None;
+        state.values.clear();
+    }
+
+    Ok(TestPromptInput::Exhausted)
 }
 
 fn trimmed_required(field: &str, value: &str) -> Result<String, ConfigCommandError> {
@@ -834,4 +1166,56 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let year = year + if month <= 2 { 1 } else { 0 };
 
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_prompt, prompt_field_name, prompt_message};
+
+    #[test]
+    fn prompt_message_formats_single_line_metadata() {
+        let prompt = prompt_message(
+            "Group name",
+            None,
+            None,
+            None,
+            Some("default, readonly"),
+            None,
+        );
+
+        assert_eq!(prompt, "Group name (options: default, readonly)");
+    }
+
+    #[test]
+    fn prompt_message_omits_example_when_default_exists() {
+        let prompt = prompt_message(
+            "Config path",
+            None,
+            Some("/home/fabio/.config/gate-agent/secrets"),
+            Some("~/.config/gate-agent/secrets"),
+            None,
+            None,
+        );
+
+        assert!(!prompt.contains("Example:"));
+        assert_eq!(
+            prompt,
+            "Config path (default: /home/fabio/.config/gate-agent/secrets)"
+        );
+    }
+
+    #[test]
+    fn format_prompt_keeps_question_on_single_line() {
+        let rendered = format_prompt("Config path (default: /tmp/demo)", Some("/tmp/demo"));
+
+        assert_eq!(rendered, "Config path (default: /tmp/demo): ");
+    }
+
+    #[test]
+    fn prompt_field_name_uses_question_prefix() {
+        assert_eq!(
+            prompt_field_name("Client name (example: myclient)"),
+            "Client name"
+        );
+    }
 }

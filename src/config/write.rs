@@ -22,9 +22,8 @@ const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
 pub struct ApiUpsert {
     pub name: String,
     pub base_url: String,
-    pub auth_header: String,
-    pub auth_scheme: Option<String>,
-    pub auth_value: String,
+    pub auth_header: Option<String>,
+    pub auth_value: Option<String>,
     pub timeout_ms: u64,
 }
 
@@ -47,6 +46,24 @@ struct BearerTokenMetadata {
     id: String,
     hash: String,
     expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupUpsert {
+    pub name: String,
+    pub api_access: std::collections::BTreeMap<String, AccessLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientUpsertResult {
+    pub generated_bearer_token: Option<String>,
+    pub bearer_token_expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedClientUpsert {
+    metadata: BearerTokenMetadata,
+    result: ClientUpsertResult,
 }
 
 #[derive(Debug)]
@@ -113,20 +130,29 @@ pub fn upsert_api(
     let api_table = get_or_insert_table(apis, &api.name)?;
 
     set_string(api_table, "base_url", &api.base_url);
-    set_string(api_table, "auth_header", &api.auth_header);
-
-    if let Some(auth_scheme) = api
-        .auth_scheme
+    if let Some(auth_header) = api
+        .auth_header
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        set_string(api_table, "auth_scheme", auth_scheme);
+        set_string(api_table, "auth_header", auth_header);
+        if let Some(auth_value) = api
+            .auth_value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            set_string(api_table, "auth_value", auth_value);
+        } else {
+            api_table.remove("auth_value");
+        }
     } else {
-        api_table.remove("auth_scheme");
+        api_table.remove("auth_header");
+        api_table.remove("auth_value");
     }
 
-    set_string(api_table, "auth_value", &api.auth_value);
+    api_table.remove("auth_scheme");
     set_integer(api_table, "timeout_ms", api.timeout_ms)?;
 
     write_loaded_config(path, &loaded, &document.to_string(), password)
@@ -136,17 +162,17 @@ pub fn upsert_client(
     path: &Path,
     client: &ClientUpsert,
     password: Option<&SecretString>,
-) -> Result<(), WriteConfigError> {
+) -> Result<ClientUpsertResult, WriteConfigError> {
     let loaded = load_editable_config(path, password)?;
     let mut document = parse_config(path, &loaded.toml)?;
     let existing_client = find_table(document.as_table(), &["clients", &client.name]);
-    let metadata = resolve_bearer_token_metadata(client, existing_client)?;
+    let resolved_upsert = resolve_client_upsert(existing_client, client)?;
 
     let clients = get_or_insert_table(document.as_table_mut(), "clients")?;
-    ensure_unique_bearer_token_id(clients, &client.name, &metadata.id)?;
+    ensure_unique_bearer_token_id(clients, &client.name, &resolved_upsert.metadata.id)?;
     let client_table = get_or_insert_table(clients, &client.name)?;
 
-    apply_bearer_metadata(client_table, &metadata);
+    apply_bearer_metadata(client_table, &resolved_upsert.metadata);
     client_table.remove("api_key");
     client_table.remove("api_key_expires_at");
     match &client.access {
@@ -159,6 +185,23 @@ pub fn upsert_client(
             set_api_access_inline_table(client_table, "api_access", api_access);
         }
     }
+
+    write_loaded_config(path, &loaded, &document.to_string(), password)?;
+
+    Ok(resolved_upsert.result)
+}
+
+pub fn upsert_group(
+    path: &Path,
+    group: &GroupUpsert,
+    password: Option<&SecretString>,
+) -> Result<(), WriteConfigError> {
+    let loaded = load_editable_config(path, password)?;
+    let mut document = parse_config(path, &loaded.toml)?;
+    let groups = get_or_insert_table(document.as_table_mut(), "groups")?;
+    let group_table = get_or_insert_table(groups, &group.name)?;
+
+    set_api_access_inline_table(group_table, "api_access", &group.api_access);
 
     write_loaded_config(path, &loaded, &document.to_string(), password)
 }
@@ -223,10 +266,10 @@ fn render_initial_config(default_bearer_token: &str) -> Result<String, WriteConf
     ))
 }
 
-fn resolve_bearer_token_metadata(
-    client: &ClientUpsert,
+fn resolve_client_upsert(
     existing_client: Option<&Table>,
-) -> Result<BearerTokenMetadata, WriteConfigError> {
+    client: &ClientUpsert,
+) -> Result<ResolvedClientUpsert, WriteConfigError> {
     let existing_metadata = existing_client.and_then(find_existing_bearer_token_metadata);
     let expires_at = match client
         .bearer_token_expires_at
@@ -247,13 +290,38 @@ fn resolve_bearer_token_metadata(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(bearer_token) => bearer_token_metadata(bearer_token, expires_at),
+        Some(bearer_token) => {
+            let metadata = bearer_token_metadata(bearer_token, expires_at.clone())?;
+            Ok(ResolvedClientUpsert {
+                result: ClientUpsertResult {
+                    generated_bearer_token: None,
+                    bearer_token_expires_at: expires_at,
+                },
+                metadata,
+            })
+        }
         None => match existing_metadata {
             Some(mut metadata) => {
-                metadata.expires_at = expires_at;
-                Ok(metadata)
+                metadata.expires_at = expires_at.clone();
+                Ok(ResolvedClientUpsert {
+                    result: ClientUpsertResult {
+                        generated_bearer_token: None,
+                        bearer_token_expires_at: expires_at,
+                    },
+                    metadata,
+                })
             }
-            None => bearer_token_metadata(&generate_bearer_token()?, expires_at),
+            None => {
+                let generated_bearer_token = generate_bearer_token()?;
+                let metadata = bearer_token_metadata(&generated_bearer_token, expires_at.clone())?;
+                Ok(ResolvedClientUpsert {
+                    result: ClientUpsertResult {
+                        generated_bearer_token: Some(generated_bearer_token),
+                        bearer_token_expires_at: expires_at,
+                    },
+                    metadata,
+                })
+            }
         },
     }
 }

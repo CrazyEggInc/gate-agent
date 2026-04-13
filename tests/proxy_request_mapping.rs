@@ -53,8 +53,7 @@ timeout_ms = 5000
 [apis.billing]
 base_url = "{base_url}/api"
 auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
+auth_value = "Bearer billing-secret-token"
 timeout_ms = 5000
 "#
     ))?;
@@ -194,6 +193,30 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
 }
 
 #[tokio::test]
+async fn request_mapping_uses_full_configured_auth_value_as_is()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("billing").expect("billing api config");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/billing/v1/projects")
+        .header("authorization", "Bearer client-token")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "billing", api)?;
+
+    assert_eq!(
+        outbound.headers().get("authorization").unwrap(),
+        "Bearer billing-secret-token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_mapping_preserves_encoded_path_and_query_bytes()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
@@ -258,7 +281,7 @@ async fn request_mapping_strips_client_forwarding_headers() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn request_mapping_sets_raw_upstream_auth_header_when_scheme_is_not_configured()
+async fn request_mapping_sets_raw_upstream_auth_header_when_value_has_no_scheme_prefix()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_server(app).await?;
@@ -281,6 +304,92 @@ async fn request_mapping_sets_raw_upstream_auth_header_when_scheme_is_not_config
         "projects-secret-value"
     );
     assert!(outbound.headers().get("authorization").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_skips_upstream_auth_injection_when_auth_header_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.auth_header = None;
+    api.auth_value = None;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .header("authorization", "Bearer client-token")
+        .header("x-custom", "preserved")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "projects", &api)?;
+
+    assert!(outbound.headers().get("authorization").is_none());
+    assert!(outbound.headers().get("x-api-key").is_none());
+    assert_eq!(outbound.headers().get("x-custom").unwrap(), "preserved");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_rejects_auth_header_without_auth_value()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.auth_header = Some("authorization".parse()?);
+    api.auth_value = None;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .body(Body::empty())?;
+
+    let error =
+        map_request(request, "projects", &api).expect_err("mismatched auth pair should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "failed to build upstream request: upstream auth config is invalid: auth_header requires auth_value"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_rejects_auth_value_without_auth_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.auth_header = None;
+    api.auth_value = Some(secrecy::SecretString::from(
+        "Bearer upstream-token".to_owned(),
+    ));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .body(Body::empty())?;
+
+    let error =
+        map_request(request, "projects", &api).expect_err("mismatched auth pair should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "failed to build upstream request: upstream auth config is invalid: auth_value requires auth_header"
+    );
 
     Ok(())
 }
