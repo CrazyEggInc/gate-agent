@@ -4,6 +4,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod mcp;
 pub mod proxy;
 pub mod telemetry;
 pub mod time;

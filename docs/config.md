@@ -124,6 +124,9 @@ Required fields:
 - `auth_header: Option<String>`
 - `auth_value: Option<String>`
 - `timeout_ms: u64 | omitted`
+- `description: Option<String>`
+- `docs_url: Option<String>`
+- `auth_scheme: Option<String>`
 
 Validation expectations:
 
@@ -134,6 +137,8 @@ Validation expectations:
 - `auth_value` must be omitted when `auth_header` is omitted
 - when `auth_header` is omitted, no upstream auth header is injected
 - bearer-style auth is stored as the full header value in `auth_value`, for example `Bearer my-token`
+- optional `description`, when present, must be non-empty
+- optional `docs_url`, when present, must parse as a URL and use `http` or `https`
 - omitted `timeout_ms` falls back to `5000`
 - explicit `timeout_ms` must be greater than zero
 - the parser accepts legacy `auth_scheme` on read, composes it into the in-memory `auth_value`, and rewrites config without persisting `auth_scheme`
@@ -160,6 +165,8 @@ group = "local-default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
+description = "Local dummy upstream projects API"
+docs_url = "https://internal.example/docs/projects"
 auth_header = "authorization"
 auth_value = "Bearer local-upstream-token"
 timeout_ms = 5000

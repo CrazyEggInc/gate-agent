@@ -19,6 +19,11 @@ The product startup flow must be:
 5. build the HTTP router
 6. start serving requests
 
+The runtime router must expose both product entrypoints:
+
+- `/proxy/...` for direct HTTP proxy traffic
+- `/mcp` for MCP JSON-RPC traffic over HTTP
+
 CLI success, including built-in `--help`, must exit zero.
 
 CLI failure output must match the current command behavior:
@@ -80,6 +85,13 @@ Expected properties:
 - invalid bearer token responses include `WWW-Authenticate: Bearer`
 - request IDs are included in the payload when available
 
+Route-specific behavior:
+
+- `/proxy/...` uses the HTTP JSON error payload above for application errors
+- `/mcp` uses the same HTTP auth failure behavior before MCP dispatch, including `401 invalid_token`, `WWW-Authenticate: Bearer`, and the standard JSON error payload shape
+- after `/mcp` authentication succeeds, MCP protocol errors are returned as JSON-RPC error responses on HTTP `200 OK`
+- operators should expect MCP parse, invalid request, invalid params, and method-not-found failures to appear as JSON-RPC errors rather than the HTTP error envelope
+
 ## Time helpers
 
 The system must use shared timestamp helpers for:
@@ -91,6 +103,10 @@ This keeps auth behavior consistent and reduces duplicated time logic.
 ## Telemetry
 
 The runtime must carry a configurable log level and attach request IDs so logs and error responses can be correlated with incoming requests.
+
+This request-ID behavior applies to both `/proxy/...` and `/mcp`. Callers may supply `x-request-id`; otherwise the router generates one and propagates it on responses.
+
+Authentication expectations also apply consistently across both route families. `/mcp` is not an anonymous control plane endpoint: callers must present exactly one valid `Authorization: Bearer <token>` header before any MCP request is parsed or dispatched.
 
 All runtime logging must use newline-delimited JSON. Each emitted line must be a complete JSON object that can be shipped, filtered, or parsed without depending on terminal formatting.
 
@@ -112,6 +128,7 @@ Expected logging behavior:
 - startup logs must use the same newline-delimited JSON policy as request logs
 - each HTTP request must emit a completion log with method, URI, status, latency, and request ID
 - authenticated proxy completion logs must include the authorized client slug as the top-level `client` field
+- authenticated `/mcp` request completion logs must also remain attributable to the authorized client
 - proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
 - completion logs must include `error_code` only when the response came from an application error
 - when a top-level `status` field is present for an HTTP completion log, it represents the HTTP response status and may be rendered as a standard status line string such as `201 Created`; consumers that need only the numeric code should read that value portably rather than depend on formatter-specific duplicate fields

@@ -62,6 +62,22 @@ auth_value = "stdin-projects-secret-value"
 timeout_ms = 7000
 "#;
 
+const CONFIG_WITH_API_METADATA: &str = r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+description = "Project API"
+docs_url = "https://docs.internal.example/projects"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#;
+
 fn load_config(args: &StartArgs) -> Result<AppConfig, gate_agent::config::ConfigError> {
     AppConfig::from_start_args_with_stdin(args, StartConfigStdin::terminal())
 }
@@ -257,6 +273,31 @@ fn start_config_uses_env_resolved_path_when_cli_omits_config_override()
     assert_eq!(config.config_source(), &ConfigSource::Path(config_file));
     assert_eq!(config.secrets().clients.len(), 1);
     assert_eq!(config.secrets().apis.len(), 1);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_loads_optional_api_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) =
+        write_config_file("resolved-config.toml", CONFIG_WITH_API_METADATA)?;
+
+    let args = StartArgs {
+        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        config: Some(config_file),
+        password: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config(&args)?;
+    let api = config.secrets().apis.get("projects").expect("projects api");
+
+    assert_eq!(api.description.as_deref(), Some("Project API"));
+    assert_eq!(
+        api.docs_url.as_ref().map(url::Url::as_str),
+        Some("https://docs.internal.example/projects")
+    );
 
     Ok(())
 }

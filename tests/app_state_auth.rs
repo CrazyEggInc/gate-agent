@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use gate_agent::{
     app::AppState,
-    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig},
+    config::{
+        ConfigSource,
+        app_config::AppConfig,
+        secrets::{AccessLevel, SecretsConfig},
+    },
     error::AppError,
 };
 use tempfile::tempdir;
@@ -44,12 +48,16 @@ api_access = { projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
+description = "Project API"
+docs_url = "https://docs.internal.example/projects"
 auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
 
 [apis.billing]
 base_url = "https://billing.internal.example"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
 auth_header = "authorization"
 auth_scheme = "Bearer"
 auth_value = "billing-secret-token"
@@ -98,12 +106,16 @@ api_access = { projects = "read", billing = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
+description = "Project API"
+docs_url = "https://docs.internal.example/projects"
 auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
 
 [apis.billing]
 base_url = "https://billing.internal.example"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
 auth_header = "authorization"
 auth_scheme = "Bearer"
 auth_value = "billing-secret-token"
@@ -120,6 +132,101 @@ timeout_ms = 5000
     assert_eq!(
         state.client_api_access(client, "billing")?,
         gate_agent::config::secrets::AccessLevel::Write
+    );
+
+    Ok(())
+}
+
+#[test]
+fn app_state_exposes_runtime_api_metadata_for_effective_client_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = load_state(VALID_SECRETS)?;
+
+    let client = state.client_for_bearer_token("partner.s3cr3t")?;
+    let access = state.client_api_access_entry(client, "projects")?;
+
+    assert_eq!(access.access_level, AccessLevel::Write);
+    assert_eq!(access.api_config.slug, "projects");
+    assert_eq!(
+        access.api_config.description.as_deref(),
+        Some("Project API")
+    );
+    assert_eq!(
+        access.api_config.docs_url.as_ref().map(url::Url::as_str),
+        Some("https://docs.internal.example/projects")
+    );
+    assert_eq!(
+        access.api_config.base_url.as_str(),
+        "https://projects.internal.example/"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn app_state_lists_effective_client_api_access_entries_for_discovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = load_state(
+        r#"
+[clients.partner]
+bearer_token_id = "partner"
+bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
+bearer_token_expires_at = "2026-10-09T12:00:00Z"
+group = "shared-read"
+
+[groups.shared-read]
+api_access = { projects = "read", billing = "write" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+description = "Project API"
+docs_url = "https://docs.internal.example/projects"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
+auth_header = "authorization"
+auth_scheme = "Bearer"
+auth_value = "billing-secret-token"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let client = state.client_for_bearer_token("partner.s3cr3t")?;
+    let entries = state.client_api_access_entries(client)?;
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].api_config.slug, "billing");
+    assert_eq!(entries[0].access_level, AccessLevel::Write);
+    assert_eq!(
+        entries[0].api_config.description.as_deref(),
+        Some("Billing API")
+    );
+    assert_eq!(
+        entries[0]
+            .api_config
+            .docs_url
+            .as_ref()
+            .map(url::Url::as_str),
+        Some("https://docs.internal.example/billing")
+    );
+    assert_eq!(entries[1].api_config.slug, "projects");
+    assert_eq!(entries[1].access_level, AccessLevel::Read);
+    assert_eq!(
+        entries[1].api_config.description.as_deref(),
+        Some("Project API")
+    );
+    assert_eq!(
+        entries[1]
+            .api_config
+            .docs_url
+            .as_ref()
+            .map(url::Url::as_str),
+        Some("https://docs.internal.example/projects")
     );
 
     Ok(())

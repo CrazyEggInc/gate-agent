@@ -67,6 +67,8 @@ pub struct ApiConfig {
     pub base_url: Url,
     pub auth_header: Option<HeaderName>,
     pub auth_value: Option<SecretString>,
+    pub description: Option<String>,
+    pub docs_url: Option<Url>,
     pub timeout_ms: u64,
 }
 
@@ -101,6 +103,8 @@ struct RawGroupConfig {
 #[serde(deny_unknown_fields)]
 struct RawApiConfig {
     base_url: String,
+    description: Option<String>,
+    docs_url: Option<String>,
     auth_header: Option<String>,
     auth_scheme: Option<String>,
     auth_value: Option<String>,
@@ -428,6 +432,14 @@ impl ApiConfig {
             )));
         }
 
+        let description =
+            optional_string(&format!("apis.{slug}.description"), raw_config.description)?;
+        let docs_url = optional_url(
+            &format!("apis.{slug}.docs_url"),
+            raw_config.docs_url,
+            "http or https",
+        )?;
+
         let auth_header =
             optional_string(&format!("apis.{slug}.auth_header"), raw_config.auth_header)?;
         let auth_scheme =
@@ -480,6 +492,8 @@ impl ApiConfig {
         Ok(Self {
             slug: slug.to_owned(),
             base_url,
+            description,
+            docs_url,
             auth_header,
             auth_value,
             timeout_ms: raw_config.timeout_ms,
@@ -499,6 +513,27 @@ fn required_string(field: &str, value: String) -> Result<String, ConfigError> {
 
 fn optional_string(field: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {
     value.map(|value| required_string(field, value)).transpose()
+}
+
+fn optional_url(
+    field: &str,
+    value: Option<String>,
+    allowed_schemes_label: &str,
+) -> Result<Option<Url>, ConfigError> {
+    let Some(value) = optional_string(field, value)? else {
+        return Ok(None);
+    };
+
+    let url = Url::parse(&value)
+        .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))?;
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ConfigError::new(format!(
+            "{field} must use {allowed_schemes_label}"
+        )));
+    }
+
+    Ok(Some(url))
 }
 
 fn validate_slug(kind: &str, value: &str) -> Result<(), ConfigError> {

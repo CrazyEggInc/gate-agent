@@ -80,6 +80,94 @@ Expected behavior:
 - the proxy authorizes the selected API slug and required method access
 - the proxy injects upstream credentials from config before forwarding the request
 
+## MCP request workflow
+
+The local environment also supports direct bearer authentication on the MCP HTTP endpoint.
+
+Use the same local bearer token and send it directly to `/mcp`:
+
+```sh
+curl -i http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {}
+  }'
+```
+
+Expected behavior:
+
+- the request carries exactly one `Authorization: Bearer <token>` header
+- the server authenticates that bearer token before JSON-RPC dispatch
+- a valid request returns a JSON-RPC `initialize` result
+- an invalid bearer token fails with `401 invalid_token` and `WWW-Authenticate: Bearer`
+
+Practical smoke requests:
+
+List supported tools:
+
+```sh
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {}
+  }' | jq
+```
+
+List effective API access for the authenticated client:
+
+```sh
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "list_apis",
+      "arguments": {}
+    }
+  }' | jq
+```
+
+Call the local `projects` API through MCP:
+
+```sh
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "tools/call",
+    "params": {
+      "name": "call_api",
+      "arguments": {
+        "api": "projects",
+        "method": "GET",
+        "path": "/v1/projects/1/tasks"
+      }
+    }
+  }' | jq
+```
+
+That MCP smoke flow verifies:
+
+- bearer-token auth on `/mcp`
+- MCP JSON-RPC request handling
+- effective API access exposure through `list_apis`
+- upstream forwarding through `call_api`
+
+If an MCP client such as Claude Code, Codex, or OpenCode supports configuring a fixed bearer `Authorization` header for an HTTP MCP server, point it at `http://127.0.0.1:8787/mcp` and use the same local bearer token directly. There is no separate local token exchange step for MCP.
+
 Method access rules during local testing:
 
 - `GET`, `HEAD`, `OPTIONS` require `read`
@@ -155,6 +243,16 @@ cargo run -- start --config .secrets
 export GATE_AGENT_TOKEN='default.s3cr3t'
 curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
+
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/list",
+    "params": {}
+  }' | jq
 ```
 
 This verifies:
@@ -164,6 +262,8 @@ This verifies:
 - proxy authorization is working
 - upstream auth injection is working
 - proxy path forwarding is working
+- MCP direct bearer auth is working
+- MCP tool discovery is working
 
 ## Direct upstream comparison
 

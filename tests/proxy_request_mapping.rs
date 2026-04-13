@@ -9,9 +9,16 @@ use axum::{
     routing::{any, get},
 };
 use gate_agent::{
+    auth::bearer::{AuthorizedApiAccess, AuthorizedRequest},
+    config::secrets::AccessLevel,
     config::secrets::SecretsConfig,
-    proxy::{request::map_request, response::map_response},
+    proxy::{
+        forward::prepare_authorized_forward_request,
+        request::{ForwardRequest, map_request},
+        response::map_response,
+    },
 };
+use http::{HeaderMap, Method};
 use http_body_util::BodyExt;
 use tokio::{
     net::TcpListener,
@@ -494,28 +501,89 @@ async fn response_mapping_filters_hop_by_hop_headers_and_keeps_body_readable()
 
     let response = map_response(upstream)?;
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.status, StatusCode::CREATED);
     assert_eq!(
         response
-            .headers()
+            .headers
             .get("content-type")
             .expect("content-type header"),
         "text/plain"
     );
     assert_eq!(
         response
-            .headers()
+            .headers
             .get("x-upstream")
             .expect("x-upstream header"),
         "present"
     );
-    assert!(response.headers().get("connection").is_none());
-    assert!(response.headers().get("keep-alive").is_none());
-    assert!(response.headers().get("x-remove-me").is_none());
+    assert!(response.headers.get("connection").is_none());
+    assert!(response.headers.get("keep-alive").is_none());
+    assert!(response.headers.get("x-remove-me").is_none());
 
-    let body = response.into_body().collect().await?.to_bytes();
+    let body = response.into_bytes().await?;
 
     assert_eq!(body, bytes::Bytes::from_static(b"upstream-body"));
+
+    Ok(())
+}
+
+#[test]
+fn generic_prepare_authorizes_method_without_proxy_request_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut api_access = std::collections::BTreeMap::new();
+    api_access.insert("billing".to_owned(), AccessLevel::Write);
+    let authorized = AuthorizedRequest {
+        client_slug: "default".to_owned(),
+        access: AuthorizedApiAccess { apis: api_access },
+    };
+
+    let prepared = prepare_authorized_forward_request(
+        ForwardRequest {
+            api_slug: "billing".to_owned(),
+            method: Method::POST,
+            path_and_query: "/v1/projects/1/tasks?expand=1".to_owned(),
+            headers: HeaderMap::new(),
+            body: Body::empty(),
+        },
+        &authorized,
+    )?;
+
+    assert_eq!(prepared.request.api_slug, "billing");
+    assert_eq!(prepared.request.method, Method::POST);
+    assert_eq!(
+        prepared.request.path_and_query,
+        "/v1/projects/1/tasks?expand=1"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn generic_prepare_reuses_method_authz_for_non_proxy_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut api_access = std::collections::BTreeMap::new();
+    api_access.insert("billing".to_owned(), AccessLevel::Read);
+    let authorized = AuthorizedRequest {
+        client_slug: "default".to_owned(),
+        access: AuthorizedApiAccess { apis: api_access },
+    };
+
+    let error = prepare_authorized_forward_request(
+        ForwardRequest {
+            api_slug: "billing".to_owned(),
+            method: Method::POST,
+            path_and_query: "/v1/projects/1/tasks".to_owned(),
+            headers: HeaderMap::new(),
+            body: Body::empty(),
+        },
+        &authorized,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        gate_agent::error::AppError::ForbiddenApi { ref api } if api == "billing"
+    ));
 
     Ok(())
 }

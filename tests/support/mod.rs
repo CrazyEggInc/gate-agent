@@ -109,12 +109,16 @@ api_access = {{ billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
+description = "Projects API"
+docs_url = "https://docs.internal.example/projects"
 auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
 
 [apis.billing]
 base_url = "{base_url}/api"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
 auth_header = "authorization"
 auth_value = "Bearer billing-secret-token"
 timeout_ms = 5000
@@ -234,12 +238,16 @@ api_access = {{ billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
+description = "Projects API"
+docs_url = "https://docs.internal.example/projects"
 auth_header = "x-api-key"
 auth_value = "projects-secret-value"
 timeout_ms = 5000
 
 [apis.billing]
 base_url = "{base_url}/api"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
 auth_header = "authorization"
 auth_value = "Bearer billing-secret-token"
 timeout_ms = {billing_timeout_ms}

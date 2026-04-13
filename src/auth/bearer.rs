@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use http::{HeaderMap, header};
+
 use crate::{
     config::secrets::{AccessLevel, SecretsConfig},
     error::AppError,
@@ -30,6 +32,17 @@ pub fn validate_bearer_authorized_request(
     }
 
     validate_token(token, secrets)
+}
+
+pub fn extract_authorization_header(headers: &HeaderMap) -> Result<&str, AppError> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let value = values.next().ok_or(AppError::InvalidToken)?;
+
+    if values.next().is_some() {
+        return Err(AppError::InvalidToken);
+    }
+
+    value.to_str().map_err(|_| AppError::InvalidToken)
 }
 
 pub fn validate_token(token: &str, secrets: &SecretsConfig) -> Result<AuthorizedRequest, AppError> {

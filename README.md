@@ -28,11 +28,65 @@ cargo run -- start --config .secrets --log-level info
 export GATE_AGENT_TOKEN='default.s3cr3t'
 curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
+
+# initialize MCP over HTTP
+curl -i http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {}
+  }'
+
+# list MCP tools
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {}
+  }' | jq
+
+# list APIs available to the authenticated client
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "list_apis",
+      "arguments": {}
+    }
+  }' | jq
+
+# call an upstream API through MCP
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "tools/call",
+    "params": {
+      "name": "call_api",
+      "arguments": {
+        "api": "projects",
+        "method": "GET",
+        "path": "/v1/projects/1/tasks"
+      }
+    }
+  }' | jq
 ```
 
 If you create a fresh config with `cargo run -- config init`, the command prints the default client bearer token once. Save it then; the config file only stores the token id, hash, and expiry.
 
-See `docs/local-testing.md` for the full local workflow and `docs/pending.md` for intentionally deferred work.
+See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the MCP contract, and `docs/pending.md` for intentionally deferred work.
 
 ## Development
 

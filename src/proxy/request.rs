@@ -1,6 +1,6 @@
 use axum::body::Body;
 use http::{
-    HeaderMap, Request, Uri,
+    HeaderMap, Method, Request, Uri,
     header::{self, HeaderName, HeaderValue},
 };
 use secrecy::ExposeSecret;
@@ -10,17 +10,56 @@ use crate::{config::secrets::ApiConfig, error::AppError};
 
 use super::{connection_bound_header_names, is_hop_by_hop_header};
 
+#[derive(Debug)]
+pub struct ForwardRequest {
+    pub api_slug: String,
+    pub method: Method,
+    pub path_and_query: String,
+    pub headers: HeaderMap,
+    pub body: Body,
+}
+
 pub fn map_request(
     request: Request<Body>,
     api_slug: &str,
     api_config: &ApiConfig,
 ) -> Result<reqwest::Request, AppError> {
-    let (parts, body) = request.into_parts();
-    let raw_suffix = raw_proxy_suffix(&parts.uri, api_slug)?;
-    let url = build_upstream_url(&api_config.base_url, &raw_suffix)?;
-    let mut outbound_request = reqwest::Request::new(parts.method, url);
+    let request = forward_request_from_proxy_request(request, api_slug)?;
 
-    *outbound_request.headers_mut() = filter_request_headers(&parts.headers);
+    map_forward_request(request, api_config)
+}
+
+pub fn forward_request_from_proxy_request(
+    request: Request<Body>,
+    api_slug: &str,
+) -> Result<ForwardRequest, AppError> {
+    let (parts, body) = request.into_parts();
+    let path_and_query = raw_proxy_suffix(&parts.uri, api_slug)?;
+
+    Ok(ForwardRequest {
+        api_slug: api_slug.to_owned(),
+        method: parts.method,
+        path_and_query,
+        headers: parts.headers,
+        body,
+    })
+}
+
+pub fn map_forward_request(
+    request: ForwardRequest,
+    api_config: &ApiConfig,
+) -> Result<reqwest::Request, AppError> {
+    let ForwardRequest {
+        method,
+        path_and_query,
+        headers,
+        body,
+        ..
+    } = request;
+    let url = build_upstream_url(&api_config.base_url, &path_and_query)?;
+    let mut outbound_request = reqwest::Request::new(method, url);
+
+    *outbound_request.headers_mut() = filter_request_headers(&headers);
     inject_upstream_auth_header(outbound_request.headers_mut(), api_config)?;
     *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
 
