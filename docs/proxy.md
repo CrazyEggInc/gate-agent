@@ -6,6 +6,8 @@ This document describes the proxy feature as a behavior contract.
 
 The proxy must let authenticated clients call configured upstream APIs through a local route surface while keeping upstream credentials server-side.
 
+This proxy contract remains intact even when MCP support is enabled. MCP clients should treat `/mcp` as the MCP protocol entrypoint. The `/proxy` routes remain the underlying HTTP forwarding surface rather than the MCP protocol contract.
+
 ## Route surface
 
 The system must expose:
@@ -15,6 +17,8 @@ Routes:
 - `/proxy/{api}`
 - `/proxy/{api}/`
 - `/proxy/{api}/{*path}`
+
+These routes continue to define the direct HTTP proxy behavior. They are not replaced by `/mcp`, and MCP clients should not depend on `/proxy` as the MCP contract surface.
 
 The router also applies:
 

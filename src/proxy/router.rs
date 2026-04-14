@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     extract::{Path, State},
-    http::{Method, Request, StatusCode, header},
+    http::{Request, StatusCode},
     response::Response,
     routing::any,
 };
@@ -16,14 +16,14 @@ use tower_http::{
 use tracing::{Level, info};
 
 use crate::app::AppState;
-use crate::auth::bearer::validate_bearer_authorized_request;
-use crate::config::secrets::AccessLevel;
+use crate::auth::bearer::{extract_authorization_header, validate_bearer_authorized_request};
 use crate::error::{AppError, LoggedErrorCode};
+use crate::mcp::router::mcp_handler;
 use crate::telemetry::{
     LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs, sanitize_url_for_logs,
 };
 
-use super::{request::map_request, response::map_response, upstream::execute_request};
+use super::forward::forward_proxy_request;
 
 const ROUTER_TIMEOUT_SECS: u64 = 60;
 
@@ -44,6 +44,7 @@ struct ProxyResponseError {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/mcp", axum::routing::post(mcp_handler))
         .route("/proxy/{api}", any(proxy_handler))
         .route("/proxy/{api}/", any(proxy_handler))
         .route("/proxy/{api}/{*path}", any(proxy_handler_with_path))
@@ -228,50 +229,23 @@ async fn handle_proxy_request(
     api_slug: String,
     request: Request<Body>,
 ) -> Result<Response, ProxyResponseError> {
-    let authorization_header = request.headers();
     let authorization_header =
-        extract_authorization_header(authorization_header).map_err(proxy_error_without_client)?;
+        extract_authorization_header(request.headers()).map_err(proxy_error_without_client)?;
 
-    let required_access = required_access_for_method(request.method());
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())
         .map_err(proxy_error_without_client)?;
-    let Some(token_access) = authorized.access.apis.get(&api_slug).copied() else {
-        return Err(proxy_error_with_client(
-            AppError::ForbiddenApi { api: api_slug },
-            authorized.client_slug,
-        ));
-    };
-
-    if !token_access.allows(required_access) {
-        return Err(proxy_error_with_client(
-            AppError::ForbiddenApi { api: api_slug },
-            authorized.client_slug,
-        ));
-    }
-
-    let client_slug = authorized.client_slug;
-
-    let api_config = state
-        .api_config(&api_slug)
-        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
-    let outbound_request = map_request(request, &api_slug, api_config)
-        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
-    let upstream_method = outbound_request.method().clone();
-    let upstream_url = sanitize_url_for_logs(outbound_request.url().as_ref());
-    let timeout_ms = api_config.timeout_ms;
-    let upstream_response = execute_request(state.client(), outbound_request, timeout_ms)
+    let client_slug = authorized.client_slug.clone();
+    let forward = forward_proxy_request(&state, request, &api_slug, authorized)
         .await
         .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
-    let upstream_status = upstream_response.status().to_string();
-    let mut response = map_response(upstream_response)
-        .map_err(|error| proxy_error_with_client(error, client_slug.clone()))?;
+    let mut response = forward.response.into_axum_response();
     response.extensions_mut().insert(LoggedClient(client_slug));
     response.extensions_mut().insert(LoggedUpstreamRequest {
         api: api_slug,
-        upstream_method: upstream_method.to_string(),
-        upstream_url,
-        upstream_status,
-        timeout_ms,
+        upstream_method: forward.upstream_method,
+        upstream_url: sanitize_url_for_logs(&forward.upstream_url),
+        upstream_status: forward.upstream_status,
+        timeout_ms: forward.timeout_ms,
     });
 
     Ok(response)
@@ -288,24 +262,6 @@ fn proxy_error_with_client(error: AppError, client: String) -> ProxyResponseErro
     ProxyResponseError {
         error,
         client: Some(client),
-    }
-}
-
-fn extract_authorization_header(headers: &http::HeaderMap) -> Result<&str, AppError> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next().ok_or(AppError::InvalidToken)?;
-
-    if values.next().is_some() {
-        return Err(AppError::InvalidToken);
-    }
-
-    value.to_str().map_err(|_| AppError::InvalidToken)
-}
-
-fn required_access_for_method(method: &Method) -> AccessLevel {
-    match method {
-        &Method::GET | &Method::HEAD | &Method::OPTIONS => AccessLevel::Read,
-        _ => AccessLevel::Write,
     }
 }
 

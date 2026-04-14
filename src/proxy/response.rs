@@ -1,20 +1,50 @@
 use axum::{body::Body, response::Response};
-use http::HeaderMap;
+use bytes::Bytes;
+use http::{HeaderMap, StatusCode};
 
 use crate::error::AppError;
 
 use super::{connection_bound_header_names, is_hop_by_hop_header};
 
-pub fn map_response(upstream_response: reqwest::Response) -> Result<Response, AppError> {
+#[derive(Debug)]
+pub struct ForwardedResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    upstream_response: reqwest::Response,
+}
+
+impl ForwardedResponse {
+    pub fn into_axum_response(self) -> Response {
+        let mut response = Response::new(Body::from_stream(self.upstream_response.bytes_stream()));
+
+        *response.status_mut() = self.status;
+        *response.headers_mut() = self.headers;
+
+        response
+    }
+
+    pub fn into_body_stream(
+        self,
+    ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> {
+        self.upstream_response.bytes_stream()
+    }
+
+    pub async fn into_bytes(self) -> Result<Bytes, AppError> {
+        self.upstream_response.bytes().await.map_err(|error| {
+            AppError::ResponseMapping(format!("failed to read upstream response body: {error}"))
+        })
+    }
+}
+
+pub fn map_response(upstream_response: reqwest::Response) -> Result<ForwardedResponse, AppError> {
     let status = upstream_response.status();
     let headers = filter_response_headers(upstream_response.headers());
-    let body = Body::from_stream(upstream_response.bytes_stream());
-    let mut response = Response::new(body);
 
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-
-    Ok(response)
+    Ok(ForwardedResponse {
+        status,
+        headers,
+        upstream_response,
+    })
 }
 
 fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {

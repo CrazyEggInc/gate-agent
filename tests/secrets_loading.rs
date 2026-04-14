@@ -290,6 +290,8 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
             .map(|value| value.expose_secret().to_string()),
         Some("Bearer local-upstream-token".to_string())
     );
+    assert_eq!(api.description, None);
+    assert_eq!(api.docs_url, None);
     assert_eq!(api.timeout_ms, 5000);
 
     Ok(())
@@ -339,6 +341,8 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
             .map(|value| value.expose_secret().to_string()),
         Some("Bearer billing-secret-token".to_string())
     );
+    assert_eq!(api.description, None);
+    assert_eq!(api.docs_url, None);
     assert_eq!(api.timeout_ms, 5000);
     let client_by_token_id = config
         .client_by_bearer_token_id("default")
@@ -400,6 +404,8 @@ api_access = { billing = "read" }
             .map(|value| value.expose_secret().to_string()),
         Some("Bearer billing-secret-token".to_string())
     );
+    assert_eq!(api.description, None);
+    assert_eq!(api.docs_url, None);
     assert_eq!(api.timeout_ms, 5000);
 
     Ok(())
@@ -1499,7 +1505,68 @@ extra_header = "nope"
     assert!(
         error
             .to_string()
-            .contains("unknown field `extra_header`, expected one of `base_url`, `auth_header`, `auth_scheme`, `auth_value`, `timeout_ms`")
+            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `auth_header`, `auth_scheme`, `auth_value`, `timeout_ms`")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_optional_api_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+description = "Project API"
+docs_url = "https://docs.internal.example/projects"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("projects").expect("projects api config");
+
+    assert_eq!(api.description.as_deref(), Some("Project API"));
+    assert_eq!(
+        api.docs_url.as_ref().map(url::Url::as_str),
+        Some("https://docs.internal.example/projects")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_non_http_docs_url() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+docs_url = "ftp://docs.internal.example/projects"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.docs_url must use http or https"
     );
 
     Ok(())
