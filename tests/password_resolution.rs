@@ -37,6 +37,7 @@ const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const TEST_PROMPT_CONFIRM_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_CONFIRM";
 const TEST_KEYRING_FILE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_FILE";
 const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_FAILURE";
+const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 
 fn password_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -53,12 +54,21 @@ impl PasswordEnvGuard {
         let lock = password_test_lock()
             .lock()
             .expect("password test mutex poisoned");
-        let previous = values
+        let mut tracked = values.to_vec();
+
+        if !tracked
+            .iter()
+            .any(|(key, _)| *key == DISABLE_INTERACTIVE_ENV_VAR)
+        {
+            tracked.push((DISABLE_INTERACTIVE_ENV_VAR, Some("1")));
+        }
+
+        let previous = tracked
             .iter()
             .map(|(key, _)| (*key, std::env::var_os(key)))
             .collect::<Vec<_>>();
 
-        for (key, value) in values {
+        for (key, value) in tracked {
             match value {
                 Some(value) => unsafe {
                     std::env::set_var(key, value);

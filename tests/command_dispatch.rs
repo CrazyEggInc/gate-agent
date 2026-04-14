@@ -13,6 +13,7 @@ use tempfile::tempdir;
 use toml::Value;
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
+const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 
 const VALID_CONFIG: &str = r#"
 [clients.default]
@@ -72,18 +73,24 @@ fn add_api_args(config: PathBuf, auth_header: &str, auth_value: &str) -> ConfigA
 struct EnvGuard {
     original_dir: PathBuf,
     original_home: Option<String>,
+    original_disable_interactive: Option<String>,
 }
 
 impl EnvGuard {
     fn enter(current_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let original_dir = std::env::current_dir()?;
         let original_home = std::env::var("HOME").ok();
+        let original_disable_interactive = std::env::var(DISABLE_INTERACTIVE_ENV_VAR).ok();
 
         std::env::set_current_dir(current_dir)?;
+        unsafe {
+            std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
+        }
 
         Ok(Self {
             original_dir,
             original_home,
+            original_disable_interactive,
         })
     }
 }
@@ -96,6 +103,11 @@ impl Drop for EnvGuard {
             match &self.original_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+
+            match &self.original_disable_interactive {
+                Some(value) => std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, value),
+                None => std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR),
             }
         }
     }
