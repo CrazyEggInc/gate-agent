@@ -27,6 +27,7 @@ use crate::config::write::{
 };
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
+pub(crate) const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 
 static TEST_PROMPT_STATE: OnceLock<Mutex<TestPromptState>> = OnceLock::new();
 
@@ -834,7 +835,10 @@ fn prompt_text(
         return Ok(apply_prompt_default(response, default));
     }
 
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if interactive_prompts_disabled()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
         return Err(ConfigCommandError::new(non_interactive_message));
     }
 
@@ -851,6 +855,10 @@ fn prompt_text(
     })?;
 
     Ok(apply_prompt_default(response, default))
+}
+
+pub(crate) fn interactive_prompts_disabled() -> bool {
+    std::env::var_os(DISABLE_INTERACTIVE_ENV_VAR).is_some()
 }
 
 fn format_prompt(prompt: &str, default: Option<&str>) -> String {

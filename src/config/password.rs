@@ -14,6 +14,7 @@ use super::keyring::{
 pub const PASSWORD_ENV_VAR: &str = "GATE_AGENT_PASSWORD";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const TEST_PROMPT_CONFIRM_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_CONFIRM";
+const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasswordArgs {
@@ -176,7 +177,10 @@ fn prompt_password(
         return Ok(first);
     }
 
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if env::var_os(DISABLE_INTERACTIVE_ENV_VAR).is_some()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
         return Err(ConfigError::new(non_interactive_message));
     }
 

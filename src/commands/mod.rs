@@ -104,7 +104,10 @@ fn run_start(args: StartArgs) -> Result<(), CommandError> {
 fn resolve_config_init_args(args: ConfigInitArgs) -> Result<config::ConfigInitArgs, CommandError> {
     let encrypted = if args.encrypted_was_explicitly_set() {
         args.encrypted
-    } else if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    } else if !config::interactive_prompts_disabled()
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+    {
         config::prompt_yes_no(
             &config::prompt_message("Write encrypted config?", None, None, None, None, None),
             true,
@@ -120,7 +123,10 @@ fn resolve_config_init_args(args: ConfigInitArgs) -> Result<config::ConfigInitAr
     let default_path_display = default_path.display().to_string();
     let config = if let Some(path) = args.config {
         Some(path)
-    } else if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    } else if !config::interactive_prompts_disabled()
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+    {
         Some(
             config::prompt_required_text(
                 &config::prompt_message(
@@ -385,5 +391,7 @@ fn optional_non_empty(value: String) -> Option<String> {
 
 fn interactive_questionnaire_available() -> bool {
     std::env::var_os("GATE_AGENT_TEST_PROMPT_INPUTS").is_some()
-        || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+        || (!config::interactive_prompts_disabled()
+            && std::io::stdin().is_terminal()
+            && std::io::stderr().is_terminal())
 }

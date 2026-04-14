@@ -20,6 +20,7 @@ const TEST_KEYRING_FILE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_FILE";
 const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_FAILURE";
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
+const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 
 const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
@@ -84,6 +85,9 @@ impl EnvGuard {
             .collect();
 
         std::env::set_current_dir(current_dir)?;
+        unsafe {
+            std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
+        }
 
         Ok(Self {
             original_dir,
@@ -118,6 +122,7 @@ fn tracked_env_vars() -> Vec<&'static str> {
         TEST_KEYRING_STORE_FAILURE_ENV_VAR,
         TEST_PROMPT_INPUTS_ENV_VAR,
         TEST_PROMPT_PASSWORD_ENV_VAR,
+        DISABLE_INTERACTIVE_ENV_VAR,
     ]
 }
 
@@ -136,6 +141,7 @@ fn write_text(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Err
 
 fn set_test_prompt_inputs(inputs: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
+        std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
         std::env::set_var(TEST_PROMPT_INPUTS_ENV_VAR, serde_json::to_string(inputs)?);
     }
 
@@ -1233,12 +1239,21 @@ fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
 #[test]
 fn config_validate_prefers_stdin_for_valid_bearer_config() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
     let config_path = temp_dir.path().join("gate-agent.toml");
 
     write_text(&config_path, INVALID_BEARER_VALIDATE_CONFIG)?;
 
     let output = Command::cargo_bin("gate-agent")?
+        .env_remove(CONFIG_ENV_VAR)
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env_remove(DISABLE_INTERACTIVE_ENV_VAR)
         .args([
             "config",
             "validate",
@@ -1405,6 +1420,54 @@ fn config_init_prompts_for_default_encryption_and_config_path_when_omitted_in_tt
     let tokens = printed_tokens(&stdout)?;
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].0, "default");
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_respects_disable_interactive_env_even_in_tty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    unsafe {
+        std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
+        std::env::remove_var(TEST_PROMPT_INPUTS_ENV_VAR);
+    }
+
+    let output = run_gate_agent_in_tty(
+        &workspace,
+        &[
+            "config",
+            "add-api",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+        ],
+    )?;
+
+    assert!(!output.status.success(), "{output:?}");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let stderr = String::from_utf8(output.stderr)?;
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.contains("config add-api requires --name in non-interactive sessions"),
+        "{combined}"
+    );
+    assert!(!combined.contains("Auth header"), "{combined}");
 
     Ok(())
 }
