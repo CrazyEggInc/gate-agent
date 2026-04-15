@@ -41,6 +41,7 @@ fn start_help_uses_config_flag() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = help_output(&["start", "--help"])?;
 
     assert!(stdout.contains("--bind"));
+    assert!(!stdout.contains("[default: 127.0.0.1:8787]"));
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
@@ -371,6 +372,27 @@ fn config_init_tracks_explicit_encrypted_flag() {
         other => panic!("expected config command, got {other:?}"),
     };
     assert!(explicit_flag);
+}
+
+#[test]
+fn start_tracks_explicit_bind_flag() {
+    let omitted = Cli::try_parse_from(["gate-agent", "start"]).expect("parses");
+    let omitted_bind = match omitted.command() {
+        CliCommand::Start(args) => args.bind,
+        other => panic!("expected start command, got {other:?}"),
+    };
+    assert_eq!(omitted_bind, None);
+
+    let explicit =
+        Cli::try_parse_from(["gate-agent", "start", "--bind", "127.0.0.1:9898"]).expect("parses");
+    let explicit_bind = match explicit.command() {
+        CliCommand::Start(args) => args.bind,
+        other => panic!("expected start command, got {other:?}"),
+    };
+    assert_eq!(
+        explicit_bind,
+        Some("127.0.0.1:9898".parse().expect("socket addr parses"))
+    );
 }
 
 #[test]

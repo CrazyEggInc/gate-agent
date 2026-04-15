@@ -53,6 +53,9 @@ Behavior:
 - prefers non-empty piped stdin over file-backed config sources
 - prompts only when the selected config is encrypted and no password flag, env var, or keyring entry is available
 - validates config before starting
+- when `--bind` is provided explicitly, uses that address as the listener override
+- when `--bind` is omitted, uses `[server].bind` and `[server].port` from config
+- configs without `[server]` remain valid and fall back to `127.0.0.1:8787`
 - binds the requested listener and serves HTTP traffic
 
 ## `config`
@@ -71,9 +74,9 @@ Each config subcommand accepts `--log-level <level>`.
 
 `config show`, `config edit`, `config add-api`, `config add-group`, and `config add-client` must use the shared encrypted-config password lookup order: flag, env var, keyring, then prompt.
 
-`config show` and `config edit` write the resolved password back to the keyring after a successful encrypted read via `remember_password_if_needed()`, so operators can trace that side effect to the implementation.
+Successful encrypted reads may backfill the password in the system keyring for that config path, and later encrypted reads may reuse that cached password through the same lookup order.
 
-`config add-api`, `config add-group`, and `config add-client` may read a password from the keyring, but they do not create or update keyring entries as a side effect.
+Cached passwords that no longer decrypt the selected config are removed automatically.
 
 ### `config init`
 
@@ -87,19 +90,24 @@ Accepted flags:
 Behavior:
 
 - fails if the target file already exists
-- when `--config` is omitted in an interactive session, asks for the path and defaults that prompt to `~/.config/gate-agent/secrets` when `HOME` is available
-- when `--config` is omitted outside the questionnaire flow, targets `~/.config/gate-agent/secrets` when `HOME` is available
+- when `--config` is omitted in an interactive session, asks for the path and defaults that prompt to the resolved write target: `--config`, `GATE_AGENT_CONFIG`, existing `./.secrets`, existing `~/.config/gate-agent/secrets`, otherwise a new `~/.config/gate-agent/secrets` when `HOME` is available, else a new `./.secrets`
+- when `--config` is omitted outside the questionnaire flow, uses that same resolved write target
 - when `--encrypted` is omitted in an interactive session, asks whether to encrypt and defaults that prompt to yes
 - interactive prompts stay on a single line and keep the wording minimal, using only the question plus inline `(default: ...)`, `(example: ...)`, or `(options: ...)` details when helpful
 - when `--encrypted` is absent outside the questionnaire flow, writes plaintext TOML
 - creates a minimal config with no `[auth]` table
+- writes an explicit `[server]` section with bind and port
+- when server bind and port are not provided explicitly in an interactive session, asks:
+  - `Server bind (default: 127.0.0.1; remote setups should use 0.0.0.0)`
+  - `Server port (default: 8787)`
+- when server bind and port are not provided outside the questionnaire flow, writes `127.0.0.1` and `8787`
 - creates `clients.default` with generated bearer token metadata and an expiry about 180 days in the future
 - prints the generated default client bearer token once for operator capture
 - persists only `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - when encryption is enabled, writes encrypted config and confirms interactive passwords by double entry
-- when encryption is enabled, accepts the shared password flag/env inputs for the initial password choice
-- when encrypted init succeeds, stores that password in the system keyring for the selected config path
-- only this explicit encrypted init flow may store credentials in the keyring; later runtime and config reads may reuse the stored password but must not silently backfill it
+- when encryption is enabled, resolves the initial password from `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
+- when encrypted init succeeds, leaves the system keyring empty for the selected config path and removes any stale cached password for that path
+- later successful encrypted reads may also backfill the password for that config path, and later encrypted reads may reuse cached passwords through the standard lookup order
 - explicit args keep the command non-interactive for those inputs
 
 ### `config validate`
@@ -168,6 +176,7 @@ Behavior:
 - when `auth_header` is omitted, no upstream auth header is configured or injected
 - bearer-style auth uses the full header value in `auth_value`, for example `Bearer my-token`
 - preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
 - if required fields are omitted in an interactive session, the command prompts for them in a single-line format with minimal wording
 - the interactive questionnaire asks exactly:
   - `API name:`
@@ -193,6 +202,7 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - upserts a single group entry
 - preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
 - if required fields are omitted in an interactive session, the command prompts for the group name and access map in a single-line format with minimal wording
 - explicit args keep the command non-interactive
 
@@ -227,6 +237,7 @@ Rules and behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - the plaintext bearer token is never persisted
 - persisted client fields use `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
+- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
 - explicit args keep the command non-interactive
 
 ## Logging control

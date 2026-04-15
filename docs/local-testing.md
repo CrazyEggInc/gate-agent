@@ -64,6 +64,8 @@ cat .secrets.example | cargo run -- start --log-level info
 
 If you create a fresh config instead, `config init` prints the generated default bearer token once. Save it immediately; only the token id, hash, and expiry are persisted.
 
+Fresh configs created with `config init` also write an explicit `[server]` section. The questionnaire prompts for bind and port, defaults to `127.0.0.1:8787`, and remote-access setups should use `0.0.0.0` for the bind value.
+
 ## Proxy request workflow
 
 Use normal `curl` directly against `gate-agent`:

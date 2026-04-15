@@ -50,11 +50,51 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
         Some(vec![])
     );
 
+    let server = section_body(&contents, "server").unwrap();
+    assert_eq!(
+        find_string_value(server, "bind").as_deref(),
+        Some("127.0.0.1")
+    );
+    assert_eq!(find_integer_value(server, "port"), Some(8787));
+
     let groups = section_body(&contents, "groups").unwrap();
     assert!(groups.trim().is_empty());
 
     let apis = section_body(&contents, "apis").unwrap();
     assert!(apis.trim().is_empty());
+
+    let server_index = contents.find("[server]\n").unwrap();
+    let groups_index = contents.find("[groups]\n").unwrap();
+    let apis_index = contents.find("[apis]\n").unwrap();
+    assert!(server_index < groups_index);
+    assert!(groups_index < apis_index);
+
+    Ok(())
+}
+
+#[test]
+fn init_config_escapes_server_bind_in_toml_output() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write::init_config_with_default_bearer_token_and_server(
+        &config_path,
+        false,
+        None,
+        "127.0.0.1\"quoted",
+        8787,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let parsed: toml::Value = contents.parse()?;
+
+    assert_eq!(
+        parsed
+            .get("server")
+            .and_then(|value| value.get("bind"))
+            .and_then(toml::Value::as_str),
+        Some("127.0.0.1\"quoted")
+    );
 
     Ok(())
 }
@@ -75,6 +115,9 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
 
     let loaded = write::load_display_text(&config_path, Some(&password))?;
     assert!(loaded.toml.contains("[clients.default]"));
+    assert!(loaded.toml.contains("[server]"));
+    assert!(loaded.toml.contains("bind = \"127.0.0.1\""));
+    assert!(loaded.toml.contains("port = 8787"));
     assert!(loaded.toml.contains("bearer_token_id"));
     assert!(!loaded.toml.contains("[auth]"));
     assert!(!loaded.toml.contains("api_key = "));

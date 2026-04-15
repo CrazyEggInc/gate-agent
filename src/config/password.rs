@@ -127,7 +127,10 @@ pub fn remember_password_if_needed(path: &Path, resolved: &ResolvedPassword) {
     }
 
     match ConfigKeyring::default().store_password(path, resolved.password.expose_secret()) {
-        KeyringStoreOutcome::Stored | KeyringStoreOutcome::SoftFailure(_) => {}
+        KeyringStoreOutcome::Stored => {}
+        KeyringStoreOutcome::SoftFailure(error) => {
+            debug!(config_path = %path.display(), error = %error, "failed to cache encrypted config password in system keyring");
+        }
     }
 }
 

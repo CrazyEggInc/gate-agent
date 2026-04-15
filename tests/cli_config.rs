@@ -230,6 +230,14 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
     let config = load_toml(&config_path)?;
     assert_client_metadata_matches(&config, "default", &tokens[0].1);
     assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
+    assert_eq!(string_at(&config, &["server", "bind"]), "127.0.0.1");
+    assert_eq!(
+        config
+            .get("server")
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_integer),
+        Some(8787)
+    );
 
     Ok(())
 }
@@ -1396,7 +1404,7 @@ fn config_init_prompts_for_default_encryption_and_config_path_when_omitted_in_tt
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
         std::env::set_var(TEST_PROMPT_PASSWORD_ENV_VAR, "top-secret-password");
     }
-    set_test_prompt_inputs(&["", "nested/interactive.secrets"])?;
+    set_test_prompt_inputs(&["", "nested/interactive.secrets", "0.0.0.0", "9999"])?;
 
     let output = run_gate_agent_in_tty(&workspace, &["config", "init"])?;
     let config_path = workspace.join("nested/interactive.secrets");
@@ -1406,6 +1414,22 @@ fn config_init_prompts_for_default_encryption_and_config_path_when_omitted_in_tt
     assert!(
         std::fs::read_to_string(&config_path)?.starts_with("-----BEGIN AGE ENCRYPTED FILE-----")
     );
+    assert!(!keyring_path.exists());
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path.clone()),
+        password: Some("top-secret-password".to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+    assert_eq!(string_at(&config, &["server", "bind"]), "0.0.0.0");
+    assert_eq!(
+        config
+            .get("server")
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_integer),
+        Some(9999)
+    );
 
     let stderr = String::from_utf8(output.stderr)?;
     let normalized_stderr = stderr.replace("\r", "");
@@ -1413,7 +1437,11 @@ fn config_init_prompts_for_default_encryption_and_config_path_when_omitted_in_tt
         normalized_stderr.is_empty()
             || (normalized_stderr.contains("Write encrypted config? [Y/n]")
                 && normalized_stderr.contains("Config path")
-                && normalized_stderr.contains("default: ~/.config/gate-agent/secrets"))
+                && normalized_stderr.contains("default: ~/.config/gate-agent/secrets")
+                && normalized_stderr.contains(
+                    "Server bind (default: 127.0.0.1; remote setups should use 0.0.0.0)"
+                )
+                && normalized_stderr.contains("Server port (default: 8787)"))
     );
 
     let stdout = String::from_utf8(output.stdout)?;
@@ -1468,6 +1496,60 @@ fn config_add_api_respects_disable_interactive_env_even_in_tty()
         "{combined}"
     );
     assert!(!combined.contains("Auth header"), "{combined}");
+
+    Ok(())
+}
+
+#[test]
+fn config_init_removes_existing_keyring_password_for_new_encrypted_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("encrypted.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+
+    std::fs::create_dir_all(temp_dir.path())?;
+    unsafe {
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+
+    let canonical_config_path = if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        parent.join(
+            config_path
+                .file_name()
+                .ok_or("config path missing file name")?,
+        )
+    } else {
+        config_path.clone()
+    };
+    let key = format!("gate-agent::config:{}", canonical_config_path.display());
+    std::fs::write(
+        &keyring_path,
+        serde_json::json!({ key: "stale-password" }).to_string(),
+    )?;
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--encrypted",
+            "--password",
+            "new-password",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let keyring_contents: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&keyring_path)?)?;
+    assert_eq!(keyring_contents, serde_json::json!({}));
 
     Ok(())
 }
@@ -1629,6 +1711,14 @@ fn config_init_function_still_creates_explicit_config_path()
 
     let config = load_toml(&written_path)?;
     assert!(config.get("auth").is_none());
+    assert_eq!(string_at(&config, &["server", "bind"]), "127.0.0.1");
+    assert_eq!(
+        config
+            .get("server")
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_integer),
+        Some(8787)
+    );
     assert!(config.get("groups").and_then(Value::as_table).is_some());
     assert!(config.get("apis").and_then(Value::as_table).is_some());
 

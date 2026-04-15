@@ -15,6 +15,9 @@ use gate_agent::config::{
 };
 use tempfile::tempdir;
 
+const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
+const DEFAULT_SERVER_PORT: u16 = 8787;
+
 fn write_secrets_file(
     contents: &str,
 ) -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
@@ -309,6 +312,8 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
     let api = config.apis.get("billing").expect("billing api config");
 
     assert_eq!(config.clients.len(), 1);
+    assert_eq!(config.server.bind, DEFAULT_SERVER_BIND);
+    assert_eq!(config.server.port, DEFAULT_SERVER_PORT);
     assert_eq!(client.bearer_token_id, "default");
     assert_eq!(
         client.bearer_token_hash.as_str(),
@@ -382,6 +387,8 @@ api_access = { billing = "read" }
         .expect("default client config");
     let api = config.apis.get("billing").expect("billing api config");
 
+    assert_eq!(config.server.bind, DEFAULT_SERVER_BIND);
+    assert_eq!(config.server.port, DEFAULT_SERVER_PORT);
     assert_eq!(client.bearer_token_id, "default");
     assert_eq!(
         client.bearer_token_expires_at.as_str(),
@@ -1416,11 +1423,8 @@ timeout_ms = 5000
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
     assert!(error.to_string().contains("unknown field `unexpected`"));
-    assert!(
-        error
-            .to_string()
-            .contains("expected one of `clients`, `groups`, `apis`")
-    );
+    assert!(error.to_string().contains("expected one of"));
+    assert!(error.to_string().contains("`server`"));
 
     Ok(())
 }
@@ -1472,11 +1476,8 @@ api_access = {}
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
     assert!(error.to_string().contains("unknown field `auth`"));
-    assert!(
-        error
-            .to_string()
-            .contains("expected one of `clients`, `groups`, `apis`")
-    );
+    assert!(error.to_string().contains("expected one of"));
+    assert!(error.to_string().contains("`server`"));
 
     Ok(())
 }
@@ -1899,4 +1900,157 @@ fn bearer_token_hash_matches_full_token_sha256() {
     );
     assert!(hash.matches_token("lookup.secret-part"));
     assert!(!hash.matches_token("lookup.other-secret"));
+}
+
+#[test]
+fn secrets_config_loads_explicit_server_settings() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+bind = "0.0.0.0"
+port = 9999
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+
+    assert_eq!(config.server.bind, "0.0.0.0");
+    assert_eq!(config.server.port, 9999);
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_server_with_unknown_fields() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+bind = "127.0.0.1"
+port = 8787
+host = "localhost"
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `host`"));
+    assert!(error.to_string().contains("expected `bind` or `port`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_blank_server_bind() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+bind = "   "
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(error.to_string(), "server.bind cannot be empty");
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_unbindable_server_bind() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+bind = "bad host name"
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("server.bind is invalid: server bind address 'bad host name' is invalid:")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_zero_server_port() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+port = 0
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(error.to_string(), "server.port must be between 1 and 65535");
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_server_port_above_u16_range() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[server]
+port = 65536
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(error.to_string(), "server.port must be between 1 and 65535");
+
+    Ok(())
 }

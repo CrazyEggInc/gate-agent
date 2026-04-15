@@ -35,6 +35,12 @@ When the selected config file is encrypted, runtime startup may pause before sta
 
 Startup should pause only after flag, environment, and keyring lookup all fail. Failure to obtain or use that password is a startup failure.
 
+Listener resolution is explicit:
+
+- `start --bind <addr>` overrides config-derived listener settings when the flag is provided
+- otherwise startup uses `[server].bind` and `[server].port` from runtime config
+- configs without `[server]` remain valid and start on `127.0.0.1:8787`
+
 Keyring backend policy is platform-specific but explicit:
 
 - Linux uses the native keyutils backend from the `keyring` crate

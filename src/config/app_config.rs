@@ -1,5 +1,5 @@
 use std::io::{self, IsTerminal, Read};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
@@ -244,13 +244,30 @@ impl AppConfig {
             }
         };
 
+        let bind = match args.bind {
+            Some(bind) => bind,
+            None => resolve_bind_from_secrets(&secrets)?,
+        };
+
         Ok(Self::new(
-            args.bind,
+            bind,
             log_level.to_owned(),
             config_source,
             secrets,
         ))
     }
+}
+
+pub(crate) fn parse_server_bind_address(bind: &str, port: u16) -> Result<SocketAddr, ConfigError> {
+    let ip = bind.parse::<IpAddr>().map_err(|error| {
+        ConfigError::new(format!("server bind address '{bind}' is invalid: {error}"))
+    })?;
+
+    Ok(SocketAddr::new(ip, port))
+}
+
+fn resolve_bind_from_secrets(secrets: &SecretsConfig) -> Result<SocketAddr, ConfigError> {
+    parse_server_bind_address(secrets.server.bind.trim(), secrets.server.port)
 }
 
 #[cfg(test)]

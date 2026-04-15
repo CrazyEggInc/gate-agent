@@ -7,7 +7,7 @@ use clap::{
 };
 
 use crate::commands;
-use crate::config::app_config::{DEFAULT_BIND, DEFAULT_LOG_LEVEL};
+use crate::config::app_config::DEFAULT_LOG_LEVEL;
 use crate::config::secrets::DEFAULT_API_TIMEOUT_MS;
 
 #[derive(Debug, Parser)]
@@ -34,8 +34,8 @@ pub enum Command {
 
 #[derive(Clone, Debug, Args)]
 pub struct StartArgs {
-    #[arg(long, default_value = DEFAULT_BIND, help = "Bind address for the local listener")]
-    pub bind: SocketAddr,
+    #[arg(long, help = "Bind address for the local listener")]
+    pub bind: Option<SocketAddr>,
 
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
