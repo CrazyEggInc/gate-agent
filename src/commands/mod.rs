@@ -8,6 +8,7 @@ use crate::cli::{
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
+use crate::config::secrets::{DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
@@ -63,7 +64,8 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
     match args.command {
         ConfigCommand::Init(args) => {
             let resolved = resolve_config_init_args(args)?;
-            config::init(resolved).map_err(|error| CommandError::new(error.to_string()))?;
+            config::init_with_server(resolved.args, &resolved.server_bind, resolved.server_port)
+                .map_err(|error| CommandError::new(error.to_string()))?;
         }
         ConfigCommand::Show(args) => {
             let contents = config::show(map_config_show_args(args))
@@ -101,13 +103,20 @@ fn run_start(args: StartArgs) -> Result<(), CommandError> {
     start::run_with_config(config)
 }
 
-fn resolve_config_init_args(args: ConfigInitArgs) -> Result<config::ConfigInitArgs, CommandError> {
+struct ResolvedConfigInitArgs {
+    args: config::ConfigInitArgs,
+    server_bind: String,
+    server_port: u16,
+}
+
+fn resolve_config_init_args(args: ConfigInitArgs) -> Result<ResolvedConfigInitArgs, CommandError> {
+    let interactive = !config::interactive_prompts_disabled()
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
+
     let encrypted = if args.encrypted_was_explicitly_set() {
         args.encrypted
-    } else if !config::interactive_prompts_disabled()
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal()
-    {
+    } else if interactive {
         config::prompt_yes_no(
             &config::prompt_message("Write encrypted config?", None, None, None, None, None),
             true,
@@ -123,10 +132,7 @@ fn resolve_config_init_args(args: ConfigInitArgs) -> Result<config::ConfigInitAr
     let default_path_display = default_path.display().to_string();
     let config = if let Some(path) = args.config {
         Some(path)
-    } else if !config::interactive_prompts_disabled()
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal()
-    {
+    } else if interactive {
         Some(
             config::prompt_required_text(
                 &config::prompt_message(
@@ -147,12 +153,69 @@ fn resolve_config_init_args(args: ConfigInitArgs) -> Result<config::ConfigInitAr
         Some(default_path)
     };
 
-    Ok(config::ConfigInitArgs {
-        config,
-        encrypted,
-        password: args.password,
-        log_level: args.log_level,
+    let server_bind = if interactive {
+        config::prompt_required_text(
+            &config::prompt_message(
+                "Server bind",
+                None,
+                Some(DEFAULT_SERVER_BIND),
+                None,
+                None,
+                Some("remote setups should use 0.0.0.0"),
+            ),
+            Some(DEFAULT_SERVER_BIND),
+            "config init requires --server-bind in non-interactive sessions",
+        )
+        .map_err(|error| CommandError::new(error.to_string()))?
+    } else {
+        DEFAULT_SERVER_BIND.to_owned()
+    };
+
+    let default_server_port = DEFAULT_SERVER_PORT.to_string();
+    let server_port = if interactive {
+        parse_server_port(
+            &config::prompt_required_text(
+                &config::prompt_message(
+                    "Server port",
+                    None,
+                    Some(&default_server_port),
+                    None,
+                    None,
+                    None,
+                ),
+                Some(&default_server_port),
+                "config init requires --server-port in non-interactive sessions",
+            )
+            .map_err(|error| CommandError::new(error.to_string()))?,
+        )?
+    } else {
+        DEFAULT_SERVER_PORT
+    };
+
+    Ok(ResolvedConfigInitArgs {
+        args: config::ConfigInitArgs {
+            config,
+            encrypted,
+            password: args.password,
+            log_level: args.log_level,
+        },
+        server_bind,
+        server_port,
     })
+}
+
+fn parse_server_port(value: &str) -> Result<u16, CommandError> {
+    let port: u16 = value
+        .parse()
+        .map_err(|_| CommandError::new("Server port must be a number between 1 and 65535"))?;
+
+    if port == 0 {
+        return Err(CommandError::new(
+            "Server port must be a number between 1 and 65535",
+        ));
+    }
+
+    Ok(port)
 }
 
 fn map_config_show_args(args: ConfigShowArgs) -> config::ConfigShowArgs {

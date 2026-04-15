@@ -10,6 +10,7 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 use super::ConfigError;
+use super::app_config::parse_server_bind_address;
 use super::crypto::load_config_text;
 use super::password::{
     PasswordArgs, PasswordSource, forget_keyring_password_if_present, remember_password_if_needed,
@@ -17,6 +18,9 @@ use super::password::{
 };
 
 pub const DEFAULT_API_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
+pub const DEFAULT_SERVER_PORT: u16 = 8787;
+
 pub(crate) fn is_valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -26,8 +30,15 @@ pub(crate) fn is_valid_slug(value: &str) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct SecretsConfig {
+    pub server: ServerConfig,
     pub clients: BTreeMap<String, ClientConfig>,
     pub apis: BTreeMap<String, ApiConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerConfig {
+    pub bind: String,
+    pub port: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -76,11 +87,31 @@ pub struct ApiConfig {
 #[serde(deny_unknown_fields)]
 struct RawSecretsConfig {
     #[serde(default)]
+    server: RawServerConfig,
+    #[serde(default)]
     clients: BTreeMap<String, RawClientConfig>,
     #[serde(default)]
     groups: BTreeMap<String, RawGroupConfig>,
     #[serde(default)]
     apis: BTreeMap<String, RawApiConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServerConfig {
+    #[serde(default = "default_server_bind")]
+    bind: String,
+    #[serde(default = "default_server_port_i64")]
+    port: i64,
+}
+
+impl Default for RawServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_server_bind(),
+            port: default_server_port_i64(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +145,14 @@ struct RawApiConfig {
 
 fn default_api_timeout_ms() -> u64 {
     DEFAULT_API_TIMEOUT_MS
+}
+
+fn default_server_bind() -> String {
+    DEFAULT_SERVER_BIND.to_owned()
+}
+
+fn default_server_port_i64() -> i64 {
+    i64::from(DEFAULT_SERVER_PORT)
 }
 
 impl SecretsConfig {
@@ -181,6 +220,8 @@ impl SecretsConfig {
     }
 
     fn try_from_raw(raw_config: RawSecretsConfig) -> Result<Self, ConfigError> {
+        let server = ServerConfig::try_from_raw(raw_config.server)?;
+
         if raw_config.clients.is_empty() {
             return Err(ConfigError::new(
                 "at least one [clients.*] entry is required",
@@ -228,7 +269,11 @@ impl SecretsConfig {
             clients.insert(slug, client);
         }
 
-        Ok(Self { clients, apis })
+        Ok(Self {
+            server,
+            clients,
+            apis,
+        })
     }
 
     pub fn default_client(&self) -> Result<&ClientConfig, ConfigError> {
@@ -252,6 +297,24 @@ impl SecretsConfig {
 
     pub fn client_slug(&self, client: &ClientConfig) -> Option<&str> {
         self.client_slug_by_bearer_token_id(&client.bearer_token_id)
+    }
+}
+
+impl ServerConfig {
+    fn try_from_raw(raw_config: RawServerConfig) -> Result<Self, ConfigError> {
+        let bind = required_string("server.bind", raw_config.bind)?;
+
+        parse_server_bind_address(&bind, DEFAULT_SERVER_PORT)
+            .map_err(|error| ConfigError::new(format!("server.bind is invalid: {error}")))?;
+
+        if !(1..=65_535).contains(&raw_config.port) {
+            return Err(ConfigError::new("server.port must be between 1 and 65535"));
+        }
+
+        Ok(Self {
+            bind,
+            port: raw_config.port as u16,
+        })
     }
 }
 

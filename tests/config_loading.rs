@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use gate_agent::cli::StartArgs;
 use gate_agent::config::{
     ConfigSource,
-    app_config::{AppConfig, StartConfigStdin},
+    app_config::{AppConfig, DEFAULT_BIND, StartConfigStdin},
 };
 use tempfile::tempdir;
 
@@ -48,7 +48,29 @@ auth_value = "projects-secret-value"
 timeout_ms = 5000
 "#;
 
+const SERVER_CONFIG: &str = r#"
+[server]
+bind = "127.0.0.1"
+port = 9898
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#;
+
 const STDIN_CONFIG: &str = r#"
+[server]
+bind = "127.0.0.1"
+port = 9393
+
 [clients.default]
 bearer_token_id = "stdin-default"
 bearer_token_hash = "5fd8d7dc05bd649e11e71f60b6bd897ea7d35857c133ccfc74a06537e2ec4f38"
@@ -184,7 +206,7 @@ fn start_config_loads_runtime_flags_and_resolved_config_path()
     let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:9898".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:9898".parse::<SocketAddr>()?),
         config: Some(config_file.clone()),
         password: None,
         log_level: " debug ".to_string(),
@@ -202,12 +224,70 @@ fn start_config_loads_runtime_flags_and_resolved_config_path()
 }
 
 #[test]
+fn start_config_uses_default_bind_when_cli_omits_bind() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
+
+    let args = StartArgs {
+        bind: None,
+        config: Some(config_file),
+        password: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config(&args)?;
+
+    assert_eq!(config.bind(), DEFAULT_BIND.parse::<SocketAddr>()?);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_uses_server_section_when_cli_omits_bind() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", SERVER_CONFIG)?;
+
+    let args = StartArgs {
+        bind: None,
+        config: Some(config_file),
+        password: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config(&args)?;
+
+    assert_eq!(config.bind(), "127.0.0.1:9898".parse::<SocketAddr>()?);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_cli_bind_overrides_server_section() -> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+    let (_temp_dir, config_file) = write_config_file("resolved-config.toml", SERVER_CONFIG)?;
+
+    let args = StartArgs {
+        bind: Some("127.0.0.1:9899".parse::<SocketAddr>()?),
+        config: Some(config_file),
+        password: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config(&args)?;
+
+    assert_eq!(config.bind(), "127.0.0.1:9899".parse::<SocketAddr>()?);
+
+    Ok(())
+}
+
+#[test]
 fn start_config_exposes_stable_config_source_accessors() -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
     let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:9898".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:9898".parse::<SocketAddr>()?),
         config: Some(config_file.clone()),
         password: None,
         log_level: "debug".to_string(),
@@ -238,7 +318,7 @@ fn start_config_rejects_blank_log_level() -> Result<(), Box<dyn std::error::Erro
     let (_temp_dir, config_file) = write_config_file("config.toml", VALID_CONFIG)?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: Some(config_file),
         password: None,
         log_level: "   ".to_string(),
@@ -262,7 +342,7 @@ fn start_config_uses_env_resolved_path_when_cli_omits_config_override()
     }
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -284,7 +364,7 @@ fn start_config_loads_optional_api_metadata() -> Result<(), Box<dyn std::error::
         write_config_file("resolved-config.toml", CONFIG_WITH_API_METADATA)?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: Some(config_file),
         password: None,
         log_level: "info".to_string(),
@@ -317,7 +397,7 @@ fn start_config_uses_local_default_before_home_fallback() -> Result<(), Box<dyn 
 
     let _process_env = ProcessEnvGuard::enter(&workspace_dir, Some(&home_dir))?;
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -343,7 +423,7 @@ fn start_config_uses_home_fallback_when_local_default_is_missing()
 
     let _process_env = ProcessEnvGuard::enter(&workspace_dir, Some(&home_dir))?;
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -368,7 +448,7 @@ fn start_config_fails_fast_when_no_resolved_config_exists() -> Result<(), Box<dy
 
     let _process_env = ProcessEnvGuard::enter(&workspace_dir, Some(&home_dir))?;
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -392,9 +472,10 @@ fn start_config_fails_fast_when_no_resolved_config_exists() -> Result<(), Box<dy
 fn start_config_prefers_stdin_over_cli_config_path() -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
     let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
+    let cli_bind = "127.0.0.1:8787".parse::<SocketAddr>()?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some(cli_bind),
         config: Some(config_file),
         password: None,
         log_level: "info".to_string(),
@@ -403,6 +484,7 @@ fn start_config_prefers_stdin_over_cli_config_path() -> Result<(), Box<dyn std::
     let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
 
     assert_eq!(config.config_source(), &ConfigSource::Stdin);
+    assert_eq!(config.bind(), cli_bind);
     assert_eq!(
         config.secrets().clients["default"].bearer_token_id,
         "stdin-default"
@@ -421,7 +503,7 @@ fn start_config_prefers_stdin_over_env_config_path() -> Result<(), Box<dyn std::
     }
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -445,7 +527,7 @@ fn start_config_ignores_empty_piped_stdin_and_falls_back_to_file()
     let (_temp_dir, config_file) = write_config_file("resolved-config.toml", VALID_CONFIG)?;
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: Some(config_file.clone()),
         password: None,
         log_level: "info".to_string(),
@@ -467,7 +549,7 @@ fn start_config_reports_stdin_as_chosen_source() -> Result<(), Box<dyn std::erro
     let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: None,
         password: None,
         log_level: "info".to_string(),
@@ -476,6 +558,25 @@ fn start_config_reports_stdin_as_chosen_source() -> Result<(), Box<dyn std::erro
     let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
 
     assert_eq!(config.config_source(), &ConfigSource::Stdin);
+
+    Ok(())
+}
+
+#[test]
+fn start_config_stdin_uses_server_section_when_cli_omits_bind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_guard = EnvVarGuard::clear(CONFIG_ENV_VAR);
+
+    let args = StartArgs {
+        bind: None,
+        config: None,
+        password: None,
+        log_level: "info".to_string(),
+    };
+
+    let config = load_config_with_stdin(&args, STDIN_CONFIG)?;
+
+    assert_eq!(config.bind(), "127.0.0.1:9393".parse::<SocketAddr>()?);
 
     Ok(())
 }
@@ -492,7 +593,7 @@ fn start_config_cli_path_still_beats_env_when_stdin_is_absent()
     }
 
     let args = StartArgs {
-        bind: "127.0.0.1:8787".parse::<SocketAddr>()?,
+        bind: Some("127.0.0.1:8787".parse::<SocketAddr>()?),
         config: Some(cli_config.clone()),
         password: None,
         log_level: "info".to_string(),

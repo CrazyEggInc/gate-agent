@@ -29,7 +29,7 @@ Behavior:
 - empty or whitespace-only piped stdin is ignored
 - blank `--config` and blank `GATE_AGENT_CONFIG` are rejected
 - read mode requires an existing file
-- write/update mode falls back to `~/.config/gate-agent/secrets` when `HOME` is available
+- write/update mode resolves the target in this order: `--config`, `GATE_AGENT_CONFIG`, existing `./.secrets`, existing `~/.config/gate-agent/secrets`, otherwise a new `~/.config/gate-agent/secrets` when `HOME` is available, else a new `./.secrets`
 - when nothing is found in read mode, the error reports attempted paths
 
 ## Config file formats
@@ -55,13 +55,16 @@ Behavior:
 - blank flag and env passwords are rejected
 - plaintext configs ignore password inputs
 - non-interactive sessions fail clearly when an encrypted config needs a password and none is available
-- successful decrypts cache the password in the keyring for that config path
+- encrypted init does not store the password in the keyring
+- encrypted init removes any existing cached keyring password for that config path
+- successful encrypted reads may backfill the keyring for that config path
 - stale cached passwords are removed automatically when they stop decrypting the file
 
 ## Runtime config model
 
 The runtime config has these top-level tables:
 
+- `[server]`
 - `[groups.<slug>]`
 - `[clients.<slug>]`
 - `[apis.<slug>]`
@@ -69,6 +72,21 @@ The runtime config has these top-level tables:
 There is no `[auth]` table in the runtime config contract.
 
 Unknown fields are rejected. Empty required strings are rejected.
+
+### `[server]`
+
+Optional fields:
+
+- `bind: String | omitted`
+- `port: u16 | omitted`
+
+Validation and default expectations:
+
+- `bind`, when present, must be a non-empty bindable host/interface string
+- `port`, when present, must be greater than zero
+- omitted `bind` falls back to `127.0.0.1`
+- omitted `port` falls back to `8787`
+- configs that omit the entire `[server]` table remain valid and use those same defaults at runtime
 
 ### `[clients.<slug>]`
 
@@ -154,6 +172,10 @@ Validation expectations:
 `.secrets.example` is the runnable local/dev sample:
 
 ```toml
+[server]
+bind = "127.0.0.1"
+port = 8787
+
 [groups.local-default]
 api_access = { projects = "read" }
 
@@ -181,12 +203,13 @@ For the committed sample config, the matching local bearer token is `default.s3c
 Behavior:
 
 - resolves the target path using write precedence
-- when `--config` is omitted in an interactive session, prompts for the config path and defaults that prompt to `~/.config/gate-agent/secrets` when `HOME` is available
-- when no `--config` or `GATE_AGENT_CONFIG` is set outside the questionnaire flow, defaults to `~/.config/gate-agent/secrets` when `HOME` is available
+- when `--config` is omitted in an interactive session, prompts for the config path and defaults that prompt to the resolved write target
+- when no `--config` or `GATE_AGENT_CONFIG` is set outside the questionnaire flow, uses the resolved write target
 - interactive prompts stay on a single line and keep the wording minimal, using only the question plus inline `(default: ...)`, `(example: ...)`, or `(options: ...)` details when helpful
 - fails if the target file already exists
 - creates parent directories as needed
 - writes a minimal config with:
+  - explicit `[server]` settings for bind and port
   - generated `clients.default` bearer token metadata
   - generated `bearer_token_expires_at` about 180 days in the future
   - empty `api_access = {}` for `clients.default`
@@ -194,6 +217,10 @@ Behavior:
   - empty `[apis]`
 - prints the generated default client bearer token once to stdout
 - persists only the token id, hash, and expiry
+- when bind or port is not supplied explicitly in an interactive session, prompts for:
+  - `Server bind (default: 127.0.0.1; remote setups should use 0.0.0.0)`
+  - `Server port (default: 8787)`
+- when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions
@@ -201,9 +228,9 @@ Behavior:
 When encryption is enabled:
 
 - the generated config is encrypted immediately
-- password resolution follows the standard password precedence
+- initial password resolution uses `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
 - interactive prompting asks twice and requires an exact match
-- successful encrypted init stores the password in the system keyring for that config path
+- encrypted init leaves the keyring empty for that config path and removes any stale cached password
 
 ### `config show`
 
@@ -275,6 +302,7 @@ Behavior:
 - writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately
 - the access prompt shows existing group slugs as available options when any exist
 - the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`

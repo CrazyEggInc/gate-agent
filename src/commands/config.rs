@@ -6,14 +6,12 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use secrecy::ExposeSecret;
 use serde::Serialize;
 use toml_edit::{DocumentMut, Table};
 
 use crate::cli::StartArgs;
 use crate::config::ConfigError;
-use crate::config::app_config::{AppConfig, DEFAULT_BIND};
-use crate::config::keyring::{ConfigKeyring, KeyringStoreOutcome};
+use crate::config::app_config::AppConfig;
 use crate::config::password::{
     PasswordArgs, PasswordSource, forget_keyring_password_if_present, remember_password_if_needed,
     resolve_for_encrypted_create, resolve_for_encrypted_read,
@@ -158,6 +156,18 @@ pub struct AddClientOutcome {
 }
 
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
+    init_with_server(
+        args,
+        crate::config::secrets::DEFAULT_SERVER_BIND,
+        crate::config::secrets::DEFAULT_SERVER_PORT,
+    )
+}
+
+pub fn init_with_server(
+    args: ConfigInitArgs,
+    server_bind: &str,
+    server_port: u16,
+) -> Result<PathBuf, ConfigCommandError> {
     let path = resolve_target_path(args.config.as_deref())?;
 
     if path.exists() {
@@ -176,24 +186,16 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
         None
     };
 
-    let default_bearer_token =
-        write::init_config_with_default_bearer_token(&path, args.encrypted, password.as_ref())?;
+    let default_bearer_token = write::init_config_with_default_bearer_token_and_server(
+        &path,
+        args.encrypted,
+        password.as_ref(),
+        server_bind,
+        server_port,
+    )?;
 
-    if let Some(password) = password.as_ref() {
-        match ConfigKeyring::default().store_password(&path, password.expose_secret()) {
-            KeyringStoreOutcome::Stored => {}
-            KeyringStoreOutcome::SoftFailure(error) => {
-                let cleanup_note = match std::fs::remove_file(&path) {
-                    Ok(()) => " removed the newly created encrypted config file".to_owned(),
-                    Err(remove_error) => format!(
-                        " failed to remove the newly created encrypted config file '{}': {remove_error}",
-                        path.display()
-                    ),
-                };
-
-                return Err(ConfigCommandError::new(format!("{error};{cleanup_note}")));
-            }
-        }
+    if args.encrypted {
+        forget_keyring_password_if_present(&path);
     }
 
     print_generated_bearer_token("default", &default_bearer_token);
@@ -325,9 +327,7 @@ pub fn edit(args: ConfigEditArgs) -> Result<PathBuf, ConfigCommandError> {
 
 pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> {
     let start_args = StartArgs {
-        bind: DEFAULT_BIND
-            .parse()
-            .expect("default bind address should parse"),
+        bind: None,
         config: args.config,
         password: None,
         log_level: args.log_level,

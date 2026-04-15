@@ -8,7 +8,7 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::config::secrets::AccessLevel;
+use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
 
 use super::ConfigError;
 use super::crypto::{
@@ -106,8 +106,24 @@ pub fn init_config_with_default_bearer_token(
     encrypted: bool,
     password: Option<&SecretString>,
 ) -> Result<String, WriteConfigError> {
+    init_config_with_default_bearer_token_and_server(
+        path,
+        encrypted,
+        password,
+        DEFAULT_SERVER_BIND,
+        DEFAULT_SERVER_PORT,
+    )
+}
+
+pub fn init_config_with_default_bearer_token_and_server(
+    path: &Path,
+    encrypted: bool,
+    password: Option<&SecretString>,
+    server_bind: &str,
+    server_port: u16,
+) -> Result<String, WriteConfigError> {
     let default_bearer_token = generate_bearer_token()?;
-    let config = render_initial_config(&default_bearer_token)?;
+    let config = render_initial_config(&default_bearer_token, server_bind, server_port)?;
     let format = if encrypted {
         ConfigFileFormat::AgeEncryptedToml
     } else {
@@ -257,13 +273,31 @@ pub fn sha256_hex(value: &str) -> String {
     hex_encode(&digest)
 }
 
-fn render_initial_config(default_bearer_token: &str) -> Result<String, WriteConfigError> {
+fn render_initial_config(
+    default_bearer_token: &str,
+    server_bind: &str,
+    server_port: u16,
+) -> Result<String, WriteConfigError> {
     let metadata = bearer_token_metadata(default_bearer_token, default_bearer_token_expires_at()?)?;
+    let mut document = DocumentMut::new();
 
-    Ok(format!(
-        "[clients.default]\nbearer_token_id = \"{}\"\nbearer_token_hash = \"{}\"\nbearer_token_expires_at = \"{}\"\napi_access = {{}}\n\n[groups]\n\n[apis]\n",
-        metadata.id, metadata.hash, metadata.expires_at,
-    ))
+    let clients = get_or_insert_table(document.as_table_mut(), "clients")?;
+    let default_client = get_or_insert_table(clients, "default")?;
+    apply_bearer_metadata(default_client, &metadata);
+    set_api_access_inline_table(
+        default_client,
+        "api_access",
+        &std::collections::BTreeMap::new(),
+    );
+
+    let server = get_or_insert_table(document.as_table_mut(), "server")?;
+    set_string(server, "bind", server_bind);
+    set_integer(server, "port", u64::from(server_port))?;
+
+    get_or_insert_table(document.as_table_mut(), "groups")?;
+    get_or_insert_table(document.as_table_mut(), "apis")?;
+
+    Ok(document.to_string())
 }
 
 fn resolve_client_upsert(
