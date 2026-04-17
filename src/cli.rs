@@ -30,6 +30,8 @@ pub enum Command {
     #[command(name = "config")]
     #[command(about = "Create or update config entries")]
     Config(ConfigArgs),
+    #[command(about = "Print build version")]
+    Version,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -307,18 +309,19 @@ impl Cli {
 }
 
 impl Command {
-    pub fn log_level(&self) -> &str {
+    pub fn log_level(&self) -> Option<&str> {
         match self {
-            Self::Start(args) => &args.log_level,
+            Self::Start(args) => Some(&args.log_level),
             Self::Config(args) => match &args.command {
-                ConfigCommand::Init(args) => &args.log_level,
-                ConfigCommand::Validate(args) => &args.log_level,
-                ConfigCommand::Show(args) => &args.log_level,
-                ConfigCommand::Edit(args) => &args.log_level,
-                ConfigCommand::AddApi(args) => &args.log_level,
-                ConfigCommand::AddGroup(args) => &args.log_level,
-                ConfigCommand::AddClient(args) => &args.log_level,
+                ConfigCommand::Init(args) => Some(&args.log_level),
+                ConfigCommand::Validate(args) => Some(&args.log_level),
+                ConfigCommand::Show(args) => Some(&args.log_level),
+                ConfigCommand::Edit(args) => Some(&args.log_level),
+                ConfigCommand::AddApi(args) => Some(&args.log_level),
+                ConfigCommand::AddGroup(args) => Some(&args.log_level),
+                ConfigCommand::AddClient(args) => Some(&args.log_level),
             },
+            Self::Version => None,
         }
     }
 }

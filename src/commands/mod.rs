@@ -8,12 +8,14 @@ use crate::cli::{
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
+use crate::config::app_config::DEFAULT_LOG_LEVEL;
 use crate::config::secrets::{DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
 pub mod config;
 pub mod start;
+pub mod version;
 
 #[derive(Debug)]
 pub struct CommandError {
@@ -49,11 +51,16 @@ impl From<AppError> for CommandError {
 }
 
 pub fn run(command: Command) -> Result<(), CommandError> {
-    init_tracing(command.log_level())?;
+    if matches!(command, Command::Version) {
+        return version::run();
+    }
+
+    init_tracing(command.log_level().unwrap_or(DEFAULT_LOG_LEVEL))?;
 
     match command {
         Command::Start(args) => run_start(args),
         Command::Config(args) => run_config(args),
+        Command::Version => version::run(),
     }
 }
 

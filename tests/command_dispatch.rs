@@ -14,6 +14,10 @@ use toml::Value;
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
+const VERSION_DISPATCH_HELPER_ENV_VAR: &str = "GATE_AGENT_VERSION_DISPATCH_HELPER";
+const VERSION_DISPATCH_HELPER_TEST: &str =
+    "version_command_dispatch_skips_tracing_bootstrap_helper";
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const VALID_CONFIG: &str = r#"
 [clients.default]
@@ -171,9 +175,21 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
             .and_then(Value::as_str)
             .is_some()
     );
-    assert!(client.get("api_access").and_then(Value::as_table).is_some());
+    assert_eq!(
+        client.get("group").and_then(Value::as_str),
+        Some("local-default")
+    );
+    assert!(client.get("api_access").is_none());
     assert!(written.get("clients").and_then(Value::as_table).is_some());
     assert!(written.get("groups").and_then(Value::as_table).is_some());
+    assert!(
+        written
+            .get("groups")
+            .and_then(|value| value.get("local-default"))
+            .and_then(|value| value.get("api_access"))
+            .and_then(Value::as_table)
+            .is_some()
+    );
     assert!(written.get("apis").and_then(Value::as_table).is_some());
 
     Ok(())
@@ -430,6 +446,107 @@ fn cli_rejects_removed_api_key_flags_for_config_add_client() {
         .kind(),
         ErrorKind::UnknownArgument
     );
+}
+
+#[test]
+fn version_command_dispatch_runs_version_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+
+    gate_agent::commands::version::write_version(&mut output)?;
+
+    assert_eq!(output, format!("{PACKAGE_VERSION}\n").into_bytes());
+
+    Ok(())
+}
+
+#[test]
+fn version_command_binary_prints_exact_package_version() -> Result<(), Box<dyn std::error::Error>> {
+    let output = AssertCommand::cargo_bin("gate-agent")?
+        .args(["version"])
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("{PACKAGE_VERSION}\n")
+    );
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    Ok(())
+}
+
+#[test]
+fn version_command_binary_succeeds_without_home_or_prompt_env()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+
+    let output = AssertCommand::cargo_bin("gate-agent")?
+        .current_dir(&workspace)
+        .env_remove("HOME")
+        .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
+        .env_remove(DISABLE_INTERACTIVE_ENV_VAR)
+        .args(["version"])
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("{PACKAGE_VERSION}\n")
+    );
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    Ok(())
+}
+
+#[test]
+fn version_command_dispatch_skips_tracing_bootstrap() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", VERSION_DISPATCH_HELPER_TEST, "--nocapture"])
+        .env(VERSION_DISPATCH_HELPER_ENV_VAR, "1")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "helper stdout:\n{}\nhelper stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn version_command_dispatch_skips_tracing_bootstrap_helper()
+-> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os(VERSION_DISPATCH_HELPER_ENV_VAR).is_none() {
+        return Ok(());
+    }
+
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+
+    unsafe {
+        std::env::remove_var("HOME");
+        std::env::remove_var(TEST_PROMPT_INPUTS_ENV_VAR);
+        std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
+    }
+
+    tracing_subscriber::fmt()
+        .with_test_writer()
+        .try_init()
+        .expect("helper tracing subscriber should initialize");
+
+    gate_agent::commands::run(Command::Version)?;
+
+    Ok(())
 }
 
 #[test]

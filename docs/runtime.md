@@ -19,12 +19,16 @@ The product startup flow must be:
 5. build the HTTP router
 6. start serving requests
 
+Not every CLI command enters this startup flow. Metadata-only commands may exit after CLI parsing without loading config or constructing runtime state.
+
 The runtime router must expose both product entrypoints:
 
 - `/proxy/...` for direct HTTP proxy traffic
 - `/mcp` for MCP JSON-RPC traffic over HTTP
 
-CLI success, including built-in `--help`, must exit zero.
+`version` is a metadata-only command. It prints build version information and exits before config loading, runtime state construction, and listener startup.
+
+CLI success, including built-in `--help` and `version`, must exit zero.
 
 CLI failure output must match the current command behavior:
 
