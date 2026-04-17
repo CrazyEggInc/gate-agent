@@ -16,7 +16,6 @@ Download a release binary from GitHub Releases and put `gate-agent` on your `PAT
 Use one archive name:
 
 - Linux: `gate-agent-v${VERSION}-linux-x64.tar.gz`
-- macOS Intel: `gate-agent-v${VERSION}-macos-x64.tar.gz`
 - macOS Apple Silicon: `gate-agent-v${VERSION}-macos-arm64.tar.gz`
 
 ```sh

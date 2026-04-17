@@ -79,9 +79,6 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset_name: linux-x64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset_name: macos-x64
           - os: macos-14
             target: aarch64-apple-darwin
             asset_name: macos-arm64
@@ -168,7 +165,6 @@ jobs:
           fi
           gh release upload -R "${GH_REPO}" "${RELEASE_TAG}" \
             "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz#linux-x64" \
-            "dist/gate-agent-${RELEASE_TAG}-macos-x64.tar.gz#macos-x64" \
             "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz#macos-arm64" \
             "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt" \
             --clobber
