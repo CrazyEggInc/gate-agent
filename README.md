@@ -129,3 +129,10 @@ cargo test
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## Release process
+
+1. update `version = "..."` in `Cargo.toml`
+2. merge that change to `master`
+3. create tag `vX.Y.Z` from the same commit
+4. let GitHub Actions build and publish release artifacts from that tag
