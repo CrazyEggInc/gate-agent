@@ -14,6 +14,11 @@ on:
         description: Release version or tag name. Leave empty to publish a SHA-based release.
         required: false
         type: string
+      publish:
+        description: Publish GitHub release after build completes.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -126,6 +131,7 @@ jobs:
     needs:
       - prepare
       - build
+    if: github.event_name == 'push' || inputs.publish
     steps:
       - name: Download packaged archives
         uses: actions/download-artifact@v4
