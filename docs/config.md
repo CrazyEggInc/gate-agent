@@ -165,17 +165,13 @@ Validation expectations:
 
 - at least one client is required
 - `clients.default` is the conventional local/dev client
-- generated configs may start with empty `[groups]` and `[apis]`
+- generated configs may start with empty group access maps and empty `[apis]`
 
 ## Sample config
 
 `.secrets.example` is the runnable local/dev sample:
 
 ```toml
-[server]
-bind = "127.0.0.1"
-port = 8787
-
 [groups.local-default]
 api_access = { projects = "read" }
 
@@ -187,14 +183,14 @@ group = "local-default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
-description = "Local dummy upstream projects API"
-docs_url = "https://internal.example/docs/projects"
 auth_header = "authorization"
 auth_value = "Bearer local-upstream-token"
 timeout_ms = 5000
 ```
 
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
+
+This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes `projects = "read"` together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.local-default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and access rules.
 
 ## CLI-assisted config management
 
@@ -210,10 +206,11 @@ Behavior:
 - creates parent directories as needed
 - writes a minimal config with:
   - explicit `[server]` settings for bind and port
+  - explicit `[groups]` with `[groups.local-default]`
+  - `groups.local-default.api_access = {}`
   - generated `clients.default` bearer token metadata
   - generated `bearer_token_expires_at` about 180 days in the future
-  - empty `api_access = {}` for `clients.default`
-  - empty `[groups]`
+  - `clients.default.group = "local-default"`
   - empty `[apis]`
 - prints the generated default client bearer token once to stdout
 - persists only the token id, hash, and expiry
@@ -221,6 +218,8 @@ Behavior:
   - `Server bind (default: 127.0.0.1; remote setups should use 0.0.0.0)`
   - `Server port (default: 8787)`
 - when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
+
+Fresh init keeps `groups.local-default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting `projects = "read"` there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample access.
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions

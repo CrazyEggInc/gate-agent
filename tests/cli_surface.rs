@@ -18,10 +18,34 @@ fn top_level_help_lists_only_supported_commands() -> Result<(), Box<dyn std::err
     assert!(stdout.contains("Start the local proxy server"));
     assert!(stdout.contains("config"));
     assert!(stdout.contains("Create or update config entries"));
+    assert!(stdout.contains("version"));
+    assert!(stdout.contains("Print build version"));
     assert!(!stdout.contains("curl"));
     assert!(!stdout.contains("\n  help  "));
 
     Ok(())
+}
+
+#[test]
+fn version_help_shows_command_local_help() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["version", "--help"])?;
+
+    assert!(stdout.contains("Print build version"));
+    assert!(!stdout.contains("--log-level"));
+    assert!(!stdout.contains("start"));
+    assert!(!stdout.contains("config"));
+
+    Ok(())
+}
+
+#[test]
+fn version_parses_to_version_command() {
+    let parsed = Cli::try_parse_from(["gate-agent", "version"]).expect("parses");
+
+    match parsed.command() {
+        CliCommand::Version => {}
+        other => panic!("expected version command, got {other:?}"),
+    }
 }
 
 #[test]

@@ -8,6 +8,7 @@ The CLI supports two jobs:
 
 - start the local proxy
 - manage config files
+- print build version metadata
 
 ## Top-level commands
 
@@ -15,6 +16,7 @@ The top-level commands are:
 
 - `start`
 - `config`
+- `version`
 
 Command discovery uses built-in `--help` on the root command and subcommands.
 
@@ -240,6 +242,22 @@ Rules and behavior:
 - when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
 - explicit args keep the command non-interactive
 
+## `version`
+
+Accepted flags:
+
+- none
+
+Behavior:
+
+- prints the exact build version string to stdout followed by a trailing newline
+- writes nothing to stderr on success
+- exits zero on success
+- does not read config
+- does not write config
+- does not prompt
+- does not contact upstream services
+
 ## Logging control
 
 The CLI exposes `--log-level <level>` as application verbosity control.
@@ -264,6 +282,7 @@ Examples:
 gate-agent --help
 gate-agent start --help
 gate-agent config --help
+gate-agent version --help
 gate-agent config init --help
 gate-agent config validate --help
 gate-agent config show --help
@@ -271,10 +290,12 @@ gate-agent config edit --help
 gate-agent config add-api --help
 gate-agent config add-group --help
 gate-agent config add-client --help
+gate-agent version
 ```
 
 ## Exit behavior
 
 - successful commands exit zero
+- `version` success means exact version string on stdout, empty stderr, and exit code `0`
 - `config validate` prints structured JSON errors on invalid config
 - other failures print a human-readable error to stderr and exit non-zero

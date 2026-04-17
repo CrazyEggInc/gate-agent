@@ -230,6 +230,20 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
     let config = load_toml(&config_path)?;
     assert_client_metadata_matches(&config, "default", &tokens[0].1);
     assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
+    let default_client = table_at(&config, &["clients", "default"]);
+    assert_eq!(
+        default_client.get("group").and_then(Value::as_str),
+        Some("local-default")
+    );
+    assert!(default_client.get("api_access").is_none());
+    assert!(config.get("server").and_then(Value::as_table).is_some());
+    assert!(config.get("apis").and_then(Value::as_table).is_some());
+    let default_group = table_at(&config, &["groups", "local-default"]);
+    let default_group_api_access = default_group
+        .get("api_access")
+        .and_then(Value::as_table)
+        .expect("groups.local-default.api_access should be table");
+    assert!(default_group_api_access.is_empty());
     assert_eq!(string_at(&config, &["server", "bind"]), "127.0.0.1");
     assert_eq!(
         config
@@ -238,6 +252,10 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
             .and_then(Value::as_integer),
         Some(8787)
     );
+    validate(ConfigValidateArgs {
+        config: Some(config_path.clone()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
 
     Ok(())
 }

@@ -284,17 +284,19 @@ fn render_initial_config(
     let clients = get_or_insert_table(document.as_table_mut(), "clients")?;
     let default_client = get_or_insert_table(clients, "default")?;
     apply_bearer_metadata(default_client, &metadata);
-    set_api_access_inline_table(
-        default_client,
-        "api_access",
-        &std::collections::BTreeMap::new(),
-    );
+    set_string(default_client, "group", "local-default");
 
     let server = get_or_insert_table(document.as_table_mut(), "server")?;
     set_string(server, "bind", server_bind);
     set_integer(server, "port", u64::from(server_port))?;
 
-    get_or_insert_table(document.as_table_mut(), "groups")?;
+    let groups = get_or_insert_table(document.as_table_mut(), "groups")?;
+    let local_default_group = get_or_insert_table(groups, "local-default")?;
+    set_api_access_inline_table(
+        local_default_group,
+        "api_access",
+        &std::collections::BTreeMap::new(),
+    );
     get_or_insert_table(document.as_table_mut(), "apis")?;
 
     Ok(document.to_string())

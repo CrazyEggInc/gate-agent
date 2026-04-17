@@ -33,17 +33,17 @@ Expected properties:
 
 ## Local config
 
-`.secrets.example` is the ready-to-run local sample.
+`.secrets.example` is ready-to-run local sample config.
 
-Its committed bearer token metadata uses a long-lived sample expiry so the documented local flow does not quietly age out during normal development. If you create a fresh config instead, prefer `config init` and save the printed token immediately.
+Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "local-default"`, `groups.local-default` grants `api_access = { projects = "read" }`, and `projects` points at dummy upstream with injected `Authorization: Bearer local-upstream-token`. If you create fresh config instead, prefer `config init` and save printed token immediately.
 
-Expected local defaults:
+Expected committed sample defaults:
 
 - a `default` client is available
 - `default` uses `group = "local-default"`
 - `groups.local-default` grants `api_access = { projects = "read" }`
-- the `projects` API points at the dummy upstream
-- the `projects` API injects `Authorization: Bearer local-upstream-token` upstream
+- `projects` points at dummy upstream
+- `projects` injects `Authorization: Bearer local-upstream-token` upstream
 
 The committed sample config stores only bearer token metadata. For local testing, the matching bearer token is:
 
@@ -64,7 +64,9 @@ Stdin-backed startup is also supported:
 cat .secrets.example | cargo run -- start --log-level info
 ```
 
-If you create a fresh config instead, `config init` prints the generated default bearer token once. Save it immediately; only the token id, hash, and expiry are persisted.
+If you create fresh config instead, `config init` prints generated default bearer token once. Save it immediately; only token id, hash, and expiry are persisted.
+
+Fresh configs created with `config init` now use same group-backed structure as committed sample, but they intentionally start with `clients.default.group = "local-default"` and `groups.local-default.api_access = {}`. Fresh init does not pre-authorize `projects`; add APIs first, then update group access or assign different group access before using proxy flow.
 
 Fresh configs created with `config init` also write an explicit `[server]` section. The questionnaire prompts for bind and port, defaults to `127.0.0.1:8787`, and remote-access setups should use `0.0.0.0` for the bind value.
 
