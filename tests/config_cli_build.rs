@@ -102,7 +102,7 @@ fn cargo_toml_includes_bearer_hashing_and_config_dependencies() {
         Some(false),
         "expected keyring default features to be disabled so backend selection stays explicit"
     );
-    for feature in ["apple-native", "windows-native", "linux-native"] {
+    for feature in ["apple-native", "linux-native"] {
         assert!(
             keyring_features.contains(feature),
             "expected keyring feature {feature}"

@@ -254,19 +254,23 @@ Invalid values fail startup.
 
 ## `--help`
 
+The CLI must rely on built-in `--help` output instead of a separate help command.
+
+Operator-facing examples use the compiled `gate-agent` binary. In a repo-local development checkout, `cargo run --` is the equivalent prefix.
+
 Examples:
 
 ```sh
-cargo run -- --help
-cargo run -- start --help
-cargo run -- config --help
-cargo run -- config init --help
-cargo run -- config validate --help
-cargo run -- config show --help
-cargo run -- config edit --help
-cargo run -- config add-api --help
-cargo run -- config add-group --help
-cargo run -- config add-client --help
+gate-agent --help
+gate-agent start --help
+gate-agent config --help
+gate-agent config init --help
+gate-agent config validate --help
+gate-agent config show --help
+gate-agent config edit --help
+gate-agent config add-api --help
+gate-agent config add-group --help
+gate-agent config add-client --help
 ```
 
 ## Exit behavior

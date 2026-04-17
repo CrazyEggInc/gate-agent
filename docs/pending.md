@@ -16,13 +16,6 @@ They must be treated as:
 
 They must not be described elsewhere as already implemented.
 
-## Build tooling
-
-- add linux/osx/windows builds to github releases
-- Update readme to use the built file on instructions
-- Update readme with binary install instructions
-- Add development section where we run command through cargo instead
-
 ## Auth and security
 
 - support additional upstream auth injection modes beyond static header injection
