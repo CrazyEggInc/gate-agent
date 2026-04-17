@@ -5,7 +5,7 @@ use assert_cmd::Command as AssertCommand;
 use clap::{Parser, error::ErrorKind};
 use gate_agent::cli::{
     Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigArgs,
-    ConfigCommand, ConfigInitArgs, ConfigValidateArgs,
+    ConfigCommand, ConfigInitArgs, ConfigRotateClientSecretArgs, ConfigValidateArgs,
 };
 use gate_agent::commands::config::{ConfigEditArgs, ConfigShowArgs};
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
@@ -77,6 +77,7 @@ fn add_api_args(config: PathBuf, auth_header: &str, auth_value: &str) -> ConfigA
 struct EnvGuard {
     original_dir: PathBuf,
     original_home: Option<String>,
+    original_test_prompt_inputs: Option<String>,
     original_disable_interactive: Option<String>,
 }
 
@@ -84,6 +85,7 @@ impl EnvGuard {
     fn enter(current_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let original_dir = std::env::current_dir()?;
         let original_home = std::env::var("HOME").ok();
+        let original_test_prompt_inputs = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok();
         let original_disable_interactive = std::env::var(DISABLE_INTERACTIVE_ENV_VAR).ok();
 
         std::env::set_current_dir(current_dir)?;
@@ -94,6 +96,7 @@ impl EnvGuard {
         Ok(Self {
             original_dir,
             original_home,
+            original_test_prompt_inputs,
             original_disable_interactive,
         })
     }
@@ -107,6 +110,11 @@ impl Drop for EnvGuard {
             match &self.original_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+
+            match &self.original_test_prompt_inputs {
+                Some(value) => std::env::set_var(TEST_PROMPT_INPUTS_ENV_VAR, value),
+                None => std::env::remove_var(TEST_PROMPT_INPUTS_ENV_VAR),
             }
 
             match &self.original_disable_interactive {
@@ -395,6 +403,165 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn config_command_dispatch_runs_rotate_client_secret_subcommand()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "mobile-app".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,reports=write".to_owned()],
+    })?;
+
+    let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let original_token_id = before
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(|value| value.get("bearer_token_id"))
+        .and_then(Value::as_str)
+        .expect("existing bearer token id")
+        .to_owned();
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::RotateClientSecret(ConfigRotateClientSecretArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            name: "mobile-app".to_owned(),
+            bearer_token_expires_at: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(Value::as_table)
+        .expect("mobile-app client config");
+
+    let rotated_token_id = client
+        .get("bearer_token_id")
+        .and_then(Value::as_str)
+        .expect("rotated bearer token id");
+    assert!(!rotated_token_id.is_empty());
+    assert_ne!(rotated_token_id, original_token_id);
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
+        Some("2030-01-02T03:04:05Z")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_resolves_rotate_client_secret_name_interactively()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["mobile-app"])?,
+        );
+    }
+
+    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "mobile-app".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,reports=write".to_owned()],
+    })?;
+
+    let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let original_token_id = before
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(|value| value.get("bearer_token_id"))
+        .and_then(Value::as_str)
+        .expect("existing bearer token id")
+        .to_owned();
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::RotateClientSecret(ConfigRotateClientSecretArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            name: String::new(),
+            bearer_token_expires_at: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(Value::as_table)
+        .expect("mobile-app client config");
+
+    let rotated_token_id = client
+        .get("bearer_token_id")
+        .and_then(Value::as_str)
+        .expect("rotated bearer token id");
+    assert!(!rotated_token_id.is_empty());
+    assert_ne!(rotated_token_id, original_token_id);
+    assert!(
+        client
+            .get("bearer_token_hash")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
+        Some("2030-01-02T03:04:05Z")
+    );
+    assert_eq!(
+        client
+            .get("api_access")
+            .and_then(|value| value.get("projects"))
+            .and_then(Value::as_str),
+        Some("read")
+    );
+    assert_eq!(
+        client
+            .get("api_access")
+            .and_then(|value| value.get("reports"))
+            .and_then(Value::as_str),
+        Some("write")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn cli_rejects_obsolete_curl_subcommand() {
     assert_eq!(
         Cli::try_parse_from(["gate-agent", "curl"])
@@ -602,6 +769,86 @@ fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
         .and_then(Value::as_table)
         .expect("mobile-app client config");
 
+    assert_eq!(
+        client.get("bearer_token_id").and_then(Value::as_str),
+        Some(token_id)
+    );
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
+        Some("2030-01-02T03:04:05Z")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_rotate_client_secret_prints_generated_bearer_token_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "mobile-app".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,reports=write".to_owned()],
+    })?;
+
+    let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let original_token_id = before
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(|value| value.get("bearer_token_id"))
+        .and_then(Value::as_str)
+        .expect("existing bearer token id")
+        .to_owned();
+
+    let output = AssertCommand::cargo_bin("gate-agent")?
+        .current_dir(&workspace)
+        .env("HOME", temp_dir.path().join("home"))
+        .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
+        .args([
+            "config",
+            "rotate-client-secret",
+            "--config",
+            config_path.to_str().expect("utf-8 config path"),
+            "--name",
+            "mobile-app",
+        ])
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let printed_lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(printed_lines.len(), 1);
+
+    let full_token =
+        parse_printed_token(printed_lines[0], "mobile-app").expect("printed bearer token");
+    let (token_id, secret) = split_full_token(&full_token).expect("full bearer token format");
+    assert!(!secret.is_empty());
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(Value::as_table)
+        .expect("mobile-app client config");
+
+    assert_ne!(token_id, original_token_id);
     assert_eq!(
         client.get("bearer_token_id").and_then(Value::as_str),
         Some(token_id)

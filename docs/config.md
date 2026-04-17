@@ -38,8 +38,14 @@ The same path may contain either:
 
 - plaintext TOML
 - ASCII-armored `age` passphrase-encrypted content
+- binary `age` passphrase-encrypted content
 
 Detection is content-based. File extension does not control parsing mode.
+
+Encrypted read expectations:
+
+- passphrase-encrypted `age` reads support standard CLI `age` passphrase files in ASCII-armored or binary form
+- encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
 
 ## Password sources
 
@@ -59,6 +65,8 @@ Behavior:
 - encrypted init removes any existing cached keyring password for that config path
 - successful encrypted reads may backfill the keyring for that config path
 - stale cached passwords are removed automatically when they stop decrypting the file
+- wrong-password decrypt failures stay concise and operator-facing
+- unsupported `age` modes, malformed or corrupted encrypted files, and excessive scrypt work factors return specific operator-facing decrypt errors
 
 ## Runtime config model
 
@@ -235,7 +243,7 @@ When encryption is enabled:
 
 - resolves the target path using read precedence
 - prints plaintext TOML to stdout
-- decrypts first when the selected file is encrypted
+- decrypts first when the selected file is encrypted, whether `age` content is ASCII-armored or binary
 
 ### `config edit`
 
@@ -266,7 +274,9 @@ Behavior:
 - when `auth_header` is omitted, writes no upstream auth fields and injects no upstream auth header at runtime
 - uses `5000` when `--timeout-ms` is omitted
 - preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt
+- successful decrypts from flag, env, or prompt backfill the keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately in a single-line format with minimal wording
 
@@ -301,12 +311,44 @@ Behavior:
 - writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
-- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt
+- successful decrypts from flag, env, or prompt backfill the keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately
 - the access prompt shows existing group slugs as available options when any exist
 - the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`
 - prompts stay single-line and avoid extra descriptive text when the question itself is already clear
 - explicit args keep the command non-interactive
+
+### `config rotate-client-secret`
+
+This command rotates bearer-token credentials for an existing `[clients.<slug>]` entry.
+
+Accepted flags:
+
+- `--name`
+- `--bearer-token-expires-at`
+
+Behavior:
+
+- validates slug and timestamp inputs before writing
+- requires an existing config file; it does not create one implicitly
+- requires an existing client entry; it does not create one implicitly
+- generates a brand-new bearer token for that client
+- prints replacement bearer token once so the operator can capture it
+- persists only `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
+- never persists plaintext bearer token
+- preserves current `group` or inline `api_access` unchanged
+- preserves current expiry when `--bearer-token-expires-at` is omitted
+- writes supplied expiry when `--bearer-token-expires-at` is present
+- preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt
+- successful decrypts from flag, env, or prompt backfill the keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
+- preserves existing encrypted/plaintext storage mode instead of rewriting config into a different format
+- when required operator input is missing in an interactive session, prompts for client name in same minimal single-line style as other config mutators
+
+The CLI name uses “client secret” for operator ergonomics, but stored config model remains bearer-token metadata.
 
 ### `config add-group`
 
@@ -318,7 +360,9 @@ Behavior:
 - prompts for the name and inline `api_access` when that required input is missing in an interactive session, in a single-line format with minimal wording
 - creates config if it does not exist yet
 - preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password resolution follows flag → env → keyring → prompt without writing new keyring entries
+- when updating an encrypted config, password resolution follows flag → env → keyring → prompt
+- successful decrypts from flag, env, or prompt backfill the keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
 
 ## Mutation expectations

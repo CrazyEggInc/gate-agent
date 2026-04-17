@@ -12,8 +12,8 @@ use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PO
 
 use super::ConfigError;
 use super::crypto::{
-    ConfigFileFormat, LoadedConfigText, detect_format, load_config_text, serialize_for_format,
-    write_config_file_atomic,
+    ConfigFileFormat, LoadedConfigText, load_config_text, resolve_format_from_bytes,
+    serialize_for_format, write_config_file_atomic,
 };
 
 const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
@@ -234,13 +234,13 @@ pub fn replace_config_contents(
     contents: &str,
     password: Option<&SecretString>,
 ) -> Result<(), WriteConfigError> {
-    let raw_contents = fs::read_to_string(path).map_err(|error| {
+    let raw_contents = fs::read(path).map_err(|error| {
         WriteConfigError::new(format!(
             "failed to read config file '{}': {error}",
             path.display()
         ))
     })?;
-    let format = detect_format(&raw_contents);
+    let format = resolve_format_from_bytes(path, &raw_contents)?;
     let serialized = serialize_for_format(&format, contents, password)?;
     write_config_file_atomic(path, &serialized)?;
     Ok(())

@@ -14,8 +14,7 @@ use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
 use crate::config::password::{
     PasswordArgs, PasswordSource, forget_keyring_password_if_present, remember_password_if_needed,
-    resolve_for_encrypted_create, resolve_for_encrypted_read,
-    resolve_for_encrypted_read_with_source,
+    resolve_for_encrypted_create, resolve_for_encrypted_read_with_source,
 };
 use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
 use crate::config::secrets::SecretsConfig;
@@ -149,11 +148,40 @@ pub struct ConfigAddGroupArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigRotateClientSecretArgs {
+    pub config: Option<PathBuf>,
+    pub password: Option<String>,
+    pub log_level: String,
+    pub name: String,
+    pub bearer_token_expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddClientOutcome {
     pub path: PathBuf,
     pub generated_bearer_token: Option<String>,
     pub bearer_token_expires_at: String,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotateClientSecretOutcome {
+    pub path: PathBuf,
+    pub generated_bearer_token: String,
+    pub bearer_token_expires_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct ExistingClientState {
+    expires_at: String,
+    access: ClientAccessUpsert,
+}
+
+struct PreparedConfigAccess {
+    password: Option<secrecy::SecretString>,
+    toml: Option<String>,
+}
+
+const MAX_ROTATE_TOKEN_ATTEMPTS: usize = 8;
 
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
     init_with_server(
@@ -209,120 +237,54 @@ pub(crate) fn default_init_config_path() -> Result<PathBuf, ConfigCommandError> 
 
 pub fn show(args: ConfigShowArgs) -> Result<String, ConfigCommandError> {
     let path = resolve_existing_path(args.config.as_deref())?;
-    let password_args = PasswordArgs {
-        password: args.password,
-    };
-    let raw_contents = std::fs::read_to_string(&path).map_err(|error| {
-        ConfigCommandError::new(format!(
-            "failed to read config file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let password = if crate::config::crypto::detect_format(&raw_contents)
-        == crate::config::crypto::ConfigFileFormat::AgeEncryptedToml
-    {
-        let resolved = resolve_for_encrypted_read_with_source(&password_args, &path)?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
 
-        match write::load_display_text(&path, Some(&resolved.password)) {
-            Ok(loaded) => {
-                remember_password_if_needed(&path, &resolved);
-                return Ok(loaded.toml);
-            }
-            Err(error) => {
-                if matches!(resolved.source, PasswordSource::Keyring)
-                    && error.to_string().contains(&format!(
-                        "invalid password for config file '{}'",
-                        path.display()
-                    ))
-                {
-                    forget_keyring_password_if_present(&path);
-                }
+    if let Some(toml) = prepared.toml {
+        return Ok(toml);
+    }
 
-                return Err(error.into());
-            }
-        }
-    } else {
-        None
-    };
-
-    let loaded = write::load_display_text(&path, password.as_ref())?;
+    let loaded = write::load_display_text(&path, prepared.password.as_ref())?;
     Ok(loaded.toml)
 }
 
 pub fn edit(args: ConfigEditArgs) -> Result<PathBuf, ConfigCommandError> {
     let path = resolve_existing_path(args.config.as_deref())?;
-    let password_args = PasswordArgs {
-        password: args.password,
-    };
-    let raw_contents = std::fs::read_to_string(&path).map_err(|error| {
-        ConfigCommandError::new(format!(
-            "failed to read config file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let encrypted = crate::config::crypto::detect_format(&raw_contents)
-        == crate::config::crypto::ConfigFileFormat::AgeEncryptedToml;
-    if encrypted {
-        let resolved = resolve_for_encrypted_read_with_source(&password_args, &path)?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
 
-        match write::load_display_text(&path, Some(&resolved.password)) {
-            Ok(loaded) => {
-                remember_password_if_needed(&path, &resolved);
+    if let Some(toml) = prepared.toml {
+        let password = prepared
+            .password
+            .ok_or_else(|| ConfigCommandError::new("missing password for encrypted config"))?;
 
-                let mut temp_file = tempfile::NamedTempFile::new().map_err(|error| {
-                    ConfigCommandError::new(format!(
-                        "failed to create temporary edit file: {error}"
-                    ))
-                })?;
-                std::io::Write::write_all(&mut temp_file, loaded.toml.as_bytes()).map_err(
-                    |error| {
-                        ConfigCommandError::new(format!(
-                            "failed to write temporary edit file: {error}"
-                        ))
-                    },
-                )?;
+        let mut temp_file = tempfile::NamedTempFile::new().map_err(|error| {
+            ConfigCommandError::new(format!("failed to create temporary edit file: {error}"))
+        })?;
+        std::io::Write::write_all(&mut temp_file, toml.as_bytes()).map_err(|error| {
+            ConfigCommandError::new(format!("failed to write temporary edit file: {error}"))
+        })?;
 
-                open_in_editor(temp_file.path())?;
+        open_in_editor(temp_file.path())?;
 
-                let edited = std::fs::read_to_string(temp_file.path()).map_err(|error| {
-                    ConfigCommandError::new(format!(
-                        "failed to read edited temporary config: {error}"
-                    ))
-                })?;
-                SecretsConfig::parse_from_str(&edited, &path)?;
-                write::replace_config_contents(&path, &edited, Some(&resolved.password))?;
+        let edited = std::fs::read_to_string(temp_file.path()).map_err(|error| {
+            ConfigCommandError::new(format!("failed to read edited temporary config: {error}"))
+        })?;
+        SecretsConfig::parse_from_str(&edited, &path)?;
+        write::replace_config_contents(&path, &edited, Some(&password))?;
 
-                return Ok(path);
-            }
-            Err(error) => {
-                if matches!(resolved.source, PasswordSource::Keyring)
-                    && error.to_string().contains(&format!(
-                        "invalid password for config file '{}'",
-                        path.display()
-                    ))
-                {
-                    forget_keyring_password_if_present(&path);
-                }
-
-                return Err(error.into());
-            }
-        }
-    }
-
-    if !encrypted {
-        open_in_editor(&path)?;
-        SecretsConfig::parse_from_str(
-            &std::fs::read_to_string(&path).map_err(|error| {
-                ConfigCommandError::new(format!(
-                    "failed to read edited config file '{}': {error}",
-                    path.display()
-                ))
-            })?,
-            &path,
-        )?;
         return Ok(path);
     }
-    unreachable!("encrypted edit path returns earlier")
+
+    open_in_editor(&path)?;
+    SecretsConfig::parse_from_str(
+        &std::fs::read_to_string(&path).map_err(|error| {
+            ConfigCommandError::new(format!(
+                "failed to read edited config file '{}': {error}",
+                path.display()
+            ))
+        })?,
+        &path,
+    )?;
+    Ok(path)
 }
 
 pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> {
@@ -380,7 +342,7 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
 
     let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let password = password_for_existing_encrypted_file(&path, args.password)?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
     write::upsert_api(
         &path,
         &ApiUpsert {
@@ -390,7 +352,7 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
             auth_value,
             timeout_ms: args.timeout_ms,
         },
-        password.as_ref(),
+        prepared.password.as_ref(),
     )?;
 
     if let Some(token) = generated_default_bearer_token.as_deref() {
@@ -433,8 +395,11 @@ pub fn add_client_with_result(
 
     let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let password = password_for_existing_encrypted_file(&path, args.password)?;
-    let existing = load_existing_client_bearer_metadata(&path, password.as_ref(), &args.name)?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
+    let existing = match prepared.toml.as_deref() {
+        Some(toml) => load_existing_client_bearer_metadata_from_toml(&path, toml, &args.name)?,
+        None => load_existing_client_bearer_metadata(&path, None, &args.name)?,
+    };
     let resolved = resolve_bearer_token_metadata(bearer_token_expires_at, existing)?;
 
     write::upsert_client(
@@ -448,7 +413,7 @@ pub fn add_client_with_result(
                 None => ClientAccessUpsert::ApiAccess(api_access),
             },
         },
-        password.as_ref(),
+        prepared.password.as_ref(),
     )?;
 
     if let Some(token) = generated_default_bearer_token.as_deref() {
@@ -479,14 +444,14 @@ pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError
 
     let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let password = password_for_existing_encrypted_file(&path, args.password)?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
     write::upsert_group(
         &path,
         &GroupUpsert {
             name: args.name,
             api_access,
         },
-        password.as_ref(),
+        prepared.password.as_ref(),
     )?;
 
     if let Some(token) = generated_default_bearer_token.as_deref() {
@@ -494,6 +459,68 @@ pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError
     }
 
     Ok(path)
+}
+
+pub fn rotate_client_secret(
+    args: ConfigRotateClientSecretArgs,
+) -> Result<RotateClientSecretOutcome, ConfigCommandError> {
+    ensure_slug("client", &args.name)?;
+
+    let expires_at_override = args
+        .bearer_token_expires_at
+        .as_deref()
+        .map(|value| {
+            let value = trimmed_required("bearer_token_expires_at", value)?;
+            validate_timestamp("bearer_token_expires_at", &value)?;
+            Ok::<String, ConfigCommandError>(value)
+        })
+        .transpose()?;
+
+    let path = resolve_existing_path(args.config.as_deref())?;
+    let prepared = prepare_existing_config_access(&path, args.password)?;
+    let existing = match prepared.toml.as_deref() {
+        Some(toml) => load_existing_client_state_from_toml(&path, toml, &args.name)?,
+        None => load_existing_client_state(&path, None, &args.name)?,
+    };
+    let expires_at = expires_at_override.unwrap_or(existing.expires_at.clone());
+
+    for _attempt in 0..MAX_ROTATE_TOKEN_ATTEMPTS {
+        let token = write::generate_bearer_token()?;
+        let result = write::upsert_client(
+            &path,
+            &ClientUpsert {
+                name: args.name.clone(),
+                bearer_token: Some(token.clone()),
+                bearer_token_expires_at: Some(expires_at.clone()),
+                access: existing.access.clone(),
+            },
+            prepared.password.as_ref(),
+        );
+
+        match result {
+            Ok(_) => {
+                print_generated_bearer_token(&args.name, &token);
+                return Ok(RotateClientSecretOutcome {
+                    path: path.clone(),
+                    generated_bearer_token: token,
+                    bearer_token_expires_at: expires_at,
+                });
+            }
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("duplicates another configured client bearer_token_id") =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(ConfigCommandError::new(format!(
+        "failed to generate unique bearer token id for client '{}' after {MAX_ROTATE_TOKEN_ATTEMPTS} attempts",
+        args.name
+    )))
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +535,73 @@ struct ResolvedBearerMetadata {
     generated_token: Option<String>,
 }
 
+fn load_existing_client_state(
+    path: &Path,
+    password: Option<&secrecy::SecretString>,
+    client_name: &str,
+) -> Result<ExistingClientState, ConfigCommandError> {
+    let loaded = write::load_display_text(path, password)?;
+    load_existing_client_state_from_toml(path, &loaded.toml, client_name)
+}
+
+fn load_existing_client_state_from_toml(
+    path: &Path,
+    contents: &str,
+    client_name: &str,
+) -> Result<ExistingClientState, ConfigCommandError> {
+    let document = parse_config(path, contents)?;
+    let client_table = find_table(document.as_table(), &["clients", client_name])
+        .ok_or_else(|| ConfigCommandError::new(format!("client '{}' not found", client_name)))?;
+
+    let expires_at =
+        find_string_value(client_table, "bearer_token_expires_at").ok_or_else(|| {
+            ConfigCommandError::new(format!(
+                "clients.{}.bearer_token_expires_at is required",
+                client_name
+            ))
+        })?;
+
+    let access = if let Some(group) = find_string_value(client_table, "group") {
+        ClientAccessUpsert::Group(group)
+    } else {
+        let api_access_table = client_table
+            .get("api_access")
+            .and_then(|item| item.as_value())
+            .and_then(toml_edit::Value::as_inline_table)
+            .ok_or_else(|| {
+                ConfigCommandError::new(format!(
+                    "client '{}' must declare existing group or api_access before rotation",
+                    client_name
+                ))
+            })?;
+
+        let mut api_access = BTreeMap::new();
+        for (api, value) in api_access_table.iter() {
+            let level = match value.as_str() {
+                Some("read") => AccessLevel::Read,
+                Some("write") => AccessLevel::Write,
+                Some(other) => {
+                    return Err(ConfigCommandError::new(format!(
+                        "clients.{}.api_access.{} has invalid level '{}'",
+                        client_name, api, other
+                    )));
+                }
+                None => {
+                    return Err(ConfigCommandError::new(format!(
+                        "clients.{}.api_access.{} must be a string",
+                        client_name, api
+                    )));
+                }
+            };
+            api_access.insert(api.to_owned(), level);
+        }
+
+        ClientAccessUpsert::ApiAccess(api_access)
+    };
+
+    Ok(ExistingClientState { expires_at, access })
+}
+
 pub(crate) fn list_group_slugs(
     cli_override: Option<&Path>,
     password: Option<String>,
@@ -518,9 +612,17 @@ pub(crate) fn list_group_slugs(
         return Ok(Vec::new());
     }
 
-    let password = password_for_existing_encrypted_file(&path, password)?;
-    let loaded = write::load_display_text(&path, password.as_ref())?;
-    let parsed: toml::Value = loaded.toml.parse().map_err(|error| {
+    let prepared = prepare_existing_config_access(&path, password)?;
+    let contents = match prepared.toml {
+        Some(toml) => toml,
+        None => std::fs::read_to_string(&path).map_err(|error| {
+            ConfigCommandError::new(format!(
+                "failed to read config file '{}': {error}",
+                path.display()
+            ))
+        })?,
+    };
+    let parsed: toml::Value = contents.parse().map_err(|error| {
         ConfigCommandError::new(format!(
             "failed to parse config file '{}': {error}",
             path.display()
@@ -698,7 +800,15 @@ fn load_existing_client_bearer_metadata(
     client_name: &str,
 ) -> Result<Option<ExistingBearerMetadata>, ConfigCommandError> {
     let loaded = write::load_display_text(path, password)?;
-    let document = parse_config(path, &loaded.toml)?;
+    load_existing_client_bearer_metadata_from_toml(path, &loaded.toml, client_name)
+}
+
+fn load_existing_client_bearer_metadata_from_toml(
+    path: &Path,
+    contents: &str,
+    client_name: &str,
+) -> Result<Option<ExistingBearerMetadata>, ConfigCommandError> {
+    let document = parse_config(path, contents)?;
     let Some(client_table) = find_table(document.as_table(), &["clients", client_name]) else {
         return Ok(None);
     };
@@ -779,25 +889,60 @@ fn find_string_value(table: &Table, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(str::to_owned)
 }
 
-fn password_for_existing_encrypted_file(
+fn prepare_existing_config_access(
     path: &Path,
     password: Option<String>,
-) -> Result<Option<secrecy::SecretString>, ConfigCommandError> {
-    let raw_contents = std::fs::read_to_string(path).map_err(|error| {
+) -> Result<PreparedConfigAccess, ConfigCommandError> {
+    let raw_contents = std::fs::read(path).map_err(|error| {
         ConfigCommandError::new(format!(
             "failed to read config file '{}': {error}",
             path.display()
         ))
     })?;
-    if crate::config::crypto::detect_format(&raw_contents)
-        != crate::config::crypto::ConfigFileFormat::AgeEncryptedToml
-    {
-        return Ok(None);
+    match crate::config::crypto::detect_format_from_bytes(&raw_contents) {
+        crate::config::crypto::DetectedConfigFormat::PlaintextToml => {
+            return Ok(PreparedConfigAccess {
+                password: None,
+                toml: None,
+            });
+        }
+        crate::config::crypto::DetectedConfigFormat::AgeEncryptedToml => {}
+        crate::config::crypto::DetectedConfigFormat::InvalidNonUtf8 => {
+            return Err(crate::config::crypto::invalid_non_utf8_config_error(path).into());
+        }
     }
 
-    resolve_for_encrypted_read(&PasswordArgs { password }, path)
-        .map(Some)
-        .map_err(|error| ConfigCommandError::new(error.to_string()))
+    let resolved = resolve_for_encrypted_read_with_source(&PasswordArgs { password }, path)
+        .map_err(|error| ConfigCommandError::new(error.to_string()))?;
+
+    match write::load_display_text(path, Some(&resolved.password)) {
+        Ok(loaded) => {
+            remember_password_if_needed(path, &resolved);
+            Ok(PreparedConfigAccess {
+                password: Some(resolved.password),
+                toml: Some(loaded.toml),
+            })
+        }
+        Err(error) => {
+            forget_stale_keyring_password_if_needed(path, &resolved.source, &error);
+            Err(error.into())
+        }
+    }
+}
+
+fn forget_stale_keyring_password_if_needed(
+    path: &Path,
+    source: &PasswordSource,
+    error: &WriteConfigError,
+) {
+    if matches!(source, PasswordSource::Keyring)
+        && error.to_string().contains(&format!(
+            "invalid password for config file '{}'",
+            path.display()
+        ))
+    {
+        forget_keyring_password_if_present(path);
+    }
 }
 
 fn open_in_editor(path: &Path) -> Result<(), ConfigCommandError> {

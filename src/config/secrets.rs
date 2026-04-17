@@ -164,15 +164,15 @@ impl SecretsConfig {
         path: &Path,
         password_args: &PasswordArgs,
     ) -> Result<Self, ConfigError> {
-        let raw_contents = std::fs::read_to_string(path).map_err(|error| {
+        let raw_contents = std::fs::read(path).map_err(|error| {
             ConfigError::new(format!(
                 "failed to read config file '{}': {error}",
                 path.display()
             ))
         })?;
 
-        if super::crypto::detect_format(&raw_contents)
-            == super::crypto::ConfigFileFormat::AgeEncryptedToml
+        if super::crypto::detect_format_from_bytes(&raw_contents)
+            == super::crypto::DetectedConfigFormat::AgeEncryptedToml
         {
             let resolved = resolve_for_encrypted_read_with_source(password_args, path)?;
 
@@ -194,6 +194,12 @@ impl SecretsConfig {
                     return Err(error);
                 }
             }
+        }
+
+        if super::crypto::detect_format_from_bytes(&raw_contents)
+            == super::crypto::DetectedConfigFormat::InvalidNonUtf8
+        {
+            return Err(super::crypto::invalid_non_utf8_config_error(path));
         }
 
         let loaded = load_config_text(path, None)?;

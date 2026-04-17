@@ -75,6 +75,9 @@ pub enum ConfigCommand {
     #[command(name = "add-client")]
     #[command(about = "Add a client entry")]
     AddClient(ConfigAddClientArgs),
+    #[command(name = "rotate-client-secret")]
+    #[command(about = "Rotate an existing client bearer token")]
+    RotateClientSecret(ConfigRotateClientSecretArgs),
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +275,32 @@ pub struct ConfigAddClientArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+pub struct ConfigRotateClientSecretArgs {
+    #[arg(long, help = "Path to the config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(short = 'p', long, help = "Password for encrypted config files")]
+    pub password: Option<String>,
+
+    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for command output")]
+    pub log_level: String,
+
+    #[arg(
+        long,
+        default_value = "",
+        hide_default_value = true,
+        help = "Client name to rotate"
+    )]
+    pub name: String,
+
+    #[arg(
+        long = "bearer-token-expires-at",
+        help = "Replacement bearer token expiry timestamp"
+    )]
+    pub bearer_token_expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct ConfigAddGroupArgs {
     #[arg(long, help = "Path to the config file")]
     pub config: Option<PathBuf>,
@@ -320,6 +349,7 @@ impl Command {
                 ConfigCommand::AddApi(args) => Some(&args.log_level),
                 ConfigCommand::AddGroup(args) => Some(&args.log_level),
                 ConfigCommand::AddClient(args) => Some(&args.log_level),
+                ConfigCommand::RotateClientSecret(args) => Some(&args.log_level),
             },
             Self::Version => None,
         }

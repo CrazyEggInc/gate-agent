@@ -4,7 +4,8 @@ use std::io::IsTerminal;
 
 use crate::cli::{
     Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigArgs, ConfigCommand,
-    ConfigEditArgs, ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs, StartArgs,
+    ConfigEditArgs, ConfigInitArgs, ConfigRotateClientSecretArgs, ConfigShowArgs,
+    ConfigValidateArgs, StartArgs,
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
@@ -99,6 +100,11 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
         ConfigCommand::AddClient(args) => {
             let resolved = resolve_config_add_client_args(args)?;
             config::add_client(resolved).map_err(|error| CommandError::new(error.to_string()))?;
+        }
+        ConfigCommand::RotateClientSecret(args) => {
+            let resolved = resolve_config_rotate_client_secret_args(args)?;
+            config::rotate_client_secret(resolved)
+                .map_err(|error| CommandError::new(error.to_string()))?;
         }
     }
 
@@ -433,6 +439,24 @@ fn resolve_config_add_group_args(
         log_level: args.log_level,
         name,
         api_access,
+    })
+}
+
+fn resolve_config_rotate_client_secret_args(
+    args: ConfigRotateClientSecretArgs,
+) -> Result<config::ConfigRotateClientSecretArgs, CommandError> {
+    let name = resolve_required_arg(
+        args.name,
+        &config::prompt_message("Client name", None, None, None, None, None),
+        "config rotate-client-secret requires --name in non-interactive sessions",
+    )?;
+
+    Ok(config::ConfigRotateClientSecretArgs {
+        config: args.config,
+        password: args.password,
+        log_level: args.log_level,
+        name,
+        bearer_token_expires_at: args.bearer_token_expires_at,
     })
 }
 

@@ -238,6 +238,16 @@ cargo run -- config add-client --config .secrets \
 
 That command prints the generated bearer token once and persists only its metadata.
 
+Rotate an existing client token:
+
+```sh
+cargo run -- config rotate-client-secret --config .secrets \
+  --name partner \
+  --bearer-token-expires-at '2032-03-04T05:06:07Z'
+```
+
+That command prints replacement bearer token once, persists only replacement token metadata, and leaves existing client access rules unchanged. Update any local `GATE_AGENT_TOKEN` export to use replacement token after rotation.
+
 ## Recommended local smoke test
 
 ```sh
