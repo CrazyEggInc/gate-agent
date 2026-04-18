@@ -4,7 +4,7 @@ This document defines the operator-facing CLI contract.
 
 ## Goal
 
-The CLI supports two jobs:
+The CLI supports three jobs:
 
 - start the local proxy
 - manage config files
@@ -40,6 +40,13 @@ Password precedence is:
 
 If an encrypted config needs a password in a non-interactive session and none is available, the command fails non-zero.
 
+Encrypted read expectations:
+
+- passphrase-encrypted `age` config reads support standard CLI `age` passphrase files in ASCII-armored or binary form
+- encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
+- wrong-password failures stay concise
+- unsupported `age` modes, malformed or corrupted encrypted files, and excessive scrypt work factors return specific operator-facing errors
+
 ## `start`
 
 Accepted flags:
@@ -71,10 +78,11 @@ Subcommands:
 - `config add-api`
 - `config add-group`
 - `config add-client`
+- `config rotate-client-secret`
 
 Each config subcommand accepts `--log-level <level>`.
 
-`config show`, `config edit`, `config add-api`, `config add-group`, and `config add-client` must use the shared encrypted-config password lookup order: flag, env var, keyring, then prompt.
+`config show`, `config edit`, `config add-api`, `config add-group`, `config add-client`, and `config rotate-client-secret` must use the shared encrypted-config password lookup order: flag, env var, keyring, then prompt.
 
 Successful encrypted reads may backfill the password in the system keyring for that config path, and later encrypted reads may reuse that cached password through the same lookup order.
 
@@ -136,7 +144,7 @@ Accepted flags:
 Behavior:
 
 - prints plaintext TOML to stdout
-- decrypts first when the config is encrypted
+- decrypts first when the config is encrypted, for both ASCII-armored and binary `age` files
 
 ### `config edit`
 
@@ -178,7 +186,9 @@ Behavior:
 - when `auth_header` is omitted, no upstream auth header is configured or injected
 - bearer-style auth uses the full header value in `auth_value`, for example `Bearer my-token`
 - preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
+- when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
+- successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - if required fields are omitted in an interactive session, the command prompts for them in a single-line format with minimal wording
 - the interactive questionnaire asks exactly:
   - `API name:`
@@ -204,7 +214,9 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - upserts a single group entry
 - preserves encrypted-vs-plaintext format on update
-- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
+- when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
+- successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - if required fields are omitted in an interactive session, the command prompts for the group name and access map in a single-line format with minimal wording
 - explicit args keep the command non-interactive
 
@@ -239,7 +251,38 @@ Rules and behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - the plaintext bearer token is never persisted
 - persisted client fields use `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
-- when updating an encrypted config, password lookup still follows flag, env var, keyring, then prompt, but a successful update does not write a new keyring entry
+- when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
+- successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
+- explicit args keep the command non-interactive
+
+### `config rotate-client-secret`
+
+Accepted flags:
+
+- `--config <path>`
+- `--password <value>` / `-p <value>`
+- `--log-level <level>`
+- `--name`
+- `--bearer-token-expires-at`
+
+Rules and behavior:
+
+- rotates credentials for one existing client only
+- fails if config file does not already exist
+- fails if target client does not already exist
+- when required fields are omitted in an interactive session, the command prompts for the client name
+- if `--bearer-token-expires-at` is supplied, it must use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ`
+- if `--bearer-token-expires-at` is omitted, existing expiry is preserved exactly
+- rotation generates a brand-new bearer token and replaces persisted `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
+- existing `group` or inline `api_access` stays unchanged
+- the replacement bearer token is printed to stdout exactly once for operator capture
+- the previous bearer token is never reprinted
+- the plaintext bearer token is never persisted
+- preserves encrypted-vs-plaintext format on update
+- when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
+- successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
+- stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
 
 ## `version`
@@ -290,6 +333,7 @@ gate-agent config edit --help
 gate-agent config add-api --help
 gate-agent config add-group --help
 gate-agent config add-client --help
+gate-agent config rotate-client-secret --help
 gate-agent version
 ```
 

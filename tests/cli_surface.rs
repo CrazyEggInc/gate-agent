@@ -93,8 +93,56 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("Add a group entry"));
     assert!(stdout.contains("add-client"));
     assert!(stdout.contains("Add a client entry"));
+    assert!(stdout.contains("rotate-client-secret"));
+    assert!(stdout.contains("Rotate an existing client bearer token"));
 
     Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>>
+{
+    let stdout = help_output(&["config", "rotate-client-secret", "--help"])?;
+
+    assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--password"));
+    assert!(stdout.contains("--log-level"));
+    assert!(stdout.contains("--name"));
+    assert!(stdout.contains("--bearer-token-expires-at"));
+    assert!(!stdout.contains("--group"));
+    assert!(!stdout.contains("--api-access"));
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_accepts_missing_name_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "rotate-client-secret"]);
+
+    assert!(parsed.is_ok());
+}
+
+#[test]
+fn config_rotate_client_secret_parses_to_expected_variant() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "rotate-client-secret",
+        "--name",
+        "partner",
+    ])
+    .expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::RotateClientSecret(args) => {
+                assert_eq!(args.name, "partner");
+                assert_eq!(args.bearer_token_expires_at, None);
+            }
+            other => panic!("expected rotate-client-secret variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
 }
 
 #[test]

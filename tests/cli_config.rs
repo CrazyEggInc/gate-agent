@@ -2,10 +2,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Mutex, OnceLock};
 
+use age::Encryptor;
 use assert_cmd::Command;
 use gate_agent::commands::config::{
-    ConfigAddClientArgs, ConfigAddGroupArgs, ConfigInitArgs, ConfigShowArgs, ConfigValidateArgs,
-    add_client, add_group, init, show, validate,
+    ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigInitArgs,
+    ConfigRotateClientSecretArgs, ConfigShowArgs, ConfigValidateArgs, add_api, add_client,
+    add_group, init, rotate_client_secret, show, validate,
 };
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::password::PASSWORD_ENV_VAR;
@@ -139,6 +141,25 @@ fn write_text(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+fn write_binary_age_config(
+    path: &Path,
+    contents: &str,
+    password: &SecretString,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let encryptor = Encryptor::with_user_passphrase(password.clone());
+    let mut output = Vec::new();
+    let mut writer = encryptor.wrap_output(&mut output)?;
+    std::io::Write::write_all(&mut writer, contents.as_bytes())?;
+    writer.finish()?;
+    std::fs::write(path, output)?;
+
+    Ok(())
+}
+
 fn set_test_prompt_inputs(inputs: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
@@ -146,6 +167,67 @@ fn set_test_prompt_inputs(inputs: &[&str]) -> Result<(), Box<dyn std::error::Err
     }
 
     Ok(())
+}
+
+fn keyring_entry_key(config_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let canonical = if config_path.exists() {
+        config_path.canonicalize()?
+    } else if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        parent.canonicalize()?.join(
+            config_path
+                .file_name()
+                .ok_or("config path missing file name")?,
+        )
+    } else {
+        return Err("config path missing parent".into());
+    };
+    Ok(format!("gate-agent::config:{}", canonical.display()))
+}
+
+fn seed_keyring_password(
+    keyring_path: &Path,
+    config_path: &Path,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let key = keyring_entry_key(config_path)?;
+
+    if let Some(parent) = keyring_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(
+        keyring_path,
+        serde_json::json!({ key: password }).to_string(),
+    )?;
+
+    Ok(())
+}
+
+fn read_keyring_store(
+    keyring_path: &Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if !keyring_path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    Ok(serde_json::from_str(&std::fs::read_to_string(
+        keyring_path,
+    )?)?)
+}
+
+fn keyring_password_for(
+    keyring_path: &Path,
+    config_path: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let store = read_keyring_store(keyring_path)?;
+    let key = keyring_entry_key(config_path)?;
+
+    Ok(store
+        .as_object()
+        .and_then(|entries| entries.get(&key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -353,6 +435,115 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
 }
 
 #[test]
+fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+    let before = load_toml(&config_path)?;
+    let old_id = string_at(&before, &["clients", "partner", "bearer_token_id"]).to_owned();
+    let old_hash = string_at(&before, &["clients", "partner", "bearer_token_hash"]).to_owned();
+
+    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })?;
+
+    assert_eq!(outcome.path, config_path);
+    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T04:05:06Z");
+    assert!(split_full_token(&outcome.generated_bearer_token).is_some());
+
+    let after = load_toml(&config_path)?;
+    assert_client_metadata_matches(&after, "partner", &outcome.generated_bearer_token);
+    assert_no_plain_bearer_token_persisted(&after, &outcome.generated_bearer_token);
+    assert_ne!(
+        string_at(&after, &["clients", "partner", "bearer_token_id"]),
+        old_id
+    );
+    assert_ne!(
+        string_at(&after, &["clients", "partner", "bearer_token_hash"]),
+        old_hash
+    );
+    assert_eq!(
+        string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
+        "2031-02-03T04:05:06Z"
+    );
+    assert_eq!(
+        string_at(&after, &["clients", "partner", "api_access", "projects"]),
+        "read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_updates_expiry_when_override_is_supplied()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+    add_group(ConfigAddGroupArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner-readonly".to_owned(),
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: Some("partner-readonly".to_owned()),
+        api_access: vec![],
+    })?;
+
+    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2034-05-06T07:08:09Z".to_owned()),
+    })?;
+
+    assert_eq!(outcome.path, config_path);
+    assert_eq!(outcome.bearer_token_expires_at, "2034-05-06T07:08:09Z");
+
+    let after = load_toml(&config_path)?;
+    assert_client_metadata_matches(&after, "partner", &outcome.generated_bearer_token);
+    assert_eq!(
+        string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
+        "2034-05-06T07:08:09Z"
+    );
+    assert_eq!(
+        string_at(&after, &["clients", "partner", "group"]),
+        "partner-readonly"
+    );
+    assert!(
+        table_at(&after, &["clients", "partner"])
+            .get("api_access")
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
@@ -395,6 +586,388 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         string_at(&config, &["clients", "partner", "api_access", "projects"]),
         "write"
     );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_rotate_client_secret_preserves_password_workflow()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("top-secret-password".to_owned());
+
+    write::init_config(&config_path, true, Some(&password))?;
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.expose_secret().to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+
+    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.expose_secret().to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })?;
+
+    let raw = std::fs::read_to_string(&config_path)?;
+    assert!(raw.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.expose_secret().to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+
+    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T04:05:06Z");
+    assert_client_metadata_matches(&config, "partner", &outcome.generated_bearer_token);
+    assert_no_plain_bearer_token_persisted(&config, &outcome.generated_bearer_token);
+    assert_eq!(
+        string_at(&config, &["clients", "partner", "api_access", "projects"]),
+        "read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_backfill()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let config_path_str = config_path.to_str().ok_or("non-utf8 config path")?;
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = "top-secret-password";
+
+    let init_output = Command::cargo_bin("gate-agent")?
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env_remove(TEST_KEYRING_FILE_ENV_VAR)
+        .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path_str,
+            "--encrypted",
+            "--password",
+            password,
+        ])
+        .output()?;
+    assert!(init_output.status.success(), "{init_output:?}");
+
+    let add_client_output = Command::cargo_bin("gate-agent")?
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env_remove(TEST_KEYRING_FILE_ENV_VAR)
+        .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
+        .args([
+            "config",
+            "add-client",
+            "--config",
+            config_path_str,
+            "--password",
+            password,
+            "--name",
+            "partner",
+            "--api-access",
+            "projects=read",
+        ])
+        .output()?;
+    assert!(add_client_output.status.success(), "{add_client_output:?}");
+
+    if keyring_path.exists() {
+        std::fs::remove_file(&keyring_path)?;
+    }
+
+    let show_output = Command::cargo_bin("gate-agent")?
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env(TEST_KEYRING_FILE_ENV_VAR, &keyring_path)
+        .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
+        .args([
+            "config",
+            "show",
+            "--config",
+            config_path_str,
+            "--password",
+            password,
+        ])
+        .output()?;
+    assert!(show_output.status.success(), "{show_output:?}");
+
+    let shown_config = String::from_utf8(show_output.stdout)?.parse::<Value>()?;
+    assert_eq!(
+        string_at(
+            &shown_config,
+            &["clients", "partner", "api_access", "projects"]
+        ),
+        "read"
+    );
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+
+    let before_id = string_at(&shown_config, &["clients", "partner", "bearer_token_id"]).to_owned();
+    let before_hash =
+        string_at(&shown_config, &["clients", "partner", "bearer_token_hash"]).to_owned();
+
+    let rotate_output = Command::cargo_bin("gate-agent")?
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env(TEST_KEYRING_FILE_ENV_VAR, &keyring_path)
+        .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
+        .args([
+            "config",
+            "rotate-client-secret",
+            "--config",
+            config_path_str,
+            "--name",
+            "partner",
+        ])
+        .output()?;
+    assert!(rotate_output.status.success(), "{rotate_output:?}");
+
+    let rotate_stdout = String::from_utf8(rotate_output.stdout)?;
+    let tokens = printed_tokens(&rotate_stdout)?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].0, "partner");
+
+    let show_after_output = Command::cargo_bin("gate-agent")?
+        .env_remove(PASSWORD_ENV_VAR)
+        .env_remove(TEST_PROMPT_PASSWORD_ENV_VAR)
+        .env(TEST_KEYRING_FILE_ENV_VAR, &keyring_path)
+        .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
+        .args(["config", "show", "--config", config_path_str])
+        .output()?;
+    assert!(show_after_output.status.success(), "{show_after_output:?}");
+
+    let updated_config = String::from_utf8(show_after_output.stdout)?.parse::<Value>()?;
+    let rotated_token = &tokens[0].1;
+    assert_client_metadata_matches(&updated_config, "partner", rotated_token);
+    assert_no_plain_bearer_token_persisted(&updated_config, rotated_token);
+    assert_eq!(
+        string_at(
+            &updated_config,
+            &["clients", "partner", "api_access", "projects"]
+        ),
+        "read"
+    );
+    assert_ne!(
+        string_at(&updated_config, &["clients", "partner", "bearer_token_id"]),
+        before_id
+    );
+    assert_ne!(
+        string_at(
+            &updated_config,
+            &["clients", "partner", "bearer_token_hash"]
+        ),
+        before_hash
+    );
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)?.starts_with("-----BEGIN AGE ENCRYPTED FILE-----")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_show_reads_binary_age_config_with_password() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("top-secret-password".to_owned());
+
+    write_binary_age_config(&config_path, VALID_BEARER_VALIDATE_CONFIG, &password)?;
+
+    let output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "show",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--password",
+            password.expose_secret(),
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let shown = String::from_utf8(output.stdout)?;
+    let config = shown.parse::<Value>()?;
+    assert_eq!(
+        string_at(&config, &["clients", "default", "bearer_token_id"]),
+        "0011223344556677"
+    );
+    assert_eq!(
+        string_at(&config, &["clients", "default", "api_access", "projects"]),
+        "read"
+    );
+    assert_eq!(String::from_utf8(output.stderr)?, "");
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_rotate_client_secret_supports_binary_age_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let config_path_str = config_path.to_str().ok_or("non-utf8 config path")?;
+    let password = "top-secret-password";
+
+    write_binary_age_config(
+        &config_path,
+        VALID_BEARER_VALIDATE_CONFIG,
+        &SecretString::from(password.to_owned()),
+    )?;
+
+    let before_show_output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "show",
+            "--config",
+            config_path_str,
+            "--password",
+            password,
+        ])
+        .output()?;
+    assert!(
+        before_show_output.status.success(),
+        "{before_show_output:?}"
+    );
+    let before_config = String::from_utf8(before_show_output.stdout)?.parse::<Value>()?;
+    let before_id =
+        string_at(&before_config, &["clients", "default", "bearer_token_id"]).to_owned();
+    let before_hash =
+        string_at(&before_config, &["clients", "default", "bearer_token_hash"]).to_owned();
+
+    let rotate_output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "rotate-client-secret",
+            "--config",
+            config_path_str,
+            "--password",
+            password,
+            "--name",
+            "default",
+        ])
+        .output()?;
+    assert!(rotate_output.status.success(), "{rotate_output:?}");
+
+    let rotate_stdout = String::from_utf8(rotate_output.stdout)?;
+    let tokens = printed_tokens(&rotate_stdout)?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].0, "default");
+
+    let show_after_output = Command::cargo_bin("gate-agent")?
+        .args([
+            "config",
+            "show",
+            "--config",
+            config_path_str,
+            "--password",
+            password,
+        ])
+        .output()?;
+    assert!(show_after_output.status.success(), "{show_after_output:?}");
+
+    let updated_config = String::from_utf8(show_after_output.stdout)?.parse::<Value>()?;
+    let rotated_token = &tokens[0].1;
+    assert_client_metadata_matches(&updated_config, "default", rotated_token);
+    assert_no_plain_bearer_token_persisted(&updated_config, rotated_token);
+    assert_eq!(
+        string_at(
+            &updated_config,
+            &["clients", "default", "api_access", "projects"]
+        ),
+        "read"
+    );
+    assert_ne!(
+        string_at(&updated_config, &["clients", "default", "bearer_token_id"]),
+        before_id
+    );
+    assert_ne!(
+        string_at(
+            &updated_config,
+            &["clients", "default", "bearer_token_hash"]
+        ),
+        before_hash
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_fails_for_missing_client_without_writing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+    let before = std::fs::read(&config_path)?;
+
+    let error = rotate_client_secret(ConfigRotateClientSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })
+    .expect_err("missing client should fail");
+
+    assert_eq!(error.to_string(), "client 'partner' not found");
+    assert_eq!(std::fs::read(&config_path)?, before);
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_does_not_bootstrap_missing_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("missing.toml");
+
+    let error = rotate_client_secret(ConfigRotateClientSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })
+    .expect_err("missing config should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("failed to read config file"), "{message}");
+    assert!(
+        message.contains(config_path.to_str().ok_or("non-utf8 config path")?),
+        "{message}"
+    );
+    assert!(!config_path.exists());
 
     Ok(())
 }
@@ -1374,6 +1947,380 @@ fn encrypted_config_add_client_preserves_password_workflow()
 }
 
 #[test]
+fn encrypted_config_add_client_removes_stale_keyring_password_after_failed_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = SecretString::from("top-secret-password".to_owned());
+
+    write::init_config(&config_path, true, Some(&password))?;
+    unsafe {
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+    seed_keyring_password(&keyring_path, &config_path, "stale-password")?;
+
+    let error = add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })
+    .expect_err("stale keyring password should fail decrypt");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid password for config file")
+    );
+    assert_eq!(keyring_password_for(&keyring_path, &config_path)?, None);
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_client_backfills_keyring_after_flag_password_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = "top-secret-password";
+
+    write::init_config(
+        &config_path,
+        true,
+        Some(&SecretString::from(password.to_owned())),
+    )?;
+    unsafe {
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+
+    add_client(ConfigAddClientArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_api_removes_stale_keyring_password_after_failed_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = SecretString::from("top-secret-password".to_owned());
+
+    write::init_config(&config_path, true, Some(&password))?;
+    unsafe {
+        std::env::remove_var(PASSWORD_ENV_VAR);
+        std::env::remove_var(TEST_PROMPT_PASSWORD_ENV_VAR);
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+    seed_keyring_password(&keyring_path, &config_path, "stale-password")?;
+
+    let error = add_api(ConfigAddApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        base_url: "https://projects.internal.example/api".to_owned(),
+        auth_header: Some("authorization".to_owned()),
+        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        timeout_ms: 5_000,
+    })
+    .expect_err("stale keyring password should fail decrypt");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid password for config file")
+    );
+    assert_eq!(keyring_password_for(&keyring_path, &config_path)?, None);
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_api_preserves_password_workflow() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("top-secret-password".to_owned());
+
+    write::init_config(&config_path, true, Some(&password))?;
+
+    add_api(ConfigAddApiArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.expose_secret().to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        base_url: "https://projects.internal.example/api".to_owned(),
+        auth_header: Some("authorization".to_owned()),
+        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        timeout_ms: 5_000,
+    })?;
+
+    let raw = std::fs::read_to_string(&config_path)?;
+    assert!(raw.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.expose_secret().to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+    let api = table_at(&config, &["apis", "projects"]);
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://projects.internal.example/api")
+    );
+    assert_eq!(
+        api.get("auth_header").and_then(Value::as_str),
+        Some("authorization")
+    );
+    assert_eq!(
+        api.get("auth_value").and_then(Value::as_str),
+        Some("Bearer local-upstream-token")
+    );
+    assert_eq!(
+        api.get("timeout_ms").and_then(Value::as_integer),
+        Some(5_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_api_backfills_keyring_after_flag_password_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = "top-secret-password";
+
+    write::init_config(
+        &config_path,
+        true,
+        Some(&SecretString::from(password.to_owned())),
+    )?;
+    unsafe {
+        std::env::remove_var(PASSWORD_ENV_VAR);
+        std::env::remove_var(TEST_PROMPT_PASSWORD_ENV_VAR);
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+
+    add_api(ConfigAddApiArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        base_url: "https://projects.internal.example/api".to_owned(),
+        auth_header: Some("authorization".to_owned()),
+        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        timeout_ms: 5_000,
+    })?;
+
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+    let api = table_at(&config, &["apis", "projects"]);
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://projects.internal.example/api")
+    );
+    assert_eq!(
+        api.get("auth_header").and_then(Value::as_str),
+        Some("authorization")
+    );
+    assert_eq!(
+        api.get("auth_value").and_then(Value::as_str),
+        Some("Bearer local-upstream-token")
+    );
+    assert_eq!(
+        api.get("timeout_ms").and_then(Value::as_integer),
+        Some(5_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_group_backfills_keyring_after_flag_password_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = "top-secret-password";
+
+    write::init_config(
+        &config_path,
+        true,
+        Some(&SecretString::from(password.to_owned())),
+    )?;
+    unsafe {
+        std::env::remove_var(PASSWORD_ENV_VAR);
+        std::env::remove_var(TEST_PROMPT_PASSWORD_ENV_VAR);
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+
+    add_group(ConfigAddGroupArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner-readonly".to_owned(),
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+    assert_eq!(
+        string_at(
+            &config,
+            &["groups", "partner-readonly", "api_access", "projects"]
+        ),
+        "read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn encrypted_config_add_client_group_prompt_backfills_keyring_after_flag_password_decrypt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let keyring_path = temp_dir.path().join("test-keyring.json");
+    let password = "top-secret-password";
+
+    write::init_config(
+        &config_path,
+        true,
+        Some(&SecretString::from(password.to_owned())),
+    )?;
+    unsafe {
+        std::env::remove_var(PASSWORD_ENV_VAR);
+        std::env::remove_var(TEST_PROMPT_PASSWORD_ENV_VAR);
+        std::env::set_var(TEST_KEYRING_FILE_ENV_VAR, &keyring_path);
+        std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
+    }
+
+    add_group(ConfigAddGroupArgs {
+        config: Some(config_path.clone()),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner-readonly".to_owned(),
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+    std::fs::remove_file(&keyring_path)?;
+
+    set_test_prompt_inputs(&["partner", "partner-readonly"])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::AddClient(
+                gate_agent::cli::ConfigAddClientArgs {
+                    config: Some(config_path.clone()),
+                    password: Some(password.to_owned()),
+                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                    name: String::new(),
+                    bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                    group: None,
+                    api_access: vec![],
+                },
+            ),
+        },
+    ))?;
+
+    assert_eq!(
+        keyring_password_for(&keyring_path, &config_path)?,
+        Some(password.to_owned())
+    );
+
+    let shown = show(ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let config = shown.parse::<Value>()?;
+    let client = table_at(&config, &["clients", "partner"]);
+
+    assert_eq!(
+        client.get("group").and_then(Value::as_str),
+        Some("partner-readonly")
+    );
+    assert!(client.get("api_access").is_none());
+    assert_client_has_bearer_metadata(&config, "partner");
+
+    Ok(())
+}
+
+#[test]
 fn config_show_prints_plaintext_contents() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -1535,21 +2482,7 @@ fn config_init_removes_existing_keyring_password_for_new_encrypted_config()
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
     }
 
-    let canonical_config_path = if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        parent.join(
-            config_path
-                .file_name()
-                .ok_or("config path missing file name")?,
-        )
-    } else {
-        config_path.clone()
-    };
-    let key = format!("gate-agent::config:{}", canonical_config_path.display());
-    std::fs::write(
-        &keyring_path,
-        serde_json::json!({ key: "stale-password" }).to_string(),
-    )?;
+    seed_keyring_password(&keyring_path, &config_path, "stale-password")?;
 
     let output = Command::cargo_bin("gate-agent")?
         .args([
@@ -1565,9 +2498,7 @@ fn config_init_removes_existing_keyring_password_for_new_encrypted_config()
 
     assert!(output.status.success(), "{output:?}");
 
-    let keyring_contents: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&keyring_path)?)?;
-    assert_eq!(keyring_contents, serde_json::json!({}));
+    assert_eq!(read_keyring_store(&keyring_path)?, serde_json::json!({}));
 
     Ok(())
 }
