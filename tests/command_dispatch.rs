@@ -4,10 +4,10 @@ use std::sync::{Mutex, OnceLock};
 use assert_cmd::Command as AssertCommand;
 use clap::{Parser, error::ErrorKind};
 use gate_agent::cli::{
-    Cli, Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigArgs,
-    ConfigCommand, ConfigInitArgs, ConfigRotateClientSecretArgs, ConfigValidateArgs,
+    Cli, Command, ConfigApiArgs, ConfigArgs, ConfigClientArgs, ConfigClientSubcommand,
+    ConfigCommand, ConfigEditArgs, ConfigGroupArgs, ConfigInitArgs, ConfigRotateSecretArgs,
+    ConfigShowArgs, ConfigValidateArgs,
 };
-use gate_agent::commands::config::{ConfigEditArgs, ConfigShowArgs};
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use tempfile::tempdir;
 use toml::Value;
@@ -61,17 +61,112 @@ fn write_config(path: &Path, contents: &str) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-fn add_api_args(config: PathBuf, auth_header: &str, auth_value: &str) -> ConfigAddApiArgs {
-    ConfigAddApiArgs {
+fn write_config_bytes(path: &Path, contents: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+fn api_args(config: PathBuf, auth_header: &str, auth_value: &str) -> ConfigApiArgs {
+    ConfigApiArgs {
         config: Some(config),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "projects".to_owned(),
-        base_url: "https://example.test/api".to_owned(),
-        auth_header: auth_header.to_owned(),
-        auth_value: auth_value.to_owned(),
-        timeout_ms: 5_000,
+        delete: false,
+        name: Some("projects".to_owned()),
+        base_url: Some("https://example.test/api".to_owned()),
+        auth_header: (!auth_header.is_empty()).then(|| auth_header.to_owned()),
+        auth_value: (!auth_value.is_empty()).then(|| auth_value.to_owned()),
+        timeout_ms: Some(5_000),
     }
+}
+
+fn client_args(config: PathBuf, name: &str) -> ConfigClientArgs {
+    ConfigClientArgs {
+        config: Some(config),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: Some(name.to_owned()),
+        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: None,
+        api_access: vec!["projects=read,reports=write".to_owned()],
+        command: None,
+    }
+}
+
+fn rotate_secret_client_args(config: PathBuf, name: String) -> ConfigClientArgs {
+    ConfigClientArgs {
+        config: Some(config.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: None,
+        bearer_token_expires_at: None,
+        group: None,
+        api_access: vec![],
+        command: Some(ConfigClientSubcommand::RotateSecret(
+            ConfigRotateSecretArgs {
+                config: Some(config),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                log_level_explicitly_set: false,
+                name,
+                bearer_token_expires_at: None,
+            },
+        )),
+    }
+}
+
+fn rotate_secret_parent_args_with_forbidden_flags(
+    config: PathBuf,
+    delete: bool,
+    group: Option<&str>,
+    api_access: &[&str],
+) -> ConfigClientArgs {
+    ConfigClientArgs {
+        config: Some(config),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete,
+        name: Some("mobile-app".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: group.map(str::to_owned),
+        api_access: api_access.iter().map(|value| (*value).to_owned()).collect(),
+        command: Some(ConfigClientSubcommand::RotateSecret(
+            ConfigRotateSecretArgs {
+                config: None,
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                log_level_explicitly_set: false,
+                name: String::new(),
+                bearer_token_expires_at: None,
+            },
+        )),
+    }
+}
+
+fn encrypted_client_config() -> String {
+    r#"
+[auth]
+encryption = "age"
+
+[clients.mobile-app]
+bearer_token_id = "mobile-app"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+    api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_header = "x-api-key"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#
+    .to_owned()
 }
 
 struct EnvGuard {
@@ -204,7 +299,7 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+fn config_command_dispatch_runs_api_subcommand() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -219,11 +314,7 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
     }
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddApi(add_api_args(
-            config_path.clone(),
-            "authorization",
-            "top-secret",
-        )),
+        command: ConfigCommand::Api(api_args(config_path.clone(), "authorization", "top-secret")),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -255,7 +346,7 @@ fn config_command_dispatch_runs_add_api_subcommand() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn config_command_dispatch_runs_add_api_subcommand_without_upstream_auth()
+fn config_command_dispatch_runs_api_subcommand_without_upstream_auth()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -271,7 +362,7 @@ fn config_command_dispatch_runs_add_api_subcommand_without_upstream_auth()
     }
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddApi(add_api_args(config_path.clone(), "", "")),
+        command: ConfigCommand::Api(api_args(config_path.clone(), "", "")),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -297,7 +388,74 @@ fn config_command_dispatch_runs_add_api_subcommand_without_upstream_auth()
 }
 
 #[test]
-fn config_command_dispatch_rejects_add_api_auth_value_without_auth_header()
+fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api".to_owned()),
+            auth_header: Some("authorization".to_owned()),
+            auth_value: Some("top-secret".to_owned()),
+            timeout_ms: Some(9_000),
+        }),
+    }))?;
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api/v2".to_owned()),
+            auth_header: Some("authorization".to_owned()),
+            auth_value: Some("rotated-secret".to_owned()),
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_table)
+        .expect("projects api config");
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://example.test/api/v2")
+    );
+    assert_eq!(
+        api.get("auth_value").and_then(Value::as_str),
+        Some("rotated-secret")
+    );
+    assert_eq!(
+        api.get("timeout_ms").and_then(Value::as_integer),
+        Some(9_000)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_rejects_api_auth_value_without_auth_header()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -313,7 +471,7 @@ fn config_command_dispatch_rejects_add_api_auth_value_without_auth_header()
     }
 
     let error = gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddApi(add_api_args(config_path, "", "top-secret")),
+        command: ConfigCommand::Api(api_args(config_path, "", "top-secret")),
     }))
     .expect_err("auth_value without auth_header should fail");
 
@@ -326,7 +484,7 @@ fn config_command_dispatch_rejects_add_api_auth_value_without_auth_header()
 }
 
 #[test]
-fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+fn config_command_dispatch_runs_client_subcommand() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -341,15 +499,7 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
     }
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddClient(ConfigAddClientArgs {
-            config: Some(config_path.clone()),
-            password: None,
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-            name: "mobile-app".to_owned(),
-            bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-            group: None,
-            api_access: vec!["projects=read,reports=write".to_owned()],
-        }),
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -403,7 +553,7 @@ fn config_command_dispatch_runs_add_client_subcommand() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn config_command_dispatch_runs_rotate_client_secret_subcommand()
+fn config_command_dispatch_runs_client_rotate_secret_subcommand()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -418,15 +568,9 @@ fn config_command_dispatch_runs_rotate_client_secret_subcommand()
         std::env::set_var("HOME", temp_dir.path().join("home"));
     }
 
-    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "mobile-app".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,reports=write".to_owned()],
-    })?;
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
 
     let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
     let original_token_id = before
@@ -438,13 +582,10 @@ fn config_command_dispatch_runs_rotate_client_secret_subcommand()
         .to_owned();
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::RotateClientSecret(ConfigRotateClientSecretArgs {
-            config: Some(config_path.clone()),
-            password: None,
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-            name: "mobile-app".to_owned(),
-            bearer_token_expires_at: None,
-        }),
+        command: ConfigCommand::Client(rotate_secret_client_args(
+            config_path.clone(),
+            "mobile-app".to_owned(),
+        )),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -471,7 +612,375 @@ fn config_command_dispatch_runs_rotate_client_secret_subcommand()
 }
 
 #[test]
-fn config_command_dispatch_resolves_rotate_client_secret_name_interactively()
+fn config_command_dispatch_client_rotate_secret_inherits_parent_flags()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+    let rotated_expiry = "2031-02-03T04:05:06Z";
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
+
+    let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let original_token_id = before
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(|value| value.get("bearer_token_id"))
+        .and_then(Value::as_str)
+        .expect("existing bearer token id")
+        .to_owned();
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(ConfigClientArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("mobile-app".to_owned()),
+            bearer_token_expires_at: Some(rotated_expiry.to_owned()),
+            group: None,
+            api_access: vec![],
+            command: Some(ConfigClientSubcommand::RotateSecret(
+                ConfigRotateSecretArgs {
+                    config: None,
+                    password: None,
+                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                    log_level_explicitly_set: false,
+                    name: String::new(),
+                    bearer_token_expires_at: None,
+                },
+            )),
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let client = written
+        .get("clients")
+        .and_then(|value| value.get("mobile-app"))
+        .and_then(Value::as_table)
+        .expect("mobile-app client config");
+
+    let rotated_token_id = client
+        .get("bearer_token_id")
+        .and_then(Value::as_str)
+        .expect("rotated bearer token id");
+    assert!(!rotated_token_id.is_empty());
+    assert_ne!(rotated_token_id, original_token_id);
+    assert_eq!(
+        client
+            .get("bearer_token_expires_at")
+            .and_then(Value::as_str),
+        Some(rotated_expiry)
+    );
+    assert!(
+        written
+            .get("clients")
+            .and_then(Value::as_table)
+            .is_some_and(|clients| !clients.contains_key(""))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_rejects_parent_delete_flag()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(rotate_secret_parent_args_with_forbidden_flags(
+            config_path,
+            true,
+            None,
+            &[],
+        )),
+    }))
+    .expect_err("rotate-secret should reject parent --delete");
+
+    assert_eq!(
+        error.to_string(),
+        "config client rotate-secret does not accept parent flags: --delete"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_rejects_parent_group_flag()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(rotate_secret_parent_args_with_forbidden_flags(
+            config_path,
+            false,
+            Some("ops"),
+            &[],
+        )),
+    }))
+    .expect_err("rotate-secret should reject parent --group");
+
+    assert_eq!(
+        error.to_string(),
+        "config client rotate-secret does not accept parent flags: --group"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_rejects_parent_api_access_flag()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(rotate_secret_parent_args_with_forbidden_flags(
+            config_path,
+            false,
+            None,
+            &["projects=write"],
+        )),
+    }))
+    .expect_err("rotate-secret should reject parent --api-access");
+
+    assert_eq!(
+        error.to_string(),
+        "config client rotate-secret does not accept parent flags: --api-access"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_rejects_multiple_parent_client_flags()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(rotate_secret_parent_args_with_forbidden_flags(
+            config_path,
+            true,
+            Some("ops"),
+            &["projects=write"],
+        )),
+    }))
+    .expect_err("rotate-secret should reject all forbidden parent client flags");
+
+    assert_eq!(
+        error.to_string(),
+        "config client rotate-secret does not accept parent flags: --delete, --group, --api-access"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_inherits_parent_password_for_encrypted_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+    let password = "top-secret-password";
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    let encrypted =
+        age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(password.to_owned()));
+    let mut encrypted_bytes = Vec::new();
+    {
+        let mut writer = encrypted.wrap_output(&mut encrypted_bytes)?;
+        use std::io::Write as _;
+        writer.write_all(encrypted_client_config().as_bytes())?;
+        writer.finish()?;
+    }
+    write_config_bytes(&config_path, &encrypted_bytes)?;
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(ConfigClientArgs {
+            config: Some(config_path.clone()),
+            password: Some(password.to_owned()),
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("mobile-app".to_owned()),
+            bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+            group: None,
+            api_access: vec![],
+            command: Some(ConfigClientSubcommand::RotateSecret(
+                ConfigRotateSecretArgs {
+                    config: None,
+                    password: None,
+                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                    log_level_explicitly_set: false,
+                    name: String::new(),
+                    bearer_token_expires_at: None,
+                },
+            )),
+        }),
+    }))?;
+
+    let shown = gate_agent::commands::config::show(gate_agent::commands::config::ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let written: Value = shown.parse()?;
+
+    assert_eq!(
+        written
+            .get("clients")
+            .and_then(|value| value.get("mobile-app"))
+            .and_then(|value| value.get("bearer_token_expires_at"))
+            .and_then(Value::as_str),
+        Some("2031-02-03T04:05:06Z")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_client_rotate_secret_prefers_nested_password_over_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock().lock().expect("lock env");
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+    let password = "top-secret-password";
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    let encrypted =
+        age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(password.to_owned()));
+    let mut encrypted_bytes = Vec::new();
+    {
+        let mut writer = encrypted.wrap_output(&mut encrypted_bytes)?;
+        use std::io::Write as _;
+        writer.write_all(encrypted_client_config().as_bytes())?;
+        writer.finish()?;
+    }
+    write_config_bytes(&config_path, &encrypted_bytes)?;
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(ConfigClientArgs {
+            config: Some(config_path.clone()),
+            password: Some("wrong-password".to_owned()),
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("wrong-client".to_owned()),
+            bearer_token_expires_at: Some("2039-12-31T23:59:59Z".to_owned()),
+            group: None,
+            api_access: vec![],
+            command: Some(ConfigClientSubcommand::RotateSecret(
+                ConfigRotateSecretArgs {
+                    config: Some(config_path.clone()),
+                    password: Some(password.to_owned()),
+                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                    log_level_explicitly_set: false,
+                    name: "mobile-app".to_owned(),
+                    bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+                },
+            )),
+        }),
+    }))?;
+
+    let shown = gate_agent::commands::config::show(gate_agent::commands::config::ConfigShowArgs {
+        config: Some(config_path),
+        password: Some(password.to_owned()),
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    let written: Value = shown.parse()?;
+
+    assert_eq!(
+        written
+            .get("clients")
+            .and_then(|value| value.get("mobile-app"))
+            .and_then(|value| value.get("bearer_token_expires_at"))
+            .and_then(Value::as_str),
+        Some("2031-02-03T04:05:06Z")
+    );
+    assert!(
+        written
+            .get("clients")
+            .and_then(Value::as_table)
+            .is_some_and(|clients| !clients.contains_key("wrong-client"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_resolves_client_rotate_secret_name_interactively()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
@@ -485,19 +994,13 @@ fn config_command_dispatch_resolves_rotate_client_secret_name_interactively()
         std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["mobile-app"])?,
+            serde_json::to_string(&["mobile-app", ""])?,
         );
     }
 
-    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "mobile-app".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,reports=write".to_owned()],
-    })?;
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
 
     let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
     let original_token_id = before
@@ -509,13 +1012,10 @@ fn config_command_dispatch_resolves_rotate_client_secret_name_interactively()
         .to_owned();
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::RotateClientSecret(ConfigRotateClientSecretArgs {
-            config: Some(config_path.clone()),
-            password: None,
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
-            name: String::new(),
-            bearer_token_expires_at: None,
-        }),
+        command: ConfigCommand::Client(rotate_secret_client_args(
+            config_path.clone(),
+            String::new(),
+        )),
     }))?;
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
@@ -562,6 +1062,69 @@ fn config_command_dispatch_resolves_rotate_client_secret_name_interactively()
 }
 
 #[test]
+fn cli_prefers_rotate_secret_log_level_when_nested_value_is_explicit_default() {
+    let cli = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "client",
+        "--log-level",
+        "debug",
+        "rotate-secret",
+        "--log-level",
+        DEFAULT_LOG_LEVEL,
+        "--name",
+        "mobile-app",
+    ])
+    .expect("rotate-secret command parses");
+
+    assert_eq!(cli.command().log_level(), Some(DEFAULT_LOG_LEVEL));
+}
+
+#[test]
+fn command_dispatch_rotate_secret_does_not_leak_nested_log_level_explicitness() {
+    let cli = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "client",
+        "--log-level",
+        "debug",
+        "rotate-secret",
+        "--log-level",
+        DEFAULT_LOG_LEVEL,
+        "--name",
+        "mobile-app",
+    ])
+    .expect("rotate-secret command parses");
+
+    assert_eq!(cli.command().log_level(), Some(DEFAULT_LOG_LEVEL));
+
+    let programmatic = Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(ConfigClientArgs {
+            config: None,
+            password: None,
+            log_level: "warn".to_owned(),
+            delete: false,
+            name: Some("mobile-app".to_owned()),
+            bearer_token_expires_at: None,
+            group: None,
+            api_access: vec![],
+            command: Some(ConfigClientSubcommand::RotateSecret(
+                ConfigRotateSecretArgs {
+                    config: None,
+                    password: None,
+                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                    log_level_explicitly_set: false,
+                    name: String::new(),
+                    bearer_token_expires_at: None,
+                },
+            )),
+        }),
+    });
+
+    assert_eq!(programmatic.log_level(), Some("warn"));
+}
+
+#[test]
 fn cli_rejects_obsolete_curl_subcommand() {
     assert_eq!(
         Cli::try_parse_from(["gate-agent", "curl"])
@@ -572,11 +1135,11 @@ fn cli_rejects_obsolete_curl_subcommand() {
 }
 
 #[test]
-fn cli_rejects_bearer_token_flag_for_config_add_client() {
+fn cli_rejects_bearer_token_flag_for_config_client() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--bearer-token",
@@ -596,12 +1159,12 @@ fn cli_rejects_bearer_token_flag_for_config_add_client() {
 }
 
 #[test]
-fn cli_rejects_removed_api_key_flags_for_config_add_client() {
+fn cli_rejects_removed_api_key_flags_for_config_client() {
     assert_eq!(
         Cli::try_parse_from([
             "gate-agent",
             "config",
-            "add-client",
+            "client",
             "--name",
             "partner",
             "--api-key",
@@ -621,7 +1184,7 @@ fn version_command_dispatch_runs_version_subcommand() -> Result<(), Box<dyn std:
 
     gate_agent::commands::version::write_version(&mut output)?;
 
-    assert_eq!(output, format!("{PACKAGE_VERSION}\n").into_bytes());
+    assert_eq!(output, [PACKAGE_VERSION, "\n"].concat().into_bytes());
 
     Ok(())
 }
@@ -635,7 +1198,7 @@ fn version_command_binary_prints_exact_package_version() -> Result<(), Box<dyn s
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        format!("{PACKAGE_VERSION}\n")
+        [PACKAGE_VERSION, "\n"].concat()
     );
     assert_eq!(String::from_utf8(output.stderr)?, "");
 
@@ -661,7 +1224,7 @@ fn version_command_binary_succeeds_without_home_or_prompt_env()
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        format!("{PACKAGE_VERSION}\n")
+        [PACKAGE_VERSION, "\n"].concat()
     );
     assert_eq!(String::from_utf8(output.stderr)?, "");
 
@@ -717,7 +1280,7 @@ fn version_command_dispatch_skips_tracing_bootstrap_helper()
 }
 
 #[test]
-fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
+fn config_command_dispatch_client_prints_generated_bearer_token_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
@@ -734,7 +1297,7 @@ fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
         .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().expect("utf-8 config path"),
             "--name",
@@ -754,7 +1317,8 @@ fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(printed_lines.len(), 1);
+    assert_eq!(printed_lines.len(), 2);
+    assert_eq!(printed_lines[1], "Added client 'mobile-app'");
 
     let full_token =
         parse_printed_token(printed_lines[0], "mobile-app").expect("printed bearer token");
@@ -784,7 +1348,7 @@ fn config_command_dispatch_add_client_prints_generated_bearer_token_once()
 }
 
 #[test]
-fn config_command_dispatch_rotate_client_secret_prints_generated_bearer_token_once()
+fn config_command_dispatch_client_rotate_secret_prints_generated_bearer_token_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock().lock().expect("lock env");
     let temp_dir = tempdir()?;
@@ -793,15 +1357,9 @@ fn config_command_dispatch_rotate_client_secret_prints_generated_bearer_token_on
     let _env = EnvGuard::enter(&workspace)?;
     let config_path = workspace.join("nested/secrets.toml");
 
-    gate_agent::commands::config::add_client(gate_agent::commands::config::ConfigAddClientArgs {
-        config: Some(config_path.clone()),
-        password: None,
-        log_level: DEFAULT_LOG_LEVEL.to_owned(),
-        name: "mobile-app".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-        group: None,
-        api_access: vec!["projects=read,reports=write".to_owned()],
-    })?;
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(client_args(config_path.clone(), "mobile-app")),
+    }))?;
 
     let before: Value = std::fs::read_to_string(&config_path)?.parse()?;
     let original_token_id = before
@@ -818,7 +1376,8 @@ fn config_command_dispatch_rotate_client_secret_prints_generated_bearer_token_on
         .env_remove(TEST_PROMPT_INPUTS_ENV_VAR)
         .args([
             "config",
-            "rotate-client-secret",
+            "client",
+            "rotate-secret",
             "--config",
             config_path.to_str().expect("utf-8 config path"),
             "--name",
@@ -864,7 +1423,7 @@ fn config_command_dispatch_rotate_client_secret_prints_generated_bearer_token_on
 }
 
 #[test]
-fn config_command_dispatch_runs_add_group_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+fn config_command_dispatch_runs_group_subcommand() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -879,11 +1438,12 @@ fn config_command_dispatch_runs_add_group_subcommand() -> Result<(), Box<dyn std
     }
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
-        command: ConfigCommand::AddGroup(ConfigAddGroupArgs {
+        command: ConfigCommand::Group(ConfigGroupArgs {
             config: Some(config_path.clone()),
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
-            name: "readonly".to_owned(),
+            delete: false,
+            name: Some("readonly".to_owned()),
             api_access: vec!["projects=read,reports=write".to_owned()],
         }),
     }))?;

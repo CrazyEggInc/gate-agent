@@ -87,22 +87,24 @@ fn config_help_lists_expected_subcommands() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("Print the current config contents"));
     assert!(stdout.contains("edit"));
     assert!(stdout.contains("Open the config in your editor"));
-    assert!(stdout.contains("add-api"));
-    assert!(stdout.contains("Add an upstream API entry"));
-    assert!(stdout.contains("add-group"));
-    assert!(stdout.contains("Add a group entry"));
-    assert!(stdout.contains("add-client"));
-    assert!(stdout.contains("Add a client entry"));
-    assert!(stdout.contains("rotate-client-secret"));
-    assert!(stdout.contains("Rotate an existing client bearer token"));
+    assert!(stdout.contains("api"));
+    assert!(stdout.contains("Add, update, or delete an upstream API entry"));
+    assert!(stdout.contains("group"));
+    assert!(stdout.contains("Add, update, or delete a group entry"));
+    assert!(stdout.contains("client"));
+    assert!(stdout.contains("Add, update, or delete a client entry"));
+    assert!(!stdout.contains("add-api"));
+    assert!(!stdout.contains("add-group"));
+    assert!(!stdout.contains("add-client"));
+    assert!(!stdout.contains("rotate-client-secret"));
 
     Ok(())
 }
 
 #[test]
-fn config_rotate_client_secret_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>>
+fn config_client_rotate_secret_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>>
 {
-    let stdout = help_output(&["config", "rotate-client-secret", "--help"])?;
+    let stdout = help_output(&["config", "client", "rotate-secret", "--help"])?;
 
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
@@ -116,18 +118,19 @@ fn config_rotate_client_secret_help_lists_expected_flags() -> Result<(), Box<dyn
 }
 
 #[test]
-fn config_rotate_client_secret_accepts_missing_name_for_interactive_flow() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "rotate-client-secret"]);
+fn config_client_rotate_secret_accepts_missing_name_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "client", "rotate-secret"]);
 
     assert!(parsed.is_ok());
 }
 
 #[test]
-fn config_rotate_client_secret_parses_to_expected_variant() {
+fn config_client_rotate_secret_parses_to_expected_variant() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "rotate-client-secret",
+        "client",
+        "rotate-secret",
         "--name",
         "partner",
     ])
@@ -135,11 +138,14 @@ fn config_rotate_client_secret_parses_to_expected_variant() {
 
     match parsed.command() {
         CliCommand::Config(args) => match &args.command {
-            ConfigCommand::RotateClientSecret(args) => {
-                assert_eq!(args.name, "partner");
-                assert_eq!(args.bearer_token_expires_at, None);
-            }
-            other => panic!("expected rotate-client-secret variant, got {other:?}"),
+            ConfigCommand::Client(args) => match &args.command {
+                Some(gate_agent::cli::ConfigClientSubcommand::RotateSecret(args)) => {
+                    assert_eq!(args.name, "partner");
+                    assert_eq!(args.bearer_token_expires_at, None);
+                }
+                other => panic!("expected rotate-secret subcommand, got {other:?}"),
+            },
+            other => panic!("expected client variant, got {other:?}"),
         },
         other => panic!("expected config command, got {other:?}"),
     }
@@ -162,14 +168,15 @@ fn config_init_help_uses_config_flag_without_secrets_file_placeholder()
 }
 
 #[test]
-fn config_add_group_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = help_output(&["config", "add-group", "--help"])?;
+fn config_group_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "group", "--help"])?;
 
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--api-access"));
+    assert!(stdout.contains("--delete"));
     assert!(!stdout.contains("--api-key"));
     assert!(!stdout.contains("--api-key-expires-at"));
     assert!(!stdout.contains("--group"));
@@ -191,8 +198,8 @@ fn config_validate_help_uses_config_flag() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn config_add_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = help_output(&["config", "add-api", "--help"])?;
+fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "api", "--help"])?;
 
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
@@ -202,18 +209,18 @@ fn config_add_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::
     assert!(stdout.contains("--auth-header"));
     assert!(stdout.contains("--auth-value"));
     assert!(stdout.contains("--timeout-ms"));
-    assert!(stdout.contains("[default: 5000]"));
+    assert!(stdout.contains("--delete"));
     assert!(!stdout.contains("--auth-scheme"));
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_accepts_missing_timeout_ms_and_auth_fields() {
+fn config_api_accepts_missing_timeout_ms_and_auth_fields() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-api",
+        "api",
         "--name",
         "projects",
         "--base-url",
@@ -224,15 +231,15 @@ fn config_add_api_accepts_missing_timeout_ms_and_auth_fields() {
 }
 
 #[test]
-fn config_add_api_accepts_promptable_omissions_for_interactive_flow() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-api"]);
+fn config_api_accepts_promptable_omissions_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "api"]);
 
     assert!(parsed.is_ok());
 }
 
 #[test]
-fn config_add_client_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let stdout = help_output(&["config", "add-client", "--help"])?;
+fn config_client_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let stdout = help_output(&["config", "client", "--help"])?;
 
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
@@ -241,6 +248,8 @@ fn config_add_client_help_lists_expected_flags() -> Result<(), Box<dyn std::erro
     assert!(stdout.contains("--bearer-token-expires-at"));
     assert!(stdout.contains("--group"));
     assert!(stdout.contains("--api-access"));
+    assert!(stdout.contains("rotate-secret"));
+    assert!(stdout.contains("--delete"));
     assert!(stdout.contains("levels: read, write"));
     assert!(stdout.contains("Repeat the flag or comma-separate pairs"));
     assert!(!stdout.contains("--api-key"));
@@ -272,11 +281,11 @@ fn config_edit_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn config_add_client_accepts_missing_bearer_token_with_group() {
+fn config_client_accepts_missing_bearer_token_with_group() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--group",
@@ -287,11 +296,11 @@ fn config_add_client_accepts_missing_bearer_token_with_group() {
 }
 
 #[test]
-fn config_add_client_rejects_bearer_token_flag() {
+fn config_client_rejects_bearer_token_flag() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--bearer-token",
@@ -306,11 +315,11 @@ fn config_add_client_rejects_bearer_token_flag() {
 }
 
 #[test]
-fn config_add_client_accepts_repeated_api_access_flags() {
+fn config_client_accepts_repeated_api_access_flags() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--api-access",
@@ -323,31 +332,31 @@ fn config_add_client_accepts_repeated_api_access_flags() {
 }
 
 #[test]
-fn config_add_client_accepts_missing_name_and_access_for_interactive_flow() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-client"]);
+fn config_client_accepts_missing_name_and_access_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "client"]);
 
     assert!(parsed.is_ok());
 }
 
 #[test]
-fn config_add_group_parses_to_add_group() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-group"]).expect("parses");
+fn config_group_parses_to_group() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "group"]).expect("parses");
 
     match parsed.command() {
         CliCommand::Config(args) => match &args.command {
-            ConfigCommand::AddGroup(_) => {}
-            other => panic!("expected add-group variant, got {other:?}"),
+            ConfigCommand::Group(_) => {}
+            other => panic!("expected group variant, got {other:?}"),
         },
         other => panic!("expected config command, got {other:?}"),
     }
 }
 
 #[test]
-fn config_add_group_accepts_repeated_api_access_flags() {
+fn config_group_accepts_repeated_api_access_flags() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-group",
+        "group",
         "--name",
         "readonly",
         "--api-access",
@@ -360,18 +369,18 @@ fn config_add_group_accepts_repeated_api_access_flags() {
 }
 
 #[test]
-fn config_add_group_accepts_missing_name_and_access_for_interactive_flow() {
-    let parsed = Cli::try_parse_from(["gate-agent", "config", "add-group"]);
+fn config_group_accepts_missing_name_and_access_for_interactive_flow() {
+    let parsed = Cli::try_parse_from(["gate-agent", "config", "group"]);
 
     assert!(parsed.is_ok());
 }
 
 #[test]
-fn config_add_group_rejects_client_only_flags() {
+fn config_group_rejects_client_only_flags() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-group",
+        "group",
         "--name",
         "readonly",
         "--api-key",
@@ -382,11 +391,11 @@ fn config_add_group_rejects_client_only_flags() {
 }
 
 #[test]
-fn config_add_client_rejects_group_and_api_access_together() {
+fn config_client_rejects_group_and_api_access_together() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--group",
@@ -399,11 +408,11 @@ fn config_add_client_rejects_group_and_api_access_together() {
 }
 
 #[test]
-fn config_add_client_rejects_removed_api_key_flags() {
+fn config_client_rejects_removed_api_key_flags() {
     let parsed = Cli::try_parse_from([
         "gate-agent",
         "config",
-        "add-client",
+        "client",
         "--name",
         "partner",
         "--api-key",

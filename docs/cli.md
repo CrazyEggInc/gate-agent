@@ -75,14 +75,14 @@ Subcommands:
 - `config validate`
 - `config show`
 - `config edit`
-- `config add-api`
-- `config add-group`
-- `config add-client`
-- `config rotate-client-secret`
+- `config api`
+- `config group`
+- `config client`
+- `config client rotate-secret`
 
 Each config subcommand accepts `--log-level <level>`.
 
-`config show`, `config edit`, `config add-api`, `config add-group`, `config add-client`, and `config rotate-client-secret` must use the shared encrypted-config password lookup order: flag, env var, keyring, then prompt.
+`config show`, `config edit`, `config api`, `config group`, `config client`, and `config client rotate-secret` must use the shared encrypted-config password lookup order: flag, env var, keyring, then prompt.
 
 Successful encrypted reads may backfill the password in the system keyring for that config path, and later encrypted reads may reuse that cached password through the same lookup order.
 
@@ -161,7 +161,7 @@ Behavior:
 - plaintext config files are edited in place
 - encrypted config files are decrypted, edited, validated, then re-encrypted and atomically replaced
 
-### `config add-api`
+### `config api`
 
 Accepted flags:
 
@@ -173,13 +173,15 @@ Accepted flags:
 - `--auth-header`
 - `--auth-value`
 - optional `--timeout-ms`
+- `-d` / `--delete`
 
 Behavior:
 
 - creates config if it does not exist yet
 - when creating a missing config, also bootstraps `clients.default`
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
-- upserts a single API entry
+- adds or updates one API entry by name
+- `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - persists only `auth_header` and `auth_value`; `auth_scheme` is not part of the persisted API config model
 - `auth_header` is optional
 - `auth_value` is required when `auth_header` is configured and must be omitted otherwise
@@ -189,15 +191,15 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- if required fields are omitted in an interactive session, the command prompts for them in a single-line format with minimal wording
-- the interactive questionnaire asks exactly:
-  - `API name:`
-  - `Base URL (example: https://projects.internal.example/api):`
-  - `Auth header (default: authorization, use 'none' for no auth):`
-  - `Auth value (example: Bearer my-token):` only when auth header was set
+- interactive name prompts show existing API names when present and make clear that choosing an existing name updates that record
+- when updating interactively, current values become prompt defaults; blank answers keep those defaults
+- if required fields are omitted in an interactive create flow, the command prompts for them in a single-line format with minimal wording
+- in non-interactive update mode, omitted flags preserve existing values instead of clearing them
+- non-interactive delete requires explicit `--name`
+- interactive delete asks with destructive wording that says the action cannot be undone and defaults to No
 - explicit args keep the command non-interactive
 
-### `config add-group`
+### `config group`
 
 Must accept:
 
@@ -206,21 +208,28 @@ Must accept:
 - `--log-level <level>`
 - `--name`
 - repeated `--api-access <api=level[,api=level...]>`
+- `-d` / `--delete`
 
 Behavior:
 
 - creates config if it does not exist yet
 - when creating a missing config, also bootstraps `clients.default`
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
-- upserts a single group entry
+- adds or updates one group entry by name
+- `-d` / `--delete` deletes one existing group entry instead of add-or-update
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- if required fields are omitted in an interactive session, the command prompts for the group name and access map in a single-line format with minimal wording
+- interactive name prompts show existing group names when present and make clear that choosing an existing name updates that record
+- when updating interactively, current values become prompt defaults; blank answers keep those defaults
+- if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
+- in non-interactive update mode, omitted flags preserve existing values instead of clearing them
+- non-interactive delete requires explicit `--name`
+- interactive delete asks with destructive wording that says the action cannot be undone and defaults to No
 - explicit args keep the command non-interactive
 
-### `config add-client`
+### `config client`
 
 Accepted flags:
 
@@ -231,18 +240,24 @@ Accepted flags:
 - `--bearer-token-expires-at`
 - `--group <slug>`
 - repeated `--api-access <api=level[,api=level...]>`
+- `-d` / `--delete`
 
 Rules and behavior:
 
-- exactly one of `--group` or `--api-access` is required
+- exactly one of `--group` or `--api-access` is required when creating a client
 - `--group` and `--api-access` are mutually exclusive
 - `--api-access` accepts `read` and `write`
 - repeated `--api-access` flags are merged
 - if `--bearer-token-expires-at` is supplied, it must use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ`
 - one flag may contain comma-separated pairs such as `--api-access projects=read,billing=write`
-- when required fields are omitted in an interactive session, the command prompts for them
-- when groups already exist, the group prompt shows those slugs as available options so the operator can pick one or type one directly
-- leaving the group prompt blank falls back to prompting for inline `api_access`
+- adds or updates one client entry by name
+- `-d` / `--delete` deletes one existing client entry instead of add-or-update
+- interactive name prompts show existing client names when present and make clear that choosing an existing name updates that record
+- when updating interactively, current values become prompt defaults; blank answers keep those defaults
+- when required fields are omitted in an interactive create flow, the command prompts for them
+- in the interactive client flow, the CLI asks for `Access mode` before prompting for `Group name`
+- when groups already exist, the `Group name` prompt shows those slugs as available options so the operator can pick one or type a new slug directly
+- `Group name` is required when `Access mode` is `group`; a blank response fails instead of falling back to inline `api_access`
 - prompts stay single-line and avoid extra descriptive text when the question itself is already clear
 - if the client does not already exist, the command generates a bearer token and prints it once for operator capture
 - if the client already exists, existing token metadata is preserved unless a future rotation workflow changes it
@@ -254,9 +269,12 @@ Rules and behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
+- in non-interactive update mode, omitted flags preserve existing values instead of clearing them
+- non-interactive delete requires explicit `--name`
+- interactive delete asks with destructive wording that says the action cannot be undone and defaults to No
 - explicit args keep the command non-interactive
 
-### `config rotate-client-secret`
+### `config client rotate-secret`
 
 Accepted flags:
 
@@ -271,9 +289,9 @@ Rules and behavior:
 - rotates credentials for one existing client only
 - fails if config file does not already exist
 - fails if target client does not already exist
-- when required fields are omitted in an interactive session, the command prompts for the client name
+- when required fields are omitted in an interactive session, the command prompts for the client name and shows existing client names when present
 - if `--bearer-token-expires-at` is supplied, it must use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ`
-- if `--bearer-token-expires-at` is omitted, existing expiry is preserved exactly
+- if `--bearer-token-expires-at` is omitted, existing expiry is preserved exactly and used as the interactive default when rotating an existing client
 - rotation generates a brand-new bearer token and replaces persisted `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - existing `group` or inline `api_access` stays unchanged
 - the replacement bearer token is printed to stdout exactly once for operator capture
@@ -330,10 +348,10 @@ gate-agent config init --help
 gate-agent config validate --help
 gate-agent config show --help
 gate-agent config edit --help
-gate-agent config add-api --help
-gate-agent config add-group --help
-gate-agent config add-client --help
-gate-agent config rotate-client-secret --help
+gate-agent config api --help
+gate-agent config group --help
+gate-agent config client --help
+gate-agent config client rotate-secret --help
 gate-agent version
 ```
 
