@@ -3,14 +3,14 @@ use std::fmt::{Display, Formatter};
 use std::io::IsTerminal;
 
 use crate::cli::{
-    Command, ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigArgs, ConfigCommand,
-    ConfigEditArgs, ConfigInitArgs, ConfigRotateClientSecretArgs, ConfigShowArgs,
+    Command, ConfigApiArgs, ConfigArgs, ConfigClientArgs, ConfigClientSubcommand, ConfigCommand,
+    ConfigEditArgs, ConfigGroupArgs, ConfigInitArgs, ConfigRotateSecretArgs, ConfigShowArgs,
     ConfigValidateArgs, StartArgs,
 };
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
 use crate::config::app_config::DEFAULT_LOG_LEVEL;
-use crate::config::secrets::{DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
+use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
@@ -89,26 +89,92 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
                 .map_err(|error| CommandError::new(error.to_string()))?;
             println!("{message}");
         }
-        ConfigCommand::AddApi(args) => {
-            let resolved = resolve_config_add_api_args(args)?;
-            config::add_api(resolved).map_err(|error| CommandError::new(error.to_string()))?;
-        }
-        ConfigCommand::AddGroup(args) => {
-            let resolved = resolve_config_add_group_args(args)?;
-            config::add_group(resolved).map_err(|error| CommandError::new(error.to_string()))?;
-        }
-        ConfigCommand::AddClient(args) => {
-            let resolved = resolve_config_add_client_args(args)?;
-            config::add_client(resolved).map_err(|error| CommandError::new(error.to_string()))?;
-        }
-        ConfigCommand::RotateClientSecret(args) => {
-            let resolved = resolve_config_rotate_client_secret_args(args)?;
-            config::rotate_client_secret(resolved)
+        ConfigCommand::Api(args) => {
+            let outcome = config::apply_api(resolve_config_api_args(args)?)
                 .map_err(|error| CommandError::new(error.to_string()))?;
+            print_resource_success(&outcome);
+        }
+        ConfigCommand::Group(args) => {
+            let outcome = config::apply_group(resolve_config_group_args(args)?)
+                .map_err(|error| CommandError::new(error.to_string()))?;
+            print_resource_success(&outcome);
+        }
+        ConfigCommand::Client(args) => {
+            if let Some(ConfigClientSubcommand::RotateSecret(subcommand)) = args.command.clone() {
+                reject_rotate_secret_parent_client_flags(&args)?;
+                let resolved_args = merge_rotate_secret_args(args, subcommand);
+                config::rotate_client_secret(resolve_rotate_secret_args(resolved_args)?)
+                    .map_err(|error| CommandError::new(error.to_string()))?;
+                return Ok(());
+            }
+
+            let outcome = config::apply_client(resolve_config_client_args(args)?)
+                .map_err(|error| CommandError::new(error.to_string()))?;
+            print_resource_success(&outcome.resource);
         }
     }
 
     Ok(())
+}
+
+fn reject_rotate_secret_parent_client_flags(args: &ConfigClientArgs) -> Result<(), CommandError> {
+    let mut forbidden_flags = Vec::new();
+
+    if args.delete {
+        forbidden_flags.push("--delete");
+    }
+
+    if args.group.is_some() {
+        forbidden_flags.push("--group");
+    }
+
+    if !args.api_access.is_empty() {
+        forbidden_flags.push("--api-access");
+    }
+
+    if forbidden_flags.is_empty() {
+        return Ok(());
+    }
+
+    Err(CommandError::new(format!(
+        "config client rotate-secret does not accept parent flags: {}",
+        forbidden_flags.join(", ")
+    )))
+}
+
+fn merge_rotate_secret_args(
+    parent: ConfigClientArgs,
+    nested: ConfigRotateSecretArgs,
+) -> ConfigRotateSecretArgs {
+    let nested_log_level_was_explicitly_set = nested.log_level_was_explicitly_set();
+
+    ConfigRotateSecretArgs {
+        config: nested.config.or(parent.config),
+        password: nested.password.or(parent.password),
+        log_level: if nested_log_level_was_explicitly_set {
+            nested.log_level
+        } else {
+            parent.log_level
+        },
+        log_level_explicitly_set: nested_log_level_was_explicitly_set,
+        name: if nested.name.trim().is_empty() {
+            parent.name.unwrap_or_default()
+        } else {
+            nested.name
+        },
+        bearer_token_expires_at: nested
+            .bearer_token_expires_at
+            .or(parent.bearer_token_expires_at),
+    }
+}
+
+fn print_resource_success(outcome: &config::ResourceMutationOutcome) {
+    println!(
+        "{} {} '{}'",
+        outcome.kind.label(),
+        outcome.resource_kind.label(),
+        outcome.name
+    );
 }
 
 fn run_start(args: StartArgs) -> Result<(), CommandError> {
@@ -123,9 +189,7 @@ struct ResolvedConfigInitArgs {
 }
 
 fn resolve_config_init_args(args: ConfigInitArgs) -> Result<ResolvedConfigInitArgs, CommandError> {
-    let interactive = !config::interactive_prompts_disabled()
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal();
+    let interactive = interactive_questionnaire_available();
 
     let encrypted = if args.encrypted_was_explicitly_set() {
         args.encrypted
@@ -254,233 +318,433 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
     }
 }
 
-fn resolve_config_add_api_args(
-    args: ConfigAddApiArgs,
-) -> Result<config::ConfigAddApiArgs, CommandError> {
-    let invoked_name = "add-api";
-    let name_error = format!("config {invoked_name} requires --name in non-interactive sessions");
-    let base_url_error =
-        format!("config {invoked_name} requires --base-url in non-interactive sessions");
-
-    let name = resolve_required_arg(
+fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs, CommandError> {
+    let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
+        .map_err(|error| CommandError::new(error.to_string()))?;
+    let detail = config::format_existing_name_hint(config::ResourceKind::Api, &names, args.delete);
+    let name = resolve_name(
         args.name,
-        &config::prompt_message("API name", None, None, None, None, None),
-        &name_error,
+        "API name",
+        detail.as_deref(),
+        "config api requires --name in non-interactive sessions",
     )?;
-    let base_url = resolve_required_arg(
-        args.base_url,
-        &config::prompt_message(
+
+    if args.delete {
+        confirm_delete(config::ResourceKind::Api, &name)?;
+        return Ok(config::ConfigApiArgs {
+            config: args.config,
+            password: args.password,
+            log_level: args.log_level,
+            delete: true,
+            name,
+            base_url: None,
+            auth_header: None,
+            auth_value: None,
+            timeout_ms: None,
+        });
+    }
+
+    let existing =
+        config::load_existing_api_state(args.config.as_deref(), args.password.clone(), &name)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+
+    let base_url = if args.base_url.is_some() {
+        args.base_url
+    } else if interactive_questionnaire_available() {
+        Some(prompt_required(
             "Base URL",
-            None,
-            None,
+            existing.as_ref().map(|state| state.base_url.as_str()),
             Some("https://projects.internal.example/api"),
-            None,
-            None,
-        ),
-        &base_url_error,
-    )?;
+            "config api requires --base-url in non-interactive sessions",
+        )?)
+    } else {
+        None
+    };
 
-    let mut auth_header = optional_non_empty(args.auth_header);
-    let mut auth_value = optional_non_empty(args.auth_value);
-
-    if auth_header.is_none() && auth_value.is_none() && interactive_questionnaire_available() {
-        auth_header = config::prompt_optional_text(
+    let existing_auth_header = existing
+        .as_ref()
+        .and_then(|state| state.auth_header.as_deref());
+    let auth_header = if args.auth_header.is_some() || args.auth_value.is_some() {
+        args.auth_header
+    } else if interactive_questionnaire_available() {
+        config::prompt_optional_text(
             &config::prompt_message(
                 "Auth header",
                 None,
+                existing_auth_header,
                 Some("authorization"),
-                None,
                 None,
                 Some("use 'none' for no auth"),
             ),
-            Some("authorization"),
-            "config add-api accepts optional --auth-header",
+            existing_auth_header,
+            "config api accepts optional --auth-header",
         )
-        .map_err(|error| CommandError::new(error.to_string()))?;
+        .map_err(|error| CommandError::new(error.to_string()))?
+    } else {
+        None
+    };
 
-        if auth_header.as_deref() == Some("none") {
-            auth_header = None;
+    let auth_value = if args.auth_value.is_some() {
+        args.auth_value
+    } else if interactive_questionnaire_available() && auth_header.as_deref() != Some("none") {
+        match auth_header.as_deref() {
+            Some(header) if !header.trim().is_empty() => Some(prompt_required(
+                "Auth value",
+                existing
+                    .as_ref()
+                    .and_then(|state| state.auth_value.as_deref()),
+                Some("Bearer my-token"),
+                "config api requires --auth-value when auth_header is configured",
+            )?),
+            _ => None,
         }
+    } else {
+        None
+    };
 
-        if auth_header.is_some() {
-            auth_value = Some(
-                config::prompt_required_text(
-                    &config::prompt_message(
-                        "Auth value",
-                        None,
-                        None,
-                        Some("Bearer my-token"),
-                        None,
-                        None,
-                    ),
-                    None,
-                    "config add-api requires --auth-value when auth_header is configured",
-                )
-                .map_err(|error| CommandError::new(error.to_string()))?,
-            );
-        }
-    }
+    let timeout_ms = if args.timeout_ms.is_some() {
+        args.timeout_ms
+    } else {
+        existing.as_ref().map(|state| state.timeout_ms)
+    };
 
-    if auth_header.is_none() && auth_value.is_some() {
-        return Err(CommandError::new(
-            "auth_value cannot be set without auth_header",
-        ));
-    }
-
-    if auth_header.is_some() && auth_value.is_none() {
-        return Err(CommandError::new(
-            "auth_value is required when auth_header is configured",
-        ));
-    }
-
-    Ok(config::ConfigAddApiArgs {
+    Ok(config::ConfigApiArgs {
         config: args.config,
         password: args.password,
         log_level: args.log_level,
+        delete: false,
         name,
         base_url,
         auth_header,
         auth_value,
-        timeout_ms: args.timeout_ms,
+        timeout_ms,
     })
 }
 
-fn resolve_config_add_client_args(
-    args: ConfigAddClientArgs,
-) -> Result<config::ConfigAddClientArgs, CommandError> {
-    let name = resolve_required_arg(
+fn resolve_config_group_args(
+    args: ConfigGroupArgs,
+) -> Result<config::ConfigGroupArgs, CommandError> {
+    let names = config::list_group_slugs(args.config.as_deref(), args.password.clone())
+        .map_err(|error| CommandError::new(error.to_string()))?;
+    let detail =
+        config::format_existing_name_hint(config::ResourceKind::Group, &names, args.delete);
+    let name = resolve_name(
         args.name,
-        &config::prompt_message("Client name", None, None, None, None, None),
-        "config add-client requires --name in non-interactive sessions",
+        "Group name",
+        detail.as_deref(),
+        "config group requires --name in non-interactive sessions",
     )?;
 
-    let group = if args.group.is_some() || !args.api_access.is_empty() {
-        args.group
-    } else {
-        let existing_groups =
-            config::list_group_slugs(args.config.as_deref(), args.password.clone())
-                .map_err(|error| CommandError::new(error.to_string()))?;
-        let options = if existing_groups.is_empty() {
-            "blank = inline api_access".to_owned()
-        } else {
-            format!("{}, blank = inline api_access", existing_groups.join(", "))
-        };
+    if args.delete {
+        confirm_delete(config::ResourceKind::Group, &name)?;
+        return Ok(config::ConfigGroupArgs {
+            config: args.config,
+            password: args.password,
+            log_level: args.log_level,
+            delete: true,
+            name,
+            api_access: vec![],
+        });
+    }
 
-        config::prompt_optional_text(
-            &config::prompt_message("Group name", None, None, None, Some(&options), None),
-            None,
-            "config add-client requires --group or --api-access in non-interactive sessions",
-        )
-        .map_err(|error| CommandError::new(error.to_string()))?
+    let existing =
+        config::load_existing_group_state(args.config.as_deref(), args.password.clone(), &name)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+    let api_access = if !args.api_access.is_empty() {
+        args.api_access
+    } else if interactive_questionnaire_available() {
+        vec![prompt_required(
+            "Inline api_access entry",
+            existing.as_ref().map(render_api_access_map).as_deref(),
+            Some("projects=read,reports=write"),
+            "config group requires --api-access in non-interactive sessions",
+        )?]
+    } else {
+        vec![]
     };
 
-    let api_access =
-        if group.is_some() || !args.api_access.is_empty() {
-            args.api_access
+    Ok(config::ConfigGroupArgs {
+        config: args.config,
+        password: args.password,
+        log_level: args.log_level,
+        delete: false,
+        name,
+        api_access,
+    })
+}
+
+fn resolve_config_client_args(
+    args: ConfigClientArgs,
+) -> Result<config::ConfigClientArgs, CommandError> {
+    let names = config::list_client_slugs(args.config.as_deref(), args.password.clone())
+        .map_err(|error| CommandError::new(error.to_string()))?;
+    let detail =
+        config::format_existing_name_hint(config::ResourceKind::Client, &names, args.delete);
+    let name = resolve_name(
+        args.name,
+        "Client name",
+        detail.as_deref(),
+        "config client requires --name in non-interactive sessions",
+    )?;
+
+    if args.delete {
+        confirm_delete(config::ResourceKind::Client, &name)?;
+        return Ok(config::ConfigClientArgs {
+            config: args.config,
+            password: args.password,
+            log_level: args.log_level,
+            delete: true,
+            name,
+            bearer_token_expires_at: None,
+            group: None,
+            api_access: vec![],
+        });
+    }
+
+    let existing =
+        config::load_existing_client_state(args.config.as_deref(), args.password.clone(), &name)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+
+    let bearer_token_expires_at = if args.bearer_token_expires_at.is_some() {
+        args.bearer_token_expires_at
+    } else if interactive_questionnaire_available() {
+        Some(prompt_required(
+            "Bearer token expires at",
+            existing
+                .as_ref()
+                .map(|state| state.bearer_token_expires_at.as_str()),
+            None,
+            "config client requires --bearer-token-expires-at in non-interactive sessions",
+        )?)
+    } else {
+        None
+    };
+
+    let has_access = args.group.is_some() || !args.api_access.is_empty();
+    if has_access {
+        return Ok(config::ConfigClientArgs {
+            config: args.config,
+            password: args.password,
+            log_level: args.log_level,
+            delete: false,
+            name,
+            bearer_token_expires_at,
+            group: args.group,
+            api_access: args.api_access,
+        });
+    }
+
+    if interactive_questionnaire_available() {
+        let default_mode = if existing
+            .as_ref()
+            .and_then(|state| state.group.as_ref())
+            .is_some()
+        {
+            "group"
         } else {
-            vec![config::prompt_required_text(
+            "inline"
+        };
+        let chosen_mode = config::prompt_required_text(
             &config::prompt_message(
-                "Inline api_access entry",
+                "Access mode",
                 None,
+                Some(default_mode),
                 None,
-                Some("projects=read,reports=write"),
-                Some("levels: read, write"),
+                Some("group, inline"),
                 None,
             ),
-            None,
-            "config add-client requires --group or --api-access in non-interactive sessions",
+            Some(default_mode),
+            "config client requires --group or --api-access in non-interactive sessions",
         )
-        .map_err(|error| CommandError::new(error.to_string()))?]
+        .map_err(|error| CommandError::new(error.to_string()))?;
+
+        let (group, api_access) = match chosen_mode.as_str() {
+            "group" => {
+                let groups =
+                    config::list_group_slugs(args.config.as_deref(), args.password.clone())
+                        .map_err(|error| CommandError::new(error.to_string()))?;
+                let detail = if groups.is_empty() {
+                    None
+                } else {
+                    Some(format!("existing groups: {}", groups.join(", ")))
+                };
+                let group = config::prompt_required_text(
+                    &config::prompt_message(
+                        "Group name",
+                        detail.as_deref(),
+                        existing.as_ref().and_then(|state| state.group.as_deref()),
+                        None,
+                        None,
+                        None,
+                    ),
+                    existing.as_ref().and_then(|state| state.group.as_deref()),
+                    "config client requires --group or --api-access in non-interactive sessions",
+                )
+                .map_err(|error| CommandError::new(error.to_string()))?;
+                (Some(group), vec![])
+            }
+            "inline" => (
+                None,
+                vec![prompt_required(
+                    "Inline api_access entry",
+                    existing
+                        .as_ref()
+                        .map(render_client_api_access_map)
+                        .as_deref(),
+                    Some("projects=read,reports=write"),
+                    "config client requires --group or --api-access in non-interactive sessions",
+                )?],
+            ),
+            _ => {
+                return Err(CommandError::new(
+                    "Access mode must be one of: group, inline",
+                ));
+            }
         };
 
-    Ok(config::ConfigAddClientArgs {
+        return Ok(config::ConfigClientArgs {
+            config: args.config,
+            password: args.password,
+            log_level: args.log_level,
+            delete: false,
+            name,
+            bearer_token_expires_at,
+            group,
+            api_access,
+        });
+    }
+
+    Ok(config::ConfigClientArgs {
         config: args.config,
         password: args.password,
         log_level: args.log_level,
+        delete: false,
         name,
-        bearer_token_expires_at: args.bearer_token_expires_at,
-        group,
-        api_access,
+        bearer_token_expires_at,
+        group: None,
+        api_access: vec![],
     })
 }
 
-fn resolve_config_add_group_args(
-    args: ConfigAddGroupArgs,
-) -> Result<config::ConfigAddGroupArgs, CommandError> {
-    let name = resolve_required_arg(
-        args.name,
-        &config::prompt_message("Group name", None, None, None, None, None),
-        "config add-group requires --name in non-interactive sessions",
+fn resolve_rotate_secret_args(
+    args: ConfigRotateSecretArgs,
+) -> Result<config::ConfigRotateSecretArgs, CommandError> {
+    let names = config::list_client_slugs(args.config.as_deref(), args.password.clone())
+        .map_err(|error| CommandError::new(error.to_string()))?;
+    let detail = config::format_existing_name_hint(config::ResourceKind::Client, &names, false);
+    let name = resolve_name(
+        Some(args.name),
+        "Client name",
+        detail.as_deref(),
+        "config client rotate-secret requires --name in non-interactive sessions",
     )?;
 
-    let api_access = if args.api_access.is_empty() {
-        vec![
-            config::prompt_required_text(
-                &config::prompt_message(
-                    "Inline api_access entry",
-                    None,
-                    None,
-                    Some("projects=read,reports=write"),
-                    Some("levels: read, write"),
-                    None,
-                ),
-                None,
-                "config add-group requires --api-access in non-interactive sessions",
-            )
-            .map_err(|error| CommandError::new(error.to_string()))?,
-        ]
+    let existing =
+        config::load_existing_client_state(args.config.as_deref(), args.password.clone(), &name)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+    let bearer_token_expires_at = if args.bearer_token_expires_at.is_some() {
+        args.bearer_token_expires_at
+    } else if interactive_questionnaire_available() {
+        Some(prompt_required(
+            "Bearer token expires at",
+            existing
+                .as_ref()
+                .map(|state| state.bearer_token_expires_at.as_str()),
+            None,
+            "config client rotate-secret requires --bearer-token-expires-at in non-interactive sessions",
+        )?)
     } else {
-        args.api_access
+        None
     };
 
-    Ok(config::ConfigAddGroupArgs {
+    Ok(config::ConfigRotateSecretArgs {
         config: args.config,
         password: args.password,
         log_level: args.log_level,
         name,
-        api_access,
+        bearer_token_expires_at,
     })
 }
 
-fn resolve_config_rotate_client_secret_args(
-    args: ConfigRotateClientSecretArgs,
-) -> Result<config::ConfigRotateClientSecretArgs, CommandError> {
-    let name = resolve_required_arg(
-        args.name,
-        &config::prompt_message("Client name", None, None, None, None, None),
-        "config rotate-client-secret requires --name in non-interactive sessions",
-    )?;
-
-    Ok(config::ConfigRotateClientSecretArgs {
-        config: args.config,
-        password: args.password,
-        log_level: args.log_level,
-        name,
-        bearer_token_expires_at: args.bearer_token_expires_at,
-    })
-}
-
-fn resolve_required_arg(
-    value: String,
-    prompt: &str,
+fn resolve_name(
+    value: Option<String>,
+    label: &str,
+    detail: Option<&str>,
     non_interactive_message: &str,
 ) -> Result<String, CommandError> {
-    if !value.trim().is_empty() {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         return Ok(value);
     }
 
-    config::prompt_required_text(prompt, None, non_interactive_message)
-        .map_err(|error| CommandError::new(error.to_string()))
+    config::prompt_required_text(
+        &config::prompt_message(label, detail, None, None, None, None),
+        None,
+        non_interactive_message,
+    )
+    .map_err(|error| CommandError::new(error.to_string()))
 }
 
-fn optional_non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim();
+fn prompt_required(
+    label: &str,
+    default: Option<&str>,
+    example: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<String, CommandError> {
+    config::prompt_required_text(
+        &config::prompt_message(label, None, default, example, None, None),
+        default,
+        non_interactive_message,
+    )
+    .map_err(|error| CommandError::new(error.to_string()))
+}
 
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
+fn confirm_delete(resource_kind: config::ResourceKind, name: &str) -> Result<(), CommandError> {
+    if !interactive_questionnaire_available() {
+        return Ok(());
     }
+
+    let confirmed = config::prompt_yes_no(
+        &format!(
+            "Delete {} '{}'? This cannot be undone",
+            resource_kind.label(),
+            name
+        ),
+        false,
+        &format!(
+            "config {} --delete requires explicit --name in non-interactive sessions",
+            resource_kind.label()
+        ),
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    if !confirmed {
+        return Err(CommandError::new("Delete cancelled"));
+    }
+
+    Ok(())
+}
+
+fn render_api_access_map(map: &config::ExistingGroupState) -> String {
+    render_access_map(&map.api_access)
+}
+
+fn render_client_api_access_map(map: &config::ExistingClientPromptState) -> String {
+    render_access_map(&map.api_access)
+}
+
+fn render_access_map(map: &std::collections::BTreeMap<String, AccessLevel>) -> String {
+    map.iter()
+        .map(|(api, level)| {
+            format!(
+                "{api}={}",
+                match level {
+                    AccessLevel::Read => "read",
+                    AccessLevel::Write => "write",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn interactive_questionnaire_available() -> bool {

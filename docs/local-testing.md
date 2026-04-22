@@ -227,26 +227,70 @@ VISUAL=nvim GATE_AGENT_PASSWORD='correct horse battery staple' \
   cargo run -- config edit --config .secrets.encrypted
 ```
 
-Add a client with a generated token:
+Use resource-first config mutators for local operator work.
+
+Upsert an API:
 
 ```sh
-cargo run -- config add-client --config .secrets \
-  --name partner \
-  --bearer-token-expires-at '2031-02-03T04:05:06Z' \
+cargo run -- config api --config .secrets \
+  --name projects \
+  --base-url 'http://127.0.0.1:18081/api' \
+  --auth-header authorization \
+  --auth-value 'Bearer local-upstream-token'
+```
+
+Upsert a group:
+
+```sh
+cargo run -- config group --config .secrets \
+  --name local-default \
   --api-access projects=read
 ```
 
-That command prints the generated bearer token once and persists only its metadata.
+Add or update client with generated token on create:
+
+```sh
+cargo run -- config client --config .secrets \
+  --name partner \
+  --bearer-token-expires-at '2031-02-03T04:05:06Z' \
+  --group local-default
+```
+
+That command prints generated bearer token once on create and persists only token metadata.
 
 Rotate an existing client token:
 
 ```sh
-cargo run -- config rotate-client-secret --config .secrets \
+cargo run -- config client rotate-secret --config .secrets \
   --name partner \
   --bearer-token-expires-at '2032-03-04T05:06:07Z'
 ```
 
 That command prints replacement bearer token once, persists only replacement token metadata, and leaves existing client access rules unchanged. Update any local `GATE_AGENT_TOKEN` export to use replacement token after rotation.
+
+Delete an API:
+
+```sh
+cargo run -- config api --config .secrets --name projects --delete
+```
+
+Delete fails when any group or inline client still references that API.
+
+Delete a group:
+
+```sh
+cargo run -- config group --config .secrets --name local-default --delete
+```
+
+Delete fails when any client still references that group.
+
+Delete a client:
+
+```sh
+cargo run -- config client --config .secrets --name partner --delete
+```
+
+Delete fails when target would leave config with no clients.
 
 ## Recommended local smoke test
 

@@ -1,3 +1,4 @@
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Mutex, OnceLock};
@@ -5,9 +6,9 @@ use std::sync::{Mutex, OnceLock};
 use age::Encryptor;
 use assert_cmd::Command;
 use gate_agent::commands::config::{
-    ConfigAddApiArgs, ConfigAddClientArgs, ConfigAddGroupArgs, ConfigInitArgs,
-    ConfigRotateClientSecretArgs, ConfigShowArgs, ConfigValidateArgs, add_api, add_client,
-    add_group, init, rotate_client_secret, show, validate,
+    ConfigApiArgs, ConfigClientArgs, ConfigGroupArgs, ConfigInitArgs, ConfigRotateSecretArgs,
+    ConfigShowArgs, ConfigValidateArgs, apply_api, apply_client, apply_group, init,
+    rotate_client_secret, show, validate,
 };
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::password::PASSWORD_ENV_VAR;
@@ -255,6 +256,110 @@ fn run_gate_agent_in_tty(
         .output()?)
 }
 
+fn run_gate_agent_in_tty_with_input(
+    current_dir: &Path,
+    args: &[&str],
+    input: &str,
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let binary = assert_cmd::cargo::cargo_bin("gate-agent");
+    let binary = binary.to_str().ok_or("cargo_bin path must be utf-8")?;
+    let python = r#"
+import json, os, pty, select, subprocess, sys
+
+binary = sys.argv[1]
+args = sys.argv[2:]
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    [binary, *args],
+    stdin=slave,
+    stdout=subprocess.PIPE,
+    stderr=slave,
+)
+os.close(slave)
+
+input_data = os.environ.get('GATE_AGENT_TTY_INPUT', '').encode()
+if input_data:
+    os.write(master, input_data)
+
+stderr_chunks = []
+while True:
+    ready, _, _ = select.select([master], [], [], 0.05)
+    if master in ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b''
+        if chunk:
+            stderr_chunks.append(chunk)
+            continue
+        break
+    if proc.poll() is not None:
+        break
+
+stdout = proc.stdout.read() if proc.stdout is not None else b''
+if proc.stdout is not None:
+    proc.stdout.close()
+
+while True:
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    stderr_chunks.append(chunk)
+
+os.close(master)
+sys.stdout.write(json.dumps({
+    'code': proc.wait(),
+    'stdout': stdout.decode('utf-8', errors='replace'),
+    'stderr': b''.join(stderr_chunks).decode('utf-8', errors='replace'),
+}))
+"#;
+
+    let output = ProcessCommand::new("python3")
+        .current_dir(current_dir)
+        .arg("-c")
+        .arg(python)
+        .arg(binary)
+        .args(args)
+        .env("GATE_AGENT_TTY_INPUT", input)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "python PTY helper failed: status={:?}, stderr={} ",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let code = rendered
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("PTY helper missing exit code")? as i32;
+    let stdout = rendered
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("PTY helper missing stdout")?
+        .as_bytes()
+        .to_vec();
+    let stderr = rendered
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("PTY helper missing stderr")?
+        .as_bytes()
+        .to_vec();
+
+    Ok(std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout,
+        stderr,
+    })
+}
+
 fn table_at<'a>(value: &'a Value, path: &[&str]) -> &'a toml::map::Map<String, Value> {
     let mut current = value;
 
@@ -343,6 +448,79 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
 }
 
 #[test]
+fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join(".secrets");
+
+    unsafe {
+        std::env::remove_var(TEST_PROMPT_INPUTS_ENV_VAR);
+        std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner-readonly".to_owned(),
+        api_access: vec!["projects=read".to_owned()],
+    })?;
+    apply_client(ConfigClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        group: Some("partner-readonly".to_owned()),
+        api_access: vec![],
+    })?;
+
+    let output = run_gate_agent_in_tty_with_input(
+        &workspace,
+        &[
+            "config",
+            "client",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--name",
+            "partner",
+            "--bearer-token-expires-at",
+            "2030-01-02T03:04:05Z",
+        ],
+        "\n\n",
+    )?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr)?.replace("\r", "");
+    assert!(
+        stderr.contains("Access mode (default: group; options: group, inline):"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Group name — existing groups: local-default, partner-readonly (default: partner-readonly):"),
+        "{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_add_client_generates_bearer_token_when_missing_and_prints_it_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
@@ -357,7 +535,7 @@ fn config_add_client_generates_bearer_token_when_missing_and_prints_it_once()
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--name",
@@ -400,7 +578,7 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--name",
@@ -441,10 +619,11 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
     let config_path = temp_dir.path().join("gate-agent.toml");
 
     write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
@@ -454,7 +633,7 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
     let old_id = string_at(&before, &["clients", "partner", "bearer_token_id"]).to_owned();
     let old_hash = string_at(&before, &["clients", "partner", "bearer_token_hash"]).to_owned();
 
-    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+    let outcome = rotate_client_secret(ConfigRotateSecretArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
@@ -496,24 +675,26 @@ fn config_rotate_client_secret_updates_expiry_when_override_is_supplied()
     let config_path = temp_dir.path().join("gate-agent.toml");
 
     write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
-    add_group(ConfigAddGroupArgs {
+    apply_group(ConfigGroupArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner-readonly".to_owned(),
         api_access: vec!["projects=read".to_owned()],
     })?;
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: Some("partner-readonly".to_owned()),
         api_access: vec![],
     })?;
 
-    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+    let outcome = rotate_client_secret(ConfigRotateSecretArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
@@ -566,10 +747,11 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         None,
     )?;
 
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
@@ -598,17 +780,18 @@ fn encrypted_config_rotate_client_secret_preserves_password_workflow()
     let password = SecretString::from("top-secret-password".to_owned());
 
     write::init_config(&config_path, true, Some(&password))?;
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })?;
 
-    let outcome = rotate_client_secret(ConfigRotateClientSecretArgs {
+    let outcome = rotate_client_secret(ConfigRotateSecretArgs {
         config: Some(config_path.clone()),
         password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
@@ -674,7 +857,7 @@ fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_ba
         .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path_str,
             "--password",
@@ -731,7 +914,8 @@ fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_ba
         .env_remove(TEST_KEYRING_STORE_FAILURE_ENV_VAR)
         .args([
             "config",
-            "rotate-client-secret",
+            "client",
+            "rotate-secret",
             "--config",
             config_path_str,
             "--name",
@@ -868,7 +1052,8 @@ fn encrypted_config_rotate_client_secret_supports_binary_age_config()
     let rotate_output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "rotate-client-secret",
+            "client",
+            "rotate-secret",
             "--config",
             config_path_str,
             "--password",
@@ -931,7 +1116,7 @@ fn config_rotate_client_secret_fails_for_missing_client_without_writing()
     write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
     let before = std::fs::read(&config_path)?;
 
-    let error = rotate_client_secret(ConfigRotateClientSecretArgs {
+    let error = rotate_client_secret(ConfigRotateSecretArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
@@ -952,7 +1137,7 @@ fn config_rotate_client_secret_does_not_bootstrap_missing_config()
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("missing.toml");
 
-    let error = rotate_client_secret(ConfigRotateClientSecretArgs {
+    let error = rotate_client_secret(ConfigRotateSecretArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
@@ -992,10 +1177,11 @@ fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1043,10 +1229,11 @@ fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1082,10 +1269,11 @@ fn config_add_client_rejects_invalid_api_access_level_with_clear_message()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1121,10 +1309,11 @@ fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1160,10 +1349,11 @@ fn config_add_client_rejects_trailing_comma_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1199,10 +1389,11 @@ fn config_add_client_rejects_doubled_comma_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1238,10 +1429,11 @@ fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: None,
@@ -1288,10 +1480,11 @@ fn config_add_client_writes_group_reference_without_inline_api_access()
         ),
     )?;
 
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
         group: Some("partner-readonly".to_owned()),
@@ -1333,33 +1526,32 @@ fn config_add_client_uses_prompted_name_and_existing_group()
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddGroup(
-                gate_agent::cli::ConfigAddGroupArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: "partner-readonly".to_owned(),
-                    api_access: vec!["projects=read".to_owned()],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Group(gate_agent::cli::ConfigGroupArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("partner-readonly".to_owned()),
+                api_access: vec!["projects=read".to_owned()],
+            }),
         },
     ))?;
 
-    set_test_prompt_inputs(&["partner", "partner-readonly"])?;
+    set_test_prompt_inputs(&["partner", "group", "partner-readonly"])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddClient(
-                gate_agent::cli::ConfigAddClientArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-                    group: None,
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Client(gate_agent::cli::ConfigClientArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                group: None,
+                api_access: vec![],
+                command: None,
+            }),
         },
     ))?;
 
@@ -1400,17 +1592,17 @@ fn config_add_client_falls_back_to_prompted_inline_api_access_when_group_is_blan
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddClient(
-                gate_agent::cli::ConfigAddClientArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-                    group: None,
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Client(gate_agent::cli::ConfigClientArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                group: None,
+                api_access: vec![],
+                command: None,
+            }),
         },
     ))?;
 
@@ -1455,15 +1647,14 @@ fn config_add_group_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn 
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddGroup(
-                gate_agent::cli::ConfigAddGroupArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Group(gate_agent::cli::ConfigGroupArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                api_access: vec![],
+            }),
         },
     ))?;
 
@@ -1500,10 +1691,11 @@ fn config_add_group_rejects_empty_api_access_entries() -> Result<(), Box<dyn std
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = add_group(ConfigAddGroupArgs {
+    let error = apply_group(ConfigGroupArgs {
         config: Some(config_path),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "readonly".to_owned(),
         api_access: vec![],
     })
@@ -1545,15 +1737,16 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path.clone()),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: String::new(),
-                base_url: String::new(),
-                auth_header: String::new(),
-                auth_value: String::new(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: None,
+                base_url: None,
+                auth_header: None,
+                auth_value: None,
+                timeout_ms: Some(5_000),
             }),
         },
     ))?;
@@ -1602,15 +1795,80 @@ fn config_add_api_skips_auth_prompts_and_persistence_when_auth_header_is_blank()
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path.clone()),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: String::new(),
-                base_url: String::new(),
-                auth_header: String::new(),
-                auth_value: String::new(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: None,
+                base_url: None,
+                auth_header: None,
+                auth_value: None,
+                timeout_ms: Some(5_000),
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+    let api = table_at(&config, &["apis", "projects"]);
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://projects.internal.example/api")
+    );
+    assert!(api.get("auth_header").is_none());
+    assert!(api.get("auth_value").is_none());
+    assert!(api.get("auth_scheme").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_interactive_preserves_existing_no_auth_when_prompt_left_blank()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        auth_header: None,
+        auth_value: None,
+        timeout_ms: Some(5_000),
+    })?;
+
+    set_test_prompt_inputs(&["", ""])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: None,
+                auth_header: None,
+                auth_value: None,
+                timeout_ms: None,
             }),
         },
     ))?;
@@ -1652,15 +1910,16 @@ fn config_add_api_non_interactive_allows_missing_auth_fields()
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path.clone()),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: "projects".to_owned(),
-                base_url: "https://projects.internal.example/api".to_owned(),
-                auth_header: String::new(),
-                auth_value: String::new(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: Some("https://projects.internal.example/api".to_owned()),
+                auth_header: None,
+                auth_value: None,
+                timeout_ms: Some(5_000),
             }),
         },
     ))?;
@@ -1701,15 +1960,16 @@ fn config_add_api_rejects_auth_header_without_auth_value_non_interactively()
 
     let error = gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: "projects".to_owned(),
-                base_url: "https://projects.internal.example/api".to_owned(),
-                auth_header: "authorization".to_owned(),
-                auth_value: String::new(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: Some("https://projects.internal.example/api".to_owned()),
+                auth_header: Some("authorization".to_owned()),
+                auth_value: None,
+                timeout_ms: Some(5_000),
             }),
         },
     ))
@@ -1746,15 +2006,16 @@ fn config_add_api_rejects_auth_value_without_auth_header_non_interactively()
 
     let error = gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: "projects".to_owned(),
-                base_url: "https://projects.internal.example/api".to_owned(),
-                auth_header: String::new(),
-                auth_value: "local-upstream-token".to_owned(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: Some("https://projects.internal.example/api".to_owned()),
+                auth_header: None,
+                auth_value: Some("local-upstream-token".to_owned()),
+                timeout_ms: Some(5_000),
             }),
         },
     ))
@@ -1781,7 +2042,7 @@ fn config_add_client_implicit_config_creation_prints_default_and_client_tokens_o
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--name",
@@ -1809,6 +2070,86 @@ fn config_add_client_implicit_config_creation_prints_default_and_client_tokens_o
 }
 
 #[test]
+fn config_add_api_invalid_mutation_does_not_create_missing_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("missing.toml");
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        delete: false,
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        auth_header: None,
+        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        timeout_ms: Some(5_000),
+    })
+    .expect_err("invalid api mutation should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "auth_value cannot be set without auth_header"
+    );
+    assert!(!config_path.exists());
+
+    Ok(())
+}
+
+#[test]
+fn config_add_group_invalid_mutation_does_not_create_missing_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("missing.toml");
+
+    let error = apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "readonly".to_owned(),
+        delete: false,
+        api_access: vec![],
+    })
+    .expect_err("invalid group mutation should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access entries are required for groups"
+    );
+    assert!(!config_path.exists());
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_invalid_mutation_does_not_create_missing_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("missing.toml");
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        delete: false,
+        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        group: None,
+        api_access: vec![],
+    })
+    .expect_err("invalid client mutation should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "config client requires --group or --api-access in non-interactive sessions"
+    );
+    assert!(!config_path.exists());
+
+    Ok(())
+}
+
+#[test]
 fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
@@ -1816,10 +2157,11 @@ fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
 
     write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-02-31T04:05:06Z".to_owned()),
         group: None,
@@ -1920,10 +2262,11 @@ fn encrypted_config_add_client_preserves_password_workflow()
 
     write::init_config(&config_path, true, Some(&password))?;
 
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
@@ -1965,10 +2308,11 @@ fn encrypted_config_add_client_removes_stale_keyring_password_after_failed_decry
     }
     seed_keyring_password(&keyring_path, &config_path, "stale-password")?;
 
-    let error = add_client(ConfigAddClientArgs {
+    let error = apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
@@ -2008,10 +2352,11 @@ fn encrypted_config_add_client_backfills_keyring_after_flag_password_decrypt()
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
     }
 
-    add_client(ConfigAddClientArgs {
+    apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
         password: Some(password.to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
         group: None,
@@ -2047,15 +2392,16 @@ fn encrypted_config_add_api_removes_stale_keyring_password_after_failed_decrypt(
     }
     seed_keyring_password(&keyring_path, &config_path, "stale-password")?;
 
-    let error = add_api(ConfigAddApiArgs {
+    let error = apply_api(ConfigApiArgs {
         config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
         auth_header: Some("authorization".to_owned()),
         auth_value: Some("Bearer local-upstream-token".to_owned()),
-        timeout_ms: 5_000,
+        timeout_ms: Some(5_000),
     })
     .expect_err("stale keyring password should fail decrypt");
 
@@ -2082,15 +2428,16 @@ fn encrypted_config_add_api_preserves_password_workflow() -> Result<(), Box<dyn 
 
     write::init_config(&config_path, true, Some(&password))?;
 
-    add_api(ConfigAddApiArgs {
+    apply_api(ConfigApiArgs {
         config: Some(config_path.clone()),
         password: Some(password.expose_secret().to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
         auth_header: Some("authorization".to_owned()),
         auth_value: Some("Bearer local-upstream-token".to_owned()),
-        timeout_ms: 5_000,
+        timeout_ms: Some(5_000),
     })?;
 
     let raw = std::fs::read_to_string(&config_path)?;
@@ -2148,15 +2495,16 @@ fn encrypted_config_add_api_backfills_keyring_after_flag_password_decrypt()
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
     }
 
-    add_api(ConfigAddApiArgs {
+    apply_api(ConfigApiArgs {
         config: Some(config_path.clone()),
         password: Some(password.to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "projects".to_owned(),
-        base_url: "https://projects.internal.example/api".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
         auth_header: Some("authorization".to_owned()),
         auth_value: Some("Bearer local-upstream-token".to_owned()),
-        timeout_ms: 5_000,
+        timeout_ms: Some(5_000),
     })?;
 
     assert_eq!(
@@ -2216,10 +2564,11 @@ fn encrypted_config_add_group_backfills_keyring_after_flag_password_decrypt()
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
     }
 
-    add_group(ConfigAddGroupArgs {
+    apply_group(ConfigGroupArgs {
         config: Some(config_path.clone()),
         password: Some(password.to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner-readonly".to_owned(),
         api_access: vec!["projects=read".to_owned()],
     })?;
@@ -2270,30 +2619,31 @@ fn encrypted_config_add_client_group_prompt_backfills_keyring_after_flag_passwor
         std::env::remove_var(TEST_KEYRING_STORE_FAILURE_ENV_VAR);
     }
 
-    add_group(ConfigAddGroupArgs {
+    apply_group(ConfigGroupArgs {
         config: Some(config_path.clone()),
         password: Some(password.to_owned()),
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
         name: "partner-readonly".to_owned(),
         api_access: vec!["projects=read".to_owned()],
     })?;
     std::fs::remove_file(&keyring_path)?;
 
-    set_test_prompt_inputs(&["partner", "partner-readonly"])?;
+    set_test_prompt_inputs(&["partner", "group", "partner-readonly"])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddClient(
-                gate_agent::cli::ConfigAddClientArgs {
-                    config: Some(config_path.clone()),
-                    password: Some(password.to_owned()),
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
-                    group: None,
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Client(gate_agent::cli::ConfigClientArgs {
+                config: Some(config_path.clone()),
+                password: Some(password.to_owned()),
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                group: None,
+                api_access: vec![],
+                command: None,
+            }),
         },
     ))?;
 
@@ -2445,7 +2795,7 @@ fn config_add_api_respects_disable_interactive_env_even_in_tty()
         &workspace,
         &[
             "config",
-            "add-api",
+            "api",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
         ],
@@ -2457,7 +2807,7 @@ fn config_add_api_respects_disable_interactive_env_even_in_tty()
     let stderr = String::from_utf8(output.stderr)?;
     let combined = format!("{stdout}\n{stderr}");
     assert!(
-        combined.contains("config add-api requires --name in non-interactive sessions"),
+        combined.contains("config api requires --name in non-interactive sessions"),
         "{combined}"
     );
     assert!(!combined.contains("Auth header"), "{combined}");
@@ -2498,7 +2848,11 @@ fn config_init_removes_existing_keyring_password_for_new_encrypted_config()
 
     assert!(output.status.success(), "{output:?}");
 
-    assert_eq!(read_keyring_store(&keyring_path)?, serde_json::json!({}));
+    let store = read_keyring_store(&keyring_path)?;
+    assert!(
+        !store.to_string().contains("stale-password"),
+        "stale password should be removed: {store}"
+    );
 
     Ok(())
 }
@@ -2526,47 +2880,47 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
 
     let client_error = gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddClient(
-                gate_agent::cli::ConfigAddClientArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    bearer_token_expires_at: None,
-                    group: None,
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Client(gate_agent::cli::ConfigClientArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                bearer_token_expires_at: None,
+                group: None,
+                api_access: vec![],
+                command: None,
+            }),
         },
     ))
     .expect_err("missing add-client input should fail");
 
     let group_error = gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddGroup(
-                gate_agent::cli::ConfigAddGroupArgs {
-                    config: Some(config_path.clone()),
-                    password: None,
-                    log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                    name: String::new(),
-                    api_access: vec![],
-                },
-            ),
+            command: gate_agent::cli::ConfigCommand::Group(gate_agent::cli::ConfigGroupArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                api_access: vec![],
+            }),
         },
     ))
     .expect_err("missing add-group input should fail");
 
     let api_error = gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
-            command: gate_agent::cli::ConfigCommand::AddApi(gate_agent::cli::ConfigAddApiArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
                 config: Some(config_path.clone()),
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                name: String::new(),
-                base_url: String::new(),
-                auth_header: String::new(),
-                auth_value: String::new(),
-                timeout_ms: 5_000,
+                delete: false,
+                name: None,
+                base_url: None,
+                auth_header: None,
+                auth_value: None,
+                timeout_ms: Some(5_000),
             }),
         },
     ))
@@ -2574,15 +2928,15 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
 
     assert_eq!(
         client_error.to_string(),
-        "config add-client requires --name in non-interactive sessions"
+        "config client requires --name in non-interactive sessions"
     );
     assert_eq!(
         group_error.to_string(),
-        "config add-group requires --name in non-interactive sessions"
+        "config group requires --name in non-interactive sessions"
     );
     assert_eq!(
         api_error.to_string(),
-        "config add-api requires --name in non-interactive sessions"
+        "config api requires --name in non-interactive sessions"
     );
 
     Ok(())
@@ -2602,7 +2956,7 @@ fn config_add_client_bootstraps_encrypted_config_when_password_is_supplied()
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--password",
@@ -2678,10 +3032,8 @@ fn printed_tokens(stdout: &str) -> Result<Vec<(String, String)>, Box<dyn std::er
     stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            parse_printed_token(line)
-                .ok_or_else(|| format!("unexpected stdout line: {line}").into())
-        })
+        .filter_map(parse_printed_token)
+        .map(Ok)
         .collect()
 }
 

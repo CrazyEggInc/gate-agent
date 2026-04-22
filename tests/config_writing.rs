@@ -391,7 +391,7 @@ fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_ha
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-api",
+            "api",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--name",
@@ -603,7 +603,7 @@ timeout_ms = 5000
     let output = Command::cargo_bin("gate-agent")?
         .args([
             "config",
-            "add-client",
+            "client",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
             "--name",
@@ -936,14 +936,11 @@ fn unquote(value: &str) -> Option<String> {
 
 fn parse_printed_token(stdout: &str, client_name: &str) -> Option<String> {
     let prefix = format!("Generated token for client '{client_name}': ");
-    let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
-    let line = lines.next()?.trim();
 
-    if lines.next().is_some() {
-        return None;
-    }
-
-    line.strip_prefix(&prefix).map(str::to_owned)
+    stdout
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
 }
 
 fn split_full_token(value: &str) -> Option<(&str, &str)> {

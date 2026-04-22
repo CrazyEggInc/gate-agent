@@ -253,7 +253,7 @@ When encryption is enabled:
 - plaintext configs are edited in place
 - encrypted configs are decrypted to a temporary file, edited, validated, then re-encrypted and atomically written back
 
-### `config add-api`
+### `config api`
 
 Accepted flags:
 
@@ -262,23 +262,30 @@ Accepted flags:
 - `--auth-header`
 - `--auth-value`
 - optional `--timeout-ms`
+- `-d` / `--delete`
 
 Behavior:
 
 - validates inputs before writing
 - creates config if it does not exist yet
-- upserts one `[apis.<name>]` entry
+- adds or updates one `[apis.<name>]` entry by default
+- `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - persists `auth_header` only when upstream auth injection is configured
 - persists `auth_value` only when `auth_header` is present
 - persists bearer-style auth as the full header value in `auth_value`, for example `Bearer my-token`
 - when `auth_header` is omitted, writes no upstream auth fields and injects no upstream auth header at runtime
-- uses `5000` when `--timeout-ms` is omitted
+- on interactive update, current values become prompt defaults and blank answers keep those defaults
+- on non-interactive update, omitted flags preserve current values instead of clearing them
+- entering `none` for API auth clears optional upstream auth fields; clearing auth removes both `auth_header` and `auth_value`
+- uses `5000` when `--timeout-ms` is omitted during create or when no stored value exists yet
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately in a single-line format with minimal wording
+- API delete is blocked when any group references that API in `groups.*.api_access` or any inline-access client references it in `clients.*.api_access`
+- API delete never cascades; operators must remove those references first
 
 Interactive questionnaire flow:
 
@@ -287,7 +294,7 @@ Interactive questionnaire flow:
 - `Auth header (default: authorization, use 'none' for no auth):`
 - `Auth value (example: Bearer my-token):` only when auth header was set
 
-### `config add-client`
+### `config client`
 
 Accepted flags:
 
@@ -295,32 +302,41 @@ Accepted flags:
 - `--bearer-token-expires-at`
 - `--group <slug>`
 - repeated `--api-access <api=level[,api=level...]>`
+- `-d` / `--delete`
 
 Behavior:
 
 - validates slug and timestamp inputs
-- requires exactly one of `--group` or `--api-access`
+- requires exactly one of `--group` or `--api-access` when creating a client
+- `--group` and `--api-access` are mutually exclusive in one invocation
 - `--api-access` accepts `read` and `write`
 - repeated `--api-access` flags are merged
 - creates config if it does not exist yet
+- adds or updates one client entry by default
+- `-d` / `--delete` deletes one existing client entry instead of add-or-update
 - if the client does not already exist, a bearer token is generated and printed once so the operator can capture it
-- if the client already exists, existing bearer token metadata is preserved and no plaintext bearer token is reprinted
+- if the client already exists, normal client updates do not rotate the bearer token, do not replace bearer-token metadata except for an explicitly supplied expiry, and do not reprint a plaintext token
 - if `--password` is supplied while bootstrapping a missing config, the new config is created encrypted
 - if a config must be created first, the generated default client token is also printed once
 - plaintext bearer tokens are never persisted
-- writes either `group = "..."` or `api_access = { ... }` and removes the opposite field on update
+- client access mode may switch on update between `group = "..."` and inline `api_access = { ... }`
+- when switching access mode, the selected mode is written and the opposite field is removed
+- when updating interactively, current values become prompt defaults and blank answers keep those defaults
+- when updating non-interactively, omitting both access flags preserves current access mode and current access values
+- when required operator input is missing in an interactive session, prompts for it instead of failing immediately
+- the access prompt shows existing group slugs as available options when any exist
+- the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`
+- prompts stay single-line and avoid extra descriptive text when the question itself is already clear
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- when required operator input is missing in an interactive session, prompts for it instead of failing immediately
-- the access prompt shows existing group slugs as available options when any exist
-- the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`
-- prompts stay single-line and avoid extra descriptive text when the question itself is already clear
 - explicit args keep the command non-interactive
+- client delete is blocked when deleting that entry would remove the last remaining client from the config
+- client delete never cascades
 
-### `config rotate-client-secret`
+### `config client rotate-secret`
 
 This command rotates bearer-token credentials for an existing `[clients.<slug>]` entry.
 
@@ -350,20 +366,32 @@ Behavior:
 
 The CLI name uses “client secret” for operator ergonomics, but stored config model remains bearer-token metadata.
 
-### `config add-group`
+### `config group`
 
 This command manages `[groups.<slug>]` entries directly.
+
+Accepted flags:
+
+- `--name`
+- repeated `--api-access <api=level[,api=level...]>`
+- `-d` / `--delete`
 
 Behavior:
 
 - accepts a group name plus repeated `--api-access <api=level[,api=level...]>`
-- prompts for the name and inline `api_access` when that required input is missing in an interactive session, in a single-line format with minimal wording
 - creates config if it does not exist yet
+- adds or updates one group entry by default
+- `-d` / `--delete` deletes one existing group entry instead of add-or-update
+- prompts for the name and inline `api_access` when that required input is missing in an interactive session, in a single-line format with minimal wording
+- when updating interactively, current values become prompt defaults and blank answers keep those defaults
+- when updating non-interactively, omitting `--api-access` preserves current access values instead of clearing them
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
+- group delete is blocked when any client still references that group through `clients.*.group`
+- group delete never cascades; operators must repoint or update those clients first
 
 ## Mutation expectations
 

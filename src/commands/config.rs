@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use toml_edit::{DocumentMut, Table};
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::cli::StartArgs;
 use crate::config::ConfigError;
@@ -116,39 +116,42 @@ pub struct ConfigValidateArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigAddApiArgs {
+pub struct ConfigApiArgs {
     pub config: Option<PathBuf>,
     pub password: Option<String>,
     pub log_level: String,
     pub name: String,
-    pub base_url: String,
+    pub delete: bool,
+    pub base_url: Option<String>,
     pub auth_header: Option<String>,
     pub auth_value: Option<String>,
-    pub timeout_ms: u64,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigAddClientArgs {
+pub struct ConfigClientArgs {
     pub config: Option<PathBuf>,
     pub password: Option<String>,
     pub log_level: String,
     pub name: String,
+    pub delete: bool,
     pub bearer_token_expires_at: Option<String>,
     pub group: Option<String>,
     pub api_access: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigAddGroupArgs {
+pub struct ConfigGroupArgs {
     pub config: Option<PathBuf>,
     pub password: Option<String>,
     pub log_level: String,
     pub name: String,
+    pub delete: bool,
     pub api_access: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigRotateClientSecretArgs {
+pub struct ConfigRotateSecretArgs {
     pub config: Option<PathBuf>,
     pub password: Option<String>,
     pub log_level: String,
@@ -156,11 +159,62 @@ pub struct ConfigRotateClientSecretArgs {
     pub bearer_token_expires_at: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceKind {
+    Api,
+    Group,
+    Client,
+}
+
+impl ResourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Group => "group",
+            Self::Client => "client",
+        }
+    }
+
+    fn plural_label(self) -> &'static str {
+        match self {
+            Self::Api => "apis",
+            Self::Group => "groups",
+            Self::Client => "clients",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceMutationKind {
+    Added,
+    Updated,
+    Deleted,
+}
+
+impl ResourceMutationKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "Added",
+            Self::Updated => "Updated",
+            Self::Deleted => "Deleted",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AddClientOutcome {
+pub struct ResourceMutationOutcome {
     pub path: PathBuf,
+    pub resource_kind: ResourceKind,
+    pub name: String,
+    pub kind: ResourceMutationKind,
+    pub generated_default_bearer_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientMutationOutcome {
+    pub resource: ResourceMutationOutcome,
     pub generated_bearer_token: Option<String>,
-    pub bearer_token_expires_at: String,
+    pub bearer_token_expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +228,26 @@ pub struct RotateClientSecretOutcome {
 struct ExistingClientState {
     expires_at: String,
     access: ClientAccessUpsert,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExistingApiState {
+    pub base_url: String,
+    pub auth_header: Option<String>,
+    pub auth_value: Option<String>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExistingGroupState {
+    pub api_access: BTreeMap<String, AccessLevel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExistingClientPromptState {
+    pub bearer_token_expires_at: String,
+    pub group: Option<String>,
+    pub api_access: BTreeMap<String, AccessLevel>,
 }
 
 struct PreparedConfigAccess {
@@ -300,24 +374,46 @@ pub fn validate(args: ConfigValidateArgs) -> Result<String, ConfigCommandError> 
         .map_err(|error| ConfigCommandError::json_message(error.to_string()))
 }
 
-pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
+pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigCommandError> {
     ensure_slug("api", &args.name)?;
 
-    let base_url = trimmed_required("base_url", &args.base_url)?;
+    if args.delete {
+        return delete_api(args.config.as_deref(), args.password, &args.name);
+    }
+
+    let path = resolve_target_path(args.config.as_deref())?;
+    let existing_prepared = if path.exists() {
+        Some(prepare_existing_config_access(
+            &path,
+            args.password.clone(),
+        )?)
+    } else {
+        None
+    };
+    let existing = match existing_prepared.as_ref() {
+        Some(prepared) => load_existing_api_state_from_prepared(&path, prepared, &args.name)?,
+        None => None,
+    };
+    let kind = if existing.is_some() {
+        ResourceMutationKind::Updated
+    } else {
+        ResourceMutationKind::Added
+    };
+
+    let base_url = trimmed_required(
+        "base_url",
+        args.base_url
+            .as_deref()
+            .or_else(|| existing.as_ref().map(|state| state.base_url.as_str()))
+            .unwrap_or_default(),
+    )?;
     validate_base_url(&base_url, &args.name)?;
-    let auth_header = args
-        .auth_header
-        .as_deref()
-        .map(|value| trimmed_required("auth_header", value))
-        .transpose()?;
+    let auth_header = resolve_api_auth_header(args.auth_header, existing.as_ref())?;
     if let Some(auth_header) = auth_header.as_deref() {
         validate_header_name(auth_header, &args.name)?;
     }
-    let auth_value = args
-        .auth_value
-        .as_deref()
-        .map(|value| trimmed_required("auth_value", value))
-        .transpose()?;
+    let auth_value =
+        resolve_api_auth_value(args.auth_value, existing.as_ref(), auth_header.as_ref())?;
 
     match (&auth_header, &auth_value) {
         (None, Some(_)) => {
@@ -333,24 +429,29 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
         _ => {}
     }
 
-    if args.timeout_ms == 0 {
+    let timeout_ms = args
+        .timeout_ms
+        .or_else(|| existing.as_ref().map(|state| state.timeout_ms))
+        .unwrap_or(crate::config::secrets::DEFAULT_API_TIMEOUT_MS);
+
+    if timeout_ms == 0 {
         return Err(ConfigCommandError::new(format!(
             "apis.{}.timeout_ms must be greater than 0",
             args.name
         )));
     }
 
-    let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let prepared = prepare_existing_config_access(&path, args.password)?;
+    let prepared = prepare_existing_config_access(&path, args.password.clone())?;
+
     write::upsert_api(
         &path,
         &ApiUpsert {
-            name: args.name,
+            name: args.name.clone(),
             base_url,
             auth_header,
             auth_value,
-            timeout_ms: args.timeout_ms,
+            timeout_ms,
         },
         prepared.password.as_ref(),
     )?;
@@ -359,17 +460,25 @@ pub fn add_api(args: ConfigAddApiArgs) -> Result<PathBuf, ConfigCommandError> {
         print_generated_bearer_token("default", token);
     }
 
-    Ok(path)
+    Ok(ResourceMutationOutcome {
+        path,
+        resource_kind: ResourceKind::Api,
+        name: args.name,
+        kind,
+        generated_default_bearer_token,
+    })
 }
 
-pub fn add_client(args: ConfigAddClientArgs) -> Result<PathBuf, ConfigCommandError> {
-    Ok(add_client_with_result(args)?.path)
-}
-
-pub fn add_client_with_result(
-    args: ConfigAddClientArgs,
-) -> Result<AddClientOutcome, ConfigCommandError> {
+pub fn apply_client(args: ConfigClientArgs) -> Result<ClientMutationOutcome, ConfigCommandError> {
     ensure_slug("client", &args.name)?;
+
+    if args.delete {
+        return Ok(ClientMutationOutcome {
+            resource: delete_client(args.config.as_deref(), args.password, &args.name)?,
+            generated_bearer_token: None,
+            bearer_token_expires_at: None,
+        });
+    }
 
     let bearer_token_expires_at = args
         .bearer_token_expires_at
@@ -394,13 +503,49 @@ pub fn add_client_with_result(
     let api_access = parse_api_access_args(&args.api_access)?;
 
     let path = resolve_target_path(args.config.as_deref())?;
-    let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let prepared = prepare_existing_config_access(&path, args.password)?;
-    let existing = match prepared.toml.as_deref() {
-        Some(toml) => load_existing_client_bearer_metadata_from_toml(&path, toml, &args.name)?,
-        None => load_existing_client_bearer_metadata(&path, None, &args.name)?,
+    let existing_prepared = if path.exists() {
+        Some(prepare_existing_config_access(
+            &path,
+            args.password.clone(),
+        )?)
+    } else {
+        None
     };
+    let existing = match existing_prepared.as_ref() {
+        Some(prepared) => match prepared.toml.as_deref() {
+            Some(toml) => load_existing_client_bearer_metadata_from_toml(&path, toml, &args.name)?,
+            None => load_existing_client_bearer_metadata(&path, None, &args.name)?,
+        },
+        None => None,
+    };
+    let existing_prompt = match existing_prepared.as_ref() {
+        Some(prepared) => load_existing_client_state_from_prepared(&path, prepared, &args.name)?,
+        None => None,
+    };
+    let kind = if existing_prompt.is_some() {
+        ResourceMutationKind::Updated
+    } else {
+        ResourceMutationKind::Added
+    };
+
+    let resolved_access = match (group, api_access.is_empty(), existing_prompt.as_ref()) {
+        (Some(group), _, _) => ClientAccessUpsert::Group(group),
+        (None, false, _) => ClientAccessUpsert::ApiAccess(api_access),
+        (None, true, Some(existing)) if existing.group.is_some() => {
+            ClientAccessUpsert::Group(existing.group.clone().expect("group exists"))
+        }
+        (None, true, Some(existing)) => ClientAccessUpsert::ApiAccess(existing.api_access.clone()),
+        (None, true, None) => {
+            return Err(ConfigCommandError::new(
+                "config client requires --group or --api-access in non-interactive sessions",
+            ));
+        }
+    };
+
     let resolved = resolve_bearer_token_metadata(bearer_token_expires_at, existing)?;
+
+    let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
+    let prepared = prepare_existing_config_access(&path, args.password.clone())?;
 
     write::upsert_client(
         &path,
@@ -408,10 +553,7 @@ pub fn add_client_with_result(
             name: args.name.clone(),
             bearer_token: resolved.bearer_token.clone(),
             bearer_token_expires_at: Some(resolved.expires_at.clone()),
-            access: match group {
-                Some(group) => ClientAccessUpsert::Group(group),
-                None => ClientAccessUpsert::ApiAccess(api_access),
-            },
+            access: resolved_access,
         },
         prepared.password.as_ref(),
     )?;
@@ -424,17 +566,53 @@ pub fn add_client_with_result(
         print_generated_bearer_token(&args.name, token);
     }
 
-    Ok(AddClientOutcome {
-        path,
+    Ok(ClientMutationOutcome {
+        resource: ResourceMutationOutcome {
+            path,
+            resource_kind: ResourceKind::Client,
+            name: args.name,
+            kind,
+            generated_default_bearer_token,
+        },
         generated_bearer_token: resolved.generated_token,
-        bearer_token_expires_at: resolved.expires_at,
+        bearer_token_expires_at: Some(resolved.expires_at),
     })
 }
 
-pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError> {
+pub fn apply_group(args: ConfigGroupArgs) -> Result<ResourceMutationOutcome, ConfigCommandError> {
     ensure_slug("group", &args.name)?;
 
-    let api_access = parse_api_access_args(&args.api_access)?;
+    if args.delete {
+        return delete_group(args.config.as_deref(), args.password, &args.name);
+    }
+
+    let path = resolve_target_path(args.config.as_deref())?;
+    let existing_prepared = if path.exists() {
+        Some(prepare_existing_config_access(
+            &path,
+            args.password.clone(),
+        )?)
+    } else {
+        None
+    };
+    let existing = match existing_prepared.as_ref() {
+        Some(prepared) => load_existing_group_state_from_prepared(&path, prepared, &args.name)?,
+        None => None,
+    };
+    let kind = if existing.is_some() {
+        ResourceMutationKind::Updated
+    } else {
+        ResourceMutationKind::Added
+    };
+
+    let api_access = if args.api_access.is_empty() {
+        existing
+            .as_ref()
+            .map(|state| state.api_access.clone())
+            .unwrap_or_default()
+    } else {
+        parse_api_access_args(&args.api_access)?
+    };
 
     if api_access.is_empty() {
         return Err(ConfigCommandError::new(
@@ -442,13 +620,13 @@ pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError
         ));
     }
 
-    let path = resolve_target_path(args.config.as_deref())?;
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
-    let prepared = prepare_existing_config_access(&path, args.password)?;
+    let prepared = prepare_existing_config_access(&path, args.password.clone())?;
+
     write::upsert_group(
         &path,
         &GroupUpsert {
-            name: args.name,
+            name: args.name.clone(),
             api_access,
         },
         prepared.password.as_ref(),
@@ -458,11 +636,17 @@ pub fn add_group(args: ConfigAddGroupArgs) -> Result<PathBuf, ConfigCommandError
         print_generated_bearer_token("default", token);
     }
 
-    Ok(path)
+    Ok(ResourceMutationOutcome {
+        path,
+        resource_kind: ResourceKind::Group,
+        name: args.name,
+        kind,
+        generated_default_bearer_token,
+    })
 }
 
 pub fn rotate_client_secret(
-    args: ConfigRotateClientSecretArgs,
+    args: ConfigRotateSecretArgs,
 ) -> Result<RotateClientSecretOutcome, ConfigCommandError> {
     ensure_slug("client", &args.name)?;
 
@@ -479,8 +663,8 @@ pub fn rotate_client_secret(
     let path = resolve_existing_path(args.config.as_deref())?;
     let prepared = prepare_existing_config_access(&path, args.password)?;
     let existing = match prepared.toml.as_deref() {
-        Some(toml) => load_existing_client_state_from_toml(&path, toml, &args.name)?,
-        None => load_existing_client_state(&path, None, &args.name)?,
+        Some(toml) => load_existing_client_rotation_state_from_toml(&path, toml, &args.name)?,
+        None => load_existing_client_rotation_state(&path, None, &args.name)?,
     };
     let expires_at = expires_at_override.unwrap_or(existing.expires_at.clone());
 
@@ -535,16 +719,16 @@ struct ResolvedBearerMetadata {
     generated_token: Option<String>,
 }
 
-fn load_existing_client_state(
+fn load_existing_client_rotation_state(
     path: &Path,
     password: Option<&secrecy::SecretString>,
     client_name: &str,
 ) -> Result<ExistingClientState, ConfigCommandError> {
     let loaded = write::load_display_text(path, password)?;
-    load_existing_client_state_from_toml(path, &loaded.toml, client_name)
+    load_existing_client_rotation_state_from_toml(path, &loaded.toml, client_name)
 }
 
-fn load_existing_client_state_from_toml(
+fn load_existing_client_rotation_state_from_toml(
     path: &Path,
     contents: &str,
     client_name: &str,
@@ -606,6 +790,100 @@ pub(crate) fn list_group_slugs(
     cli_override: Option<&Path>,
     password: Option<String>,
 ) -> Result<Vec<String>, ConfigCommandError> {
+    list_table_keys(cli_override, password, "groups")
+}
+
+pub(crate) fn list_api_slugs(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+) -> Result<Vec<String>, ConfigCommandError> {
+    list_table_keys(cli_override, password, "apis")
+}
+
+pub(crate) fn list_client_slugs(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+) -> Result<Vec<String>, ConfigCommandError> {
+    list_table_keys(cli_override, password, "clients")
+}
+
+pub(crate) fn load_existing_api_state(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    api_name: &str,
+) -> Result<Option<ExistingApiState>, ConfigCommandError> {
+    let path = resolve_target_path(cli_override)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let prepared = prepare_existing_config_access(&path, password)?;
+    load_existing_api_state_from_prepared(&path, &prepared, api_name)
+}
+
+pub(crate) fn load_existing_group_state(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    group_name: &str,
+) -> Result<Option<ExistingGroupState>, ConfigCommandError> {
+    let path = resolve_target_path(cli_override)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let prepared = prepare_existing_config_access(&path, password)?;
+    load_existing_group_state_from_prepared(&path, &prepared, group_name)
+}
+
+pub(crate) fn load_existing_client_state(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    client_name: &str,
+) -> Result<Option<ExistingClientPromptState>, ConfigCommandError> {
+    let path = resolve_target_path(cli_override)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let prepared = prepare_existing_config_access(&path, password)?;
+    load_existing_client_state_from_prepared(&path, &prepared, client_name)
+}
+
+pub(crate) fn format_existing_name_hint(
+    resource_kind: ResourceKind,
+    names: &[String],
+    delete_mode: bool,
+) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    let extra = sorted.len().saturating_sub(8);
+    sorted.truncate(8);
+    let mut hint = format!(
+        "existing {}: {}",
+        resource_kind.plural_label(),
+        sorted.join(", ")
+    );
+
+    if extra > 0 {
+        hint.push_str(&format!(", ... +{extra} more"));
+    }
+
+    if !delete_mode {
+        hint.push_str("; existing name updates record");
+    }
+
+    Some(hint)
+}
+
+fn list_table_keys(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    table_name: &str,
+) -> Result<Vec<String>, ConfigCommandError> {
     let path = resolve_target_path(cli_override)?;
 
     if !path.exists() {
@@ -613,30 +891,393 @@ pub(crate) fn list_group_slugs(
     }
 
     let prepared = prepare_existing_config_access(&path, password)?;
-    let contents = match prepared.toml {
-        Some(toml) => toml,
-        None => std::fs::read_to_string(&path).map_err(|error| {
+    let document = load_document_from_prepared(&path, &prepared)?;
+
+    let mut names = document
+        .as_table()
+        .get(table_name)
+        .and_then(Item::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(name, _)| name.to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    Ok(names)
+}
+
+fn load_document_from_prepared(
+    path: &Path,
+    prepared: &PreparedConfigAccess,
+) -> Result<DocumentMut, ConfigCommandError> {
+    let contents = match prepared.toml.as_deref() {
+        Some(toml) => toml.to_owned(),
+        None => std::fs::read_to_string(path).map_err(|error| {
             ConfigCommandError::new(format!(
                 "failed to read config file '{}': {error}",
                 path.display()
             ))
         })?,
     };
-    let parsed: toml::Value = contents.parse().map_err(|error| {
-        ConfigCommandError::new(format!(
-            "failed to parse config file '{}': {error}",
-            path.display()
-        ))
-    })?;
+    parse_config(path, &contents)
+}
 
-    let mut groups = parsed
-        .get("groups")
-        .and_then(toml::Value::as_table)
-        .map(|table| table.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    groups.sort();
+fn load_existing_api_state_from_prepared(
+    path: &Path,
+    prepared: &PreparedConfigAccess,
+    api_name: &str,
+) -> Result<Option<ExistingApiState>, ConfigCommandError> {
+    let document = load_document_from_prepared(path, prepared)?;
+    let Some(api_table) = find_table(document.as_table(), &["apis", api_name]) else {
+        return Ok(None);
+    };
 
-    Ok(groups)
+    let base_url = find_string_value(api_table, "base_url")
+        .ok_or_else(|| ConfigCommandError::new(format!("apis.{api_name}.base_url is required")))?;
+    let timeout_ms = api_table
+        .get("timeout_ms")
+        .and_then(|item| item.as_integer())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| {
+            ConfigCommandError::new(format!("apis.{api_name}.timeout_ms is required"))
+        })?;
+
+    Ok(Some(ExistingApiState {
+        base_url,
+        auth_header: find_string_value(api_table, "auth_header"),
+        auth_value: find_string_value(api_table, "auth_value"),
+        timeout_ms,
+    }))
+}
+
+fn load_existing_group_state_from_prepared(
+    path: &Path,
+    prepared: &PreparedConfigAccess,
+    group_name: &str,
+) -> Result<Option<ExistingGroupState>, ConfigCommandError> {
+    let document = load_document_from_prepared(path, prepared)?;
+    let Some(group_table) = find_table(document.as_table(), &["groups", group_name]) else {
+        return Ok(None);
+    };
+
+    Ok(Some(ExistingGroupState {
+        api_access: parse_inline_api_access_table(
+            group_table,
+            &format!("groups.{group_name}.api_access"),
+        )?,
+    }))
+}
+
+fn load_existing_client_state_from_prepared(
+    path: &Path,
+    prepared: &PreparedConfigAccess,
+    client_name: &str,
+) -> Result<Option<ExistingClientPromptState>, ConfigCommandError> {
+    let document = load_document_from_prepared(path, prepared)?;
+    let Some(client_table) = find_table(document.as_table(), &["clients", client_name]) else {
+        return Ok(None);
+    };
+
+    let bearer_token_expires_at = find_string_value(client_table, "bearer_token_expires_at")
+        .ok_or_else(|| {
+            ConfigCommandError::new(format!(
+                "clients.{client_name}.bearer_token_expires_at is required"
+            ))
+        })?;
+    let group = find_string_value(client_table, "group");
+    let api_access = if group.is_some() {
+        BTreeMap::new()
+    } else {
+        parse_inline_api_access_table(client_table, &format!("clients.{client_name}.api_access"))?
+    };
+
+    Ok(Some(ExistingClientPromptState {
+        bearer_token_expires_at,
+        group,
+        api_access,
+    }))
+}
+
+fn parse_inline_api_access_table(
+    table: &Table,
+    field_label: &str,
+) -> Result<BTreeMap<String, AccessLevel>, ConfigCommandError> {
+    let Some(api_access_table) = table
+        .get("api_access")
+        .and_then(|item| item.as_value())
+        .and_then(toml_edit::Value::as_inline_table)
+    else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut api_access = BTreeMap::new();
+    for (api, value) in api_access_table.iter() {
+        let level = match value.as_str() {
+            Some("read") => AccessLevel::Read,
+            Some("write") => AccessLevel::Write,
+            Some(other) => {
+                return Err(ConfigCommandError::new(format!(
+                    "{field_label}.{api} has invalid level '{other}'"
+                )));
+            }
+            None => {
+                return Err(ConfigCommandError::new(format!(
+                    "{field_label}.{api} must be a string"
+                )));
+            }
+        };
+        api_access.insert(api.to_owned(), level);
+    }
+
+    Ok(api_access)
+}
+
+fn resolve_api_auth_header(
+    auth_header: Option<String>,
+    existing: Option<&ExistingApiState>,
+) -> Result<Option<String>, ConfigCommandError> {
+    match auth_header {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(existing.and_then(|state| state.auth_header.clone()))
+            } else if value.eq_ignore_ascii_case("none") {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed_required("auth_header", value)?))
+            }
+        }
+        None => Ok(existing.and_then(|state| state.auth_header.clone())),
+    }
+}
+
+fn resolve_api_auth_value(
+    auth_value: Option<String>,
+    existing: Option<&ExistingApiState>,
+    auth_header: Option<&String>,
+) -> Result<Option<String>, ConfigCommandError> {
+    match auth_value {
+        Some(value) => {
+            let value = value.trim();
+            if auth_header.is_none() {
+                if value.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed_required("auth_value", value)?))
+                }
+            } else if value.is_empty() {
+                Ok(existing.and_then(|state| state.auth_value.clone()))
+            } else {
+                Ok(Some(trimmed_required("auth_value", value)?))
+            }
+        }
+        None => {
+            if auth_header.is_none() {
+                Ok(None)
+            } else {
+                Ok(existing.and_then(|state| state.auth_value.clone()))
+            }
+        }
+    }
+}
+
+fn delete_api(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    api_name: &str,
+) -> Result<ResourceMutationOutcome, ConfigCommandError> {
+    delete_named_table_entry(cli_override, password, ResourceKind::Api, api_name)
+}
+
+fn delete_group(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    group_name: &str,
+) -> Result<ResourceMutationOutcome, ConfigCommandError> {
+    delete_named_table_entry(cli_override, password, ResourceKind::Group, group_name)
+}
+
+fn delete_client(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    client_name: &str,
+) -> Result<ResourceMutationOutcome, ConfigCommandError> {
+    delete_named_table_entry(cli_override, password, ResourceKind::Client, client_name)
+}
+
+fn delete_named_table_entry(
+    cli_override: Option<&Path>,
+    password: Option<String>,
+    resource_kind: ResourceKind,
+    name: &str,
+) -> Result<ResourceMutationOutcome, ConfigCommandError> {
+    let path = resolve_existing_path(cli_override)?;
+    let prepared = prepare_existing_config_access(&path, password)?;
+    let mut document = load_document_from_prepared(&path, &prepared)?;
+
+    match resource_kind {
+        ResourceKind::Api => ensure_api_delete_allowed(&document, name)?,
+        ResourceKind::Group => ensure_group_delete_allowed(&document, name)?,
+        ResourceKind::Client => ensure_client_delete_allowed(&document, name)?,
+    }
+
+    let table_name = resource_kind.plural_label();
+    let table = document
+        .as_table_mut()
+        .get_mut(table_name)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| ConfigCommandError::new(format!("{table_name} must be a TOML table")))?;
+
+    if table.remove(name).is_none() {
+        return Err(ConfigCommandError::new(format!(
+            "{} '{}' not found",
+            resource_kind.label(),
+            name
+        )));
+    }
+
+    write::replace_config_contents(&path, &document.to_string(), prepared.password.as_ref())?;
+
+    Ok(ResourceMutationOutcome {
+        path,
+        resource_kind,
+        name: name.to_owned(),
+        kind: ResourceMutationKind::Deleted,
+        generated_default_bearer_token: None,
+    })
+}
+
+fn ensure_api_delete_allowed(
+    document: &DocumentMut,
+    api_name: &str,
+) -> Result<(), ConfigCommandError> {
+    let api_exists = find_table(document.as_table(), &["apis", api_name]).is_some();
+    if !api_exists {
+        return Err(ConfigCommandError::new(format!(
+            "api '{}' not found",
+            api_name
+        )));
+    }
+
+    let mut groups = Vec::new();
+    if let Some(group_table) = document.as_table().get("groups").and_then(Item::as_table) {
+        for (group_name, item) in group_table.iter() {
+            let Some(group) = item.as_table() else {
+                continue;
+            };
+            if group
+                .get("api_access")
+                .and_then(|item| item.as_value())
+                .and_then(toml_edit::Value::as_inline_table)
+                .is_some_and(|table| table.contains_key(api_name))
+            {
+                groups.push(group_name.to_owned());
+            }
+        }
+    }
+
+    let mut clients = Vec::new();
+    if let Some(client_table) = document.as_table().get("clients").and_then(Item::as_table) {
+        for (client_name, item) in client_table.iter() {
+            let Some(client) = item.as_table() else {
+                continue;
+            };
+            if client.get("group").is_none()
+                && client
+                    .get("api_access")
+                    .and_then(|item| item.as_value())
+                    .and_then(toml_edit::Value::as_inline_table)
+                    .is_some_and(|table| table.contains_key(api_name))
+            {
+                clients.push(client_name.to_owned());
+            }
+        }
+    }
+
+    if groups.is_empty() && clients.is_empty() {
+        return Ok(());
+    }
+
+    let mut parts = Vec::new();
+    if !groups.is_empty() {
+        groups.sort();
+        parts.push(format!("groups: {}", groups.join(", ")));
+    }
+    if !clients.is_empty() {
+        clients.sort();
+        parts.push(format!("inline clients: {}", clients.join(", ")));
+    }
+
+    Err(ConfigCommandError::new(format!(
+        "cannot delete api '{}'; referenced by {}",
+        api_name,
+        parts.join("; ")
+    )))
+}
+
+fn ensure_group_delete_allowed(
+    document: &DocumentMut,
+    group_name: &str,
+) -> Result<(), ConfigCommandError> {
+    let exists = find_table(document.as_table(), &["groups", group_name]).is_some();
+    if !exists {
+        return Err(ConfigCommandError::new(format!(
+            "group '{}' not found",
+            group_name
+        )));
+    }
+
+    let mut clients = Vec::new();
+    if let Some(client_table) = document.as_table().get("clients").and_then(Item::as_table) {
+        for (client_name, item) in client_table.iter() {
+            let Some(client) = item.as_table() else {
+                continue;
+            };
+            if client.get("group").and_then(|item| item.as_str()) == Some(group_name) {
+                clients.push(client_name.to_owned());
+            }
+        }
+    }
+
+    if clients.is_empty() {
+        return Ok(());
+    }
+
+    clients.sort();
+    Err(ConfigCommandError::new(format!(
+        "cannot delete group '{}'; referenced by clients: {}",
+        group_name,
+        clients.join(", ")
+    )))
+}
+
+fn ensure_client_delete_allowed(
+    document: &DocumentMut,
+    client_name: &str,
+) -> Result<(), ConfigCommandError> {
+    let clients = document
+        .as_table()
+        .get("clients")
+        .and_then(Item::as_table)
+        .ok_or_else(|| ConfigCommandError::new("clients must be a TOML table"))?;
+
+    if !clients.contains_key(client_name) {
+        return Err(ConfigCommandError::new(format!(
+            "client '{}' not found",
+            client_name
+        )));
+    }
+
+    if clients.len() == 1 {
+        return Err(ConfigCommandError::new(format!(
+            "cannot delete client '{}'; config must keep at least one client",
+            client_name
+        )));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn prompt_required_text(
