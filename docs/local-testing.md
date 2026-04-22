@@ -35,7 +35,7 @@ Expected properties:
 
 `.secrets.example` is ready-to-run local sample config.
 
-Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "local-default"`, `groups.local-default` grants `api_access = { projects = "read" }`, and `projects` points at dummy upstream with injected `Authorization: Bearer local-upstream-token`. If you create fresh config instead, prefer `config init` and save printed token immediately.
+Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "local-default"`, `groups.local-default` grants `api_access = { projects = "read" }`, and `projects` points at dummy upstream with `headers = { authorization = "Bearer local-upstream-token" }`. If you create fresh config instead, prefer `config init` and save printed token immediately.
 
 Expected committed sample defaults:
 
@@ -43,7 +43,7 @@ Expected committed sample defaults:
 - `default` uses `group = "local-default"`
 - `groups.local-default` grants `api_access = { projects = "read" }`
 - `projects` points at dummy upstream
-- `projects` injects `Authorization: Bearer local-upstream-token` upstream
+- `projects` configures `headers = { authorization = "Bearer local-upstream-token" }`
 
 The committed sample config stores only bearer token metadata. For local testing, the matching bearer token is:
 
@@ -84,7 +84,7 @@ Expected behavior:
 - the request targets the configured local bind address
 - the request carries `Authorization: Bearer <token>` to the proxy
 - the proxy authorizes the selected API slug and required method access
-- the proxy injects upstream credentials from config before forwarding the request
+- the proxy forwards configured upstream headers from config before sending request upstream
 
 ## MCP request workflow
 
@@ -235,8 +235,7 @@ Upsert an API:
 cargo run -- config api --config .secrets \
   --name projects \
   --base-url 'http://127.0.0.1:18081/api' \
-  --auth-header authorization \
-  --auth-value 'Bearer local-upstream-token'
+  --header 'authorization=Bearer local-upstream-token'
 ```
 
 Upsert a group:

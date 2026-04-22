@@ -240,9 +240,7 @@ api_access = { billing = "write" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_scheme = "Bearer"
-auth_value = "billing-secret-token"
+headers = { authorization = "Bearer billing-secret-token" }
 timeout_ms = 5000
 "#
 }
@@ -266,7 +264,9 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     assert!(sample_contents.contains("bearer_token_expires_at = \"2036-10-08T12:00:00Z\""));
     assert!(sample_contents.contains("group = \"local-default\""));
     assert!(sample_contents.contains("[groups.local-default]"));
-    assert!(sample_contents.contains("auth_value = \"Bearer local-upstream-token\""));
+    assert!(
+        sample_contents.contains("headers = { authorization = \"Bearer local-upstream-token\" }")
+    );
     assert_eq!(client.bearer_token_id, "default");
     assert_eq!(
         client.bearer_token_hash.as_str(),
@@ -283,15 +283,11 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "http://127.0.0.1:18081/api");
+    assert_eq!(api.headers.len(), 1);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
     assert_eq!(
-        api.auth_header.as_ref().map(|value| value.to_string()),
-        Some("authorization".to_string())
-    );
-    assert_eq!(
-        api.auth_value
-            .as_ref()
-            .map(|value| value.expose_secret().to_string()),
-        Some("Bearer local-upstream-token".to_string())
+        api.headers[0].1.expose_secret(),
+        "Bearer local-upstream-token"
     );
     assert_eq!(api.description, None);
     assert_eq!(api.docs_url, None);
@@ -336,15 +332,11 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
+    assert_eq!(api.headers.len(), 1);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
     assert_eq!(
-        api.auth_header.as_ref().map(|value| value.to_string()),
-        Some("authorization".to_string())
-    );
-    assert_eq!(
-        api.auth_value
-            .as_ref()
-            .map(|value| value.expose_secret().to_string()),
-        Some("Bearer billing-secret-token".to_string())
+        api.headers[0].1.expose_secret(),
+        "Bearer billing-secret-token"
     );
     assert_eq!(api.description, None);
     assert_eq!(api.docs_url, None);
@@ -374,8 +366,7 @@ api_access = { billing = "read" }
 
         [apis.billing]
         base_url = "https://billing.internal.example"
-        auth_header = "authorization"
-        auth_value = "Bearer billing-secret-token"
+        headers = { authorization = "Bearer billing-secret-token" }
         timeout_ms = 5000
 "#,
         "stdin",
@@ -401,15 +392,11 @@ api_access = { billing = "read" }
             .collect()
     );
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
+    assert_eq!(api.headers.len(), 1);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
     assert_eq!(
-        api.auth_header.as_ref().map(|value| value.to_string()),
-        Some("authorization".to_string())
-    );
-    assert_eq!(
-        api.auth_value
-            .as_ref()
-            .map(|value| value.expose_secret().to_string()),
-        Some("Bearer billing-secret-token".to_string())
+        api.headers[0].1.expose_secret(),
+        "Bearer billing-secret-token"
     );
     assert_eq!(api.description, None);
     assert_eq!(api.docs_url, None);
@@ -451,8 +438,7 @@ api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
+headers = { authorization = "billing-secret-token" }
 timeout_ms = 5000
 "#;
     let temp_dir = tempdir()?;
@@ -470,13 +456,8 @@ timeout_ms = 5000
 
     assert_eq!(config.clients["default"].bearer_token_id, "default");
     assert_eq!(
-        config
-            .apis
-            .get("billing")
-            .expect("billing api")
-            .auth_value
-            .as_ref()
-            .expect("billing auth value")
+        config.apis.get("billing").expect("billing api").headers[0]
+            .1
             .expose_secret(),
         "billing-secret-token"
     );
@@ -528,8 +509,7 @@ api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
+headers = { authorization = "billing-secret-token" }
 timeout_ms = 5000
 "#;
     let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
@@ -543,13 +523,8 @@ timeout_ms = 5000
 
     assert_eq!(config.clients["default"].bearer_token_id, "default");
     assert_eq!(
-        config
-            .apis
-            .get("billing")
-            .expect("billing api")
-            .auth_value
-            .as_ref()
-            .expect("billing auth value")
+        config.apis.get("billing").expect("billing api").headers[0]
+            .1
             .expose_secret(),
         "billing-secret-token"
     );
@@ -606,8 +581,7 @@ api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
+headers = { authorization = "billing-secret-token" }
 timeout_ms = 5000
 "#;
     let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
@@ -653,8 +627,7 @@ api_access = { billing = "read" }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "billing-secret-token"
+headers = { authorization = "billing-secret-token" }
 timeout_ms = 5000
 "#;
     let (_temp_dir, secrets_file) = write_encrypted_secrets_file(plaintext, "passphrase")?;
@@ -759,8 +732,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -807,8 +779,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -835,8 +806,7 @@ bearer_token_expires_at = "2026-10-08T12:00:00Z"
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -863,8 +833,7 @@ group = "missing-group"
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -895,8 +864,7 @@ description = "readonly"
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -921,8 +889,7 @@ allowed_apis = ["projects"]
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -950,8 +917,7 @@ api_access = { projects = "admin" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -980,8 +946,7 @@ api_access = { projects = "admin" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1010,8 +975,7 @@ api_access = { unknown = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1040,8 +1004,7 @@ group = "shared-access"
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1061,8 +1024,7 @@ fn secrets_config_requires_at_least_one_client() -> Result<(), Box<dyn std::erro
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1119,8 +1081,7 @@ api_access = { projects = "read" }
 
 [apis.Projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1144,8 +1105,7 @@ api_access = { projects = "read" }
 
 [apis."projects/api"]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1172,8 +1132,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1198,8 +1157,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1227,8 +1185,7 @@ api_access = { Projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1256,8 +1213,7 @@ api_access = { "projects " = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1284,8 +1240,7 @@ api_access = { unknown = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1312,8 +1267,7 @@ api_access = { projects = "read", projects = "write" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1349,8 +1303,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1384,8 +1337,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1414,8 +1366,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1441,8 +1392,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1494,8 +1444,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 extra_header = "nope"
 "#,
@@ -1506,7 +1455,7 @@ extra_header = "nope"
     assert!(
         error
             .to_string()
-            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `auth_header`, `auth_scheme`, `auth_value`, `timeout_ms`")
+            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `headers`, `timeout_ms`")
     );
 
     Ok(())
@@ -1526,8 +1475,7 @@ api_access = { projects = "read" }
 base_url = "https://projects.internal.example"
 description = "Project API"
 docs_url = "https://docs.internal.example/projects"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1557,8 +1505,7 @@ api_access = { projects = "read" }
 [apis.projects]
 base_url = "https://projects.internal.example"
 docs_url = "ftp://docs.internal.example/projects"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1585,8 +1532,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "ftp://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1613,8 +1559,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 0
 "#,
     )?;
@@ -1641,8 +1586,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 "#,
     )?;
 
@@ -1665,8 +1609,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "bad header"
-auth_value = "projects-secret-value"
+headers = { "bad header" = "projects-secret-value" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1676,7 +1619,7 @@ timeout_ms = 5000
     assert!(
         error
             .to_string()
-            .starts_with("apis.projects.auth_header is invalid:")
+            .starts_with("apis.projects.headers.bad header is invalid:")
     );
 
     Ok(())
@@ -1702,14 +1645,75 @@ timeout_ms = 5000
     let config = SecretsConfig::load_from_file(&secrets_file)?;
     let api = config.apis.get("projects").expect("projects api config");
 
-    assert!(api.auth_header.is_none());
-    assert!(api.auth_value.is_none());
+    assert!(api.headers.is_empty());
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_rejects_auth_value_without_auth_header() -> Result<(), Box<dyn std::error::Error>>
+fn secrets_config_loads_api_with_one_header() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { authorization = "Bearer billing-secret-token" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+
+    assert_eq!(api.headers.len(), 1);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
+    assert_eq!(
+        api.headers[0].1.expose_secret(),
+        "Bearer billing-secret-token"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_api_with_multiple_headers() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { authorization = "Bearer billing-secret-token", x-api-key = "secondary-secret" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+
+    assert_eq!(api.headers.len(), 2);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
+    assert_eq!(
+        api.headers[0].1.expose_secret(),
+        "Bearer billing-secret-token"
+    );
+    assert_eq!(api.headers[1].0.as_str(), "x-api-key");
+    assert_eq!(api.headers[1].1.expose_secret(), "secondary-secret");
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_case_only_duplicate_api_headers() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
@@ -1721,7 +1725,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_value = "projects-secret-value"
+headers = { authorization = "Bearer first-secret", Authorization = "Bearer second-secret" }
 timeout_ms = 5000
 "#,
     )?;
@@ -1730,15 +1734,45 @@ timeout_ms = 5000
 
     assert_eq!(
         error.to_string(),
-        "apis.projects.auth_value requires auth_header"
+        "apis.projects.headers.authorization duplicates another configured header"
     );
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_requires_auth_value_when_auth_header_is_configured()
+fn secrets_config_preserves_raw_header_value_without_trim_mutation()
 -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = { authorization = " Bearer projects-secret-value " }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("projects").expect("projects api config");
+
+    assert_eq!(api.headers.len(), 1);
+    assert_eq!(api.headers[0].0.as_str(), "authorization");
+    assert_eq!(
+        api.headers[0].1.expose_secret(),
+        " Bearer projects-secret-value "
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_legacy_api_auth_header_field() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [clients.default]
@@ -1756,16 +1790,61 @@ timeout_ms = 5000
 
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
-    assert_eq!(
-        error.to_string(),
-        "apis.projects.auth_value is required when auth_header is configured"
-    );
+    assert!(error.to_string().contains("unknown field `auth_header`"));
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_keeps_runtime_auth_value_without_legacy_scheme()
+fn secrets_config_rejects_legacy_api_auth_value_field() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_value = "projects-secret-value"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `auth_value`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_legacy_api_auth_scheme_field() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+auth_scheme = "Bearer"
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `auth_scheme`"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_invalid_header_value_without_secret_leak()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
@@ -1773,28 +1852,77 @@ fn secrets_config_keeps_runtime_auth_value_without_legacy_scheme()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { projects = "read" }
 
-[apis.billing]
-base_url = "https://billing.internal.example"
-auth_header = "authorization"
-auth_value = "Bearer billing-secret-token"
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = { x-api-key = "bad\u007fsecret" }
 timeout_ms = 5000
 "#,
     )?;
 
-    let config = SecretsConfig::load_from_file(&secrets_file)?;
-    let api = config.apis.get("billing").expect("billing api config");
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("apis.projects.headers.x-api-key is invalid:")
+    );
+    assert!(!error.to_string().contains("bad"));
+    assert!(!error.to_string().contains("secret"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_empty_header_value() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = { x-api-key = "" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
     assert_eq!(
-        api.auth_header.as_ref().map(|value| value.to_string()),
-        Some("authorization".to_string())
+        error.to_string(),
+        "apis.projects.headers.x-api-key is invalid: empty value"
     );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_whitespace_only_header_value() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = "read" }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = { x-api-key = "   \t" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
     assert_eq!(
-        api.auth_value
-            .as_ref()
-            .map(|value| value.expose_secret().to_string()),
-        Some("Bearer billing-secret-token".to_string())
+        error.to_string(),
+        "apis.projects.headers.x-api-key is invalid: empty value"
     );
 
     Ok(())

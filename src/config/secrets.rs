@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
 
-use http::header::HeaderName;
+use http::header::{HeaderName, HeaderValue};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -76,8 +76,7 @@ pub struct UtcTimestamp {
 pub struct ApiConfig {
     pub slug: String,
     pub base_url: Url,
-    pub auth_header: Option<HeaderName>,
-    pub auth_value: Option<SecretString>,
+    pub headers: Vec<(HeaderName, SecretString)>,
     pub description: Option<String>,
     pub docs_url: Option<Url>,
     pub timeout_ms: u64,
@@ -136,9 +135,7 @@ struct RawApiConfig {
     base_url: String,
     description: Option<String>,
     docs_url: Option<String>,
-    auth_header: Option<String>,
-    auth_scheme: Option<String>,
-    auth_value: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
     #[serde(default = "default_api_timeout_ms")]
     timeout_ms: u64,
 }
@@ -509,48 +506,7 @@ impl ApiConfig {
             "http or https",
         )?;
 
-        let auth_header =
-            optional_string(&format!("apis.{slug}.auth_header"), raw_config.auth_header)?;
-        let auth_scheme =
-            optional_string(&format!("apis.{slug}.auth_scheme"), raw_config.auth_scheme)?;
-        let auth_value =
-            optional_string(&format!("apis.{slug}.auth_value"), raw_config.auth_value)?;
-
-        if auth_header.is_none() {
-            if auth_value.is_some() {
-                return Err(ConfigError::new(format!(
-                    "apis.{slug}.auth_value requires auth_header"
-                )));
-            }
-
-            if auth_scheme.is_some() {
-                return Err(ConfigError::new(format!(
-                    "apis.{slug}.auth_scheme requires auth_header"
-                )));
-            }
-        }
-
-        if auth_header.is_some() && auth_value.is_none() {
-            return Err(ConfigError::new(format!(
-                "apis.{slug}.auth_value is required when auth_header is configured"
-            )));
-        }
-
-        let auth_header = auth_header
-            .map(|value| {
-                HeaderName::from_bytes(value.as_bytes()).map_err(|error| {
-                    ConfigError::new(format!("apis.{slug}.auth_header is invalid: {error}"))
-                })
-            })
-            .transpose()?;
-
-        let auth_value = match (auth_header.as_ref(), auth_value, auth_scheme) {
-            (Some(_), Some(value), Some(scheme)) => {
-                Some(SecretString::from(format!("{scheme} {value}")))
-            }
-            (Some(_), Some(value), None) => Some(SecretString::from(value)),
-            _ => None,
-        };
+        let headers = parse_api_headers(slug, raw_config.headers)?;
 
         if raw_config.timeout_ms == 0 {
             return Err(ConfigError::new(format!(
@@ -563,11 +519,45 @@ impl ApiConfig {
             base_url,
             description,
             docs_url,
-            auth_header,
-            auth_value,
+            headers,
             timeout_ms: raw_config.timeout_ms,
         })
     }
+}
+
+fn parse_api_headers(
+    slug: &str,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<Vec<(HeaderName, SecretString)>, ConfigError> {
+    let Some(headers) = headers else {
+        return Ok(Vec::new());
+    };
+
+    let mut validated = Vec::with_capacity(headers.len());
+    let mut names = BTreeSet::new();
+
+    for (key, value) in headers {
+        let field = format!("apis.{slug}.headers.{key}");
+        let name = HeaderName::from_str(&key)
+            .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))?;
+
+        if value.trim().is_empty() {
+            return Err(ConfigError::new(format!("{field} is invalid: empty value")));
+        }
+
+        HeaderValue::from_str(&value)
+            .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))?;
+
+        if !names.insert(name.as_str().to_owned()) {
+            return Err(ConfigError::new(format!(
+                "{field} duplicates another configured header"
+            )));
+        }
+
+        validated.push((name, SecretString::from(value)));
+    }
+
+    Ok(validated)
 }
 
 fn required_string(field: &str, value: String) -> Result<String, ConfigError> {

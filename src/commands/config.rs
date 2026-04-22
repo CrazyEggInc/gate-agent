@@ -123,8 +123,7 @@ pub struct ConfigApiArgs {
     pub name: String,
     pub delete: bool,
     pub base_url: Option<String>,
-    pub auth_header: Option<String>,
-    pub auth_value: Option<String>,
+    pub headers: Option<Vec<String>>,
     pub timeout_ms: Option<u64>,
 }
 
@@ -233,8 +232,7 @@ struct ExistingClientState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExistingApiState {
     pub base_url: String,
-    pub auth_header: Option<String>,
-    pub auth_value: Option<String>,
+    pub headers: BTreeMap<String, String>,
     pub timeout_ms: u64,
 }
 
@@ -408,26 +406,13 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
             .unwrap_or_default(),
     )?;
     validate_base_url(&base_url, &args.name)?;
-    let auth_header = resolve_api_auth_header(args.auth_header, existing.as_ref())?;
-    if let Some(auth_header) = auth_header.as_deref() {
-        validate_header_name(auth_header, &args.name)?;
-    }
-    let auth_value =
-        resolve_api_auth_value(args.auth_value, existing.as_ref(), auth_header.as_ref())?;
-
-    match (&auth_header, &auth_value) {
-        (None, Some(_)) => {
-            return Err(ConfigCommandError::new(
-                "auth_value cannot be set without auth_header",
-            ));
-        }
-        (Some(_), None) => {
-            return Err(ConfigCommandError::new(
-                "auth_value is required when auth_header is configured",
-            ));
-        }
-        _ => {}
-    }
+    let headers = match args.headers.as_deref() {
+        Some(headers) => parse_api_headers(headers, &args.name)?,
+        None => existing
+            .as_ref()
+            .map(|state| state.headers.clone())
+            .unwrap_or_default(),
+    };
 
     let timeout_ms = args
         .timeout_ms
@@ -449,8 +434,7 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
         &ApiUpsert {
             name: args.name.clone(),
             base_url,
-            auth_header,
-            auth_value,
+            headers,
             timeout_ms,
         },
         prepared.password.as_ref(),
@@ -748,36 +732,15 @@ fn load_existing_client_rotation_state_from_toml(
     let access = if let Some(group) = find_string_value(client_table, "group") {
         ClientAccessUpsert::Group(group)
     } else {
-        let api_access_table = client_table
-            .get("api_access")
-            .and_then(|item| item.as_value())
-            .and_then(toml_edit::Value::as_inline_table)
-            .ok_or_else(|| {
-                ConfigCommandError::new(format!(
-                    "client '{}' must declare existing group or api_access before rotation",
-                    client_name
-                ))
-            })?;
-
-        let mut api_access = BTreeMap::new();
-        for (api, value) in api_access_table.iter() {
-            let level = match value.as_str() {
-                Some("read") => AccessLevel::Read,
-                Some("write") => AccessLevel::Write,
-                Some(other) => {
-                    return Err(ConfigCommandError::new(format!(
-                        "clients.{}.api_access.{} has invalid level '{}'",
-                        client_name, api, other
-                    )));
-                }
-                None => {
-                    return Err(ConfigCommandError::new(format!(
-                        "clients.{}.api_access.{} must be a string",
-                        client_name, api
-                    )));
-                }
-            };
-            api_access.insert(api.to_owned(), level);
+        let api_access = parse_inline_api_access_table(
+            client_table,
+            &format!("clients.{client_name}.api_access"),
+        )?;
+        if api_access.is_empty() {
+            return Err(ConfigCommandError::new(format!(
+                "client '{}' must declare existing group or api_access before rotation",
+                client_name
+            )));
         }
 
         ClientAccessUpsert::ApiAccess(api_access)
@@ -946,8 +909,11 @@ fn load_existing_api_state_from_prepared(
 
     Ok(Some(ExistingApiState {
         base_url,
-        auth_header: find_string_value(api_table, "auth_header"),
-        auth_value: find_string_value(api_table, "auth_value"),
+        headers: parse_string_inline_table(
+            api_table,
+            "headers",
+            &format!("apis.{api_name}.headers"),
+        )?,
         timeout_ms,
     }))
 }
@@ -1004,15 +970,37 @@ fn parse_inline_api_access_table(
     table: &Table,
     field_label: &str,
 ) -> Result<BTreeMap<String, AccessLevel>, ConfigCommandError> {
-    let Some(api_access_table) = table
-        .get("api_access")
-        .and_then(|item| item.as_value())
-        .and_then(toml_edit::Value::as_inline_table)
-    else {
+    let Some(item) = table.get("api_access") else {
         return Ok(BTreeMap::new());
     };
 
     let mut api_access = BTreeMap::new();
+    if let Some(api_access_table) = item.as_table() {
+        for (api, value) in api_access_table.iter() {
+            let level = match value.as_str() {
+                Some("read") => AccessLevel::Read,
+                Some("write") => AccessLevel::Write,
+                Some(other) => {
+                    return Err(ConfigCommandError::new(format!(
+                        "{field_label}.{api} has invalid level '{other}'"
+                    )));
+                }
+                None => {
+                    return Err(ConfigCommandError::new(format!(
+                        "{field_label}.{api} must be a string"
+                    )));
+                }
+            };
+            api_access.insert(api.to_owned(), level);
+        }
+
+        return Ok(api_access);
+    }
+
+    let Some(api_access_table) = item.as_value().and_then(toml_edit::Value::as_inline_table) else {
+        return Ok(BTreeMap::new());
+    };
+
     for (api, value) in api_access_table.iter() {
         let level = match value.as_str() {
             Some("read") => AccessLevel::Read,
@@ -1034,53 +1022,45 @@ fn parse_inline_api_access_table(
     Ok(api_access)
 }
 
-fn resolve_api_auth_header(
-    auth_header: Option<String>,
-    existing: Option<&ExistingApiState>,
-) -> Result<Option<String>, ConfigCommandError> {
-    match auth_header {
-        Some(value) => {
-            let value = value.trim();
-            if value.is_empty() {
-                Ok(existing.and_then(|state| state.auth_header.clone()))
-            } else if value.eq_ignore_ascii_case("none") {
-                Ok(None)
-            } else {
-                Ok(Some(trimmed_required("auth_header", value)?))
-            }
-        }
-        None => Ok(existing.and_then(|state| state.auth_header.clone())),
-    }
-}
+fn parse_string_inline_table(
+    table: &Table,
+    key: &str,
+    field_label: &str,
+) -> Result<BTreeMap<String, String>, ConfigCommandError> {
+    let Some(item) = table.get(key) else {
+        return Ok(BTreeMap::new());
+    };
 
-fn resolve_api_auth_value(
-    auth_value: Option<String>,
-    existing: Option<&ExistingApiState>,
-    auth_header: Option<&String>,
-) -> Result<Option<String>, ConfigCommandError> {
-    match auth_value {
-        Some(value) => {
-            let value = value.trim();
-            if auth_header.is_none() {
-                if value.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(trimmed_required("auth_value", value)?))
-                }
-            } else if value.is_empty() {
-                Ok(existing.and_then(|state| state.auth_value.clone()))
-            } else {
-                Ok(Some(trimmed_required("auth_value", value)?))
-            }
+    let mut values = BTreeMap::new();
+    if let Some(string_table) = item.as_table() {
+        for (entry_key, value) in string_table.iter() {
+            let Some(value) = value.as_str() else {
+                return Err(ConfigCommandError::new(format!(
+                    "{field_label}.{entry_key} must be a string"
+                )));
+            };
+
+            values.insert(entry_key.to_owned(), value.to_owned());
         }
-        None => {
-            if auth_header.is_none() {
-                Ok(None)
-            } else {
-                Ok(existing.and_then(|state| state.auth_value.clone()))
-            }
-        }
+
+        return Ok(values);
     }
+
+    let Some(string_table) = item.as_value().and_then(toml_edit::Value::as_inline_table) else {
+        return Ok(BTreeMap::new());
+    };
+
+    for (entry_key, value) in string_table.iter() {
+        let Some(value) = value.as_str() else {
+            return Err(ConfigCommandError::new(format!(
+                "{field_label}.{entry_key} must be a string"
+            )));
+        };
+
+        values.insert(entry_key.to_owned(), value.to_owned());
+    }
+
+    Ok(values)
 }
 
 fn delete_api(
@@ -1169,9 +1149,7 @@ fn ensure_api_delete_allowed(
             };
             if group
                 .get("api_access")
-                .and_then(|item| item.as_value())
-                .and_then(toml_edit::Value::as_inline_table)
-                .is_some_and(|table| table.contains_key(api_name))
+                .is_some_and(|item| api_access_contains_key(item, api_name))
             {
                 groups.push(group_name.to_owned());
             }
@@ -1187,9 +1165,7 @@ fn ensure_api_delete_allowed(
             if client.get("group").is_none()
                 && client
                     .get("api_access")
-                    .and_then(|item| item.as_value())
-                    .and_then(toml_edit::Value::as_inline_table)
-                    .is_some_and(|table| table.contains_key(api_name))
+                    .is_some_and(|item| api_access_contains_key(item, api_name))
             {
                 clients.push(client_name.to_owned());
             }
@@ -1530,6 +1506,15 @@ fn find_string_value(table: &Table, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(str::to_owned)
 }
 
+fn api_access_contains_key(item: &Item, api_name: &str) -> bool {
+    item.as_table()
+        .is_some_and(|table| table.contains_key(api_name))
+        || item
+            .as_value()
+            .and_then(toml_edit::Value::as_inline_table)
+            .is_some_and(|table| table.contains_key(api_name))
+}
+
 fn prepare_existing_config_access(
     path: &Path,
     password: Option<String>,
@@ -1840,12 +1825,47 @@ fn validate_base_url(base_url: &str, slug: &str) -> Result<(), ConfigCommandErro
     Ok(())
 }
 
-fn validate_header_name(header: &str, slug: &str) -> Result<(), ConfigCommandError> {
-    http::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
-        ConfigCommandError::new(format!("apis.{slug}.auth_header is invalid: {error}"))
+fn validate_header_value(value: &str, slug: &str) -> Result<(), ConfigCommandError> {
+    http::header::HeaderValue::from_str(value).map_err(|error| {
+        ConfigCommandError::new(format!("apis.{slug}.headers is invalid: {error}"))
     })?;
 
     Ok(())
+}
+
+fn parse_api_headers(
+    raw_headers: &[String],
+    slug: &str,
+) -> Result<BTreeMap<String, String>, ConfigCommandError> {
+    let mut headers = BTreeMap::new();
+
+    for raw_header in raw_headers {
+        let raw_header = trimmed_required("header", raw_header)?;
+        let (name, value) = raw_header.split_once('=').ok_or_else(|| {
+            ConfigCommandError::new(
+                "header must be formatted as <name>=<value>; repeat --header for multiple upstream headers",
+            )
+        })?;
+        let name = trimmed_required("header name", name)?;
+        let value = trimmed_required("header value", value)?;
+        let normalized_name =
+            http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                ConfigCommandError::new(format!("apis.{slug}.headers is invalid: {error}"))
+            })?;
+        validate_header_value(&value, slug)?;
+
+        let normalized_name = normalized_name.as_str().to_owned();
+
+        if headers.contains_key(&normalized_name) {
+            return Err(ConfigCommandError::new(format!(
+                "apis.{slug}.headers contains duplicate header '{normalized_name}'"
+            )));
+        }
+
+        headers.insert(normalized_name, value);
+    }
+
+    Ok(headers)
 }
 
 fn validate_timestamp(field: &str, value: &str) -> Result<(), ConfigCommandError> {

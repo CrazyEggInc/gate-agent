@@ -206,10 +206,13 @@ fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Erro
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--base-url"));
-    assert!(stdout.contains("--auth-header"));
-    assert!(stdout.contains("--auth-value"));
+    assert!(stdout.contains("--header"));
+    assert!(stdout.contains("Repeat flag to add multiple upstream headers"));
     assert!(stdout.contains("--timeout-ms"));
     assert!(stdout.contains("--delete"));
+    assert!(!stdout.contains("[default: 5000]"));
+    assert!(!stdout.contains("--auth-header"));
+    assert!(!stdout.contains("--auth-value"));
     assert!(!stdout.contains("--auth-scheme"));
 
     Ok(())
@@ -227,7 +230,49 @@ fn config_api_accepts_missing_timeout_ms_and_auth_fields() {
         "https://projects.internal.example",
     ]);
 
-    assert!(parsed.is_ok());
+    let parsed = parsed.expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Api(args) => {
+                assert!(args.header.is_empty());
+            }
+            other => panic!("expected api variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_api_accepts_repeated_header_flags() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "api",
+        "--name",
+        "projects",
+        "--base-url",
+        "https://projects.internal.example",
+        "--header",
+        "authorization=Bearer secret",
+        "--header",
+        "x-trace-id=abc123",
+    ]);
+
+    let parsed = parsed.expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Api(args) => {
+                assert_eq!(
+                    args.header,
+                    vec!["authorization=Bearer secret", "x-trace-id=abc123"]
+                );
+            }
+            other => panic!("expected api variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
 }
 
 #[test]
@@ -256,6 +301,25 @@ fn config_client_help_lists_expected_flags() -> Result<(), Box<dyn std::error::E
     assert!(!stdout.contains("--api-key-expires-at"));
 
     Ok(())
+}
+
+#[test]
+fn config_api_rejects_removed_auth_flags() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "api",
+        "--name",
+        "projects",
+        "--base-url",
+        "https://projects.internal.example",
+        "--auth-header",
+        "authorization",
+        "--auth-value",
+        "Bearer secret",
+    ]);
+
+    assert!(parsed.is_err());
 }
 
 #[test]

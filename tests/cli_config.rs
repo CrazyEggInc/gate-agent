@@ -36,8 +36,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#;
 
@@ -64,8 +63,7 @@ api_access = { stdin-projects = "read" }
 
 [apis.stdin-projects]
 base_url = "https://stdin-projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "stdin-projects-secret-value"
+headers = { x-api-key = "stdin-projects-secret-value" }
 timeout_ms = 5000
 "#;
 
@@ -997,6 +995,7 @@ fn config_show_reads_binary_age_config_with_password() -> Result<(), Box<dyn std
     assert!(output.status.success(), "{output:?}");
 
     let shown = String::from_utf8(output.stdout)?;
+    assert_eq!(shown, VALID_BEARER_VALIDATE_CONFIG);
     let config = shown.parse::<Value>()?;
     assert_eq!(
         string_at(&config, &["clients", "default", "bearer_token_id"]),
@@ -1474,8 +1473,7 @@ fn config_add_client_writes_group_reference_without_inline_api_access()
             "api_access = { projects = \"read\" }\n\n",
             "[apis.projects]\n",
             "base_url = \"https://projects.internal.example\"\n",
-            "auth_header = \"x-api-key\"\n",
-            "auth_value = \"projects-secret-value\"\n",
+            "headers = { x-api-key = \"projects-secret-value\" }\n",
             "timeout_ms = 5000\n",
         ),
     )?;
@@ -1731,8 +1729,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
     set_test_prompt_inputs(&[
         "projects",
         "https://projects.internal.example/api",
-        "authorization",
-        "Bearer local-upstream-token",
+        "authorization=Bearer local-upstream-token",
     ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
@@ -1744,8 +1741,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
                 delete: false,
                 name: None,
                 base_url: None,
-                auth_header: None,
-                auth_value: None,
+                header: vec![],
                 timeout_ms: Some(5_000),
             }),
         },
@@ -1759,12 +1755,8 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
         Some("https://projects.internal.example/api")
     );
     assert_eq!(
-        api.get("auth_header").and_then(Value::as_str),
-        Some("authorization")
-    );
-    assert_eq!(
-        api.get("auth_value").and_then(Value::as_str),
-        Some("Bearer local-upstream-token")
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer local-upstream-token"
     );
     assert!(api.get("auth_scheme").is_none());
 
@@ -1772,7 +1764,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn config_add_api_skips_auth_prompts_and_persistence_when_auth_header_is_blank()
+fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -1802,8 +1794,7 @@ fn config_add_api_skips_auth_prompts_and_persistence_when_auth_header_is_blank()
                 delete: false,
                 name: None,
                 base_url: None,
-                auth_header: None,
-                auth_value: None,
+                header: vec![],
                 timeout_ms: Some(5_000),
             }),
         },
@@ -1816,15 +1807,14 @@ fn config_add_api_skips_auth_prompts_and_persistence_when_auth_header_is_blank()
         api.get("base_url").and_then(Value::as_str),
         Some("https://projects.internal.example/api")
     );
-    assert!(api.get("auth_header").is_none());
-    assert!(api.get("auth_value").is_none());
+    assert!(api.get("headers").is_none());
     assert!(api.get("auth_scheme").is_none());
 
     Ok(())
 }
 
 #[test]
-fn config_update_api_interactive_preserves_existing_no_auth_when_prompt_left_blank()
+fn config_update_api_interactive_preserves_existing_no_headers_when_prompt_left_blank()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -1850,8 +1840,7 @@ fn config_update_api_interactive_preserves_existing_no_auth_when_prompt_left_bla
         delete: false,
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
-        auth_header: None,
-        auth_value: None,
+        headers: None,
         timeout_ms: Some(5_000),
     })?;
 
@@ -1866,8 +1855,7 @@ fn config_update_api_interactive_preserves_existing_no_auth_when_prompt_left_bla
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: None,
-                auth_header: None,
-                auth_value: None,
+                header: vec![],
                 timeout_ms: None,
             }),
         },
@@ -1880,16 +1868,248 @@ fn config_update_api_interactive_preserves_existing_no_auth_when_prompt_left_bla
         api.get("base_url").and_then(Value::as_str),
         Some("https://projects.internal.example/api")
     );
-    assert!(api.get("auth_header").is_none());
-    assert!(api.get("auth_value").is_none());
+    assert!(api.get("headers").is_none());
     assert!(api.get("auth_scheme").is_none());
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_non_interactive_allows_missing_auth_fields()
+fn config_update_api_interactive_preserves_existing_header_values_with_commas_when_prompt_left_blank()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec![
+            "authorization=Bearer token,with,commas".to_owned(),
+            "x-api-key=secret-key".to_owned(),
+        ]),
+        timeout_ms: Some(5_000),
+    })?;
+
+    set_test_prompt_inputs(&["", ""])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: None,
+                header: vec![],
+                timeout_ms: None,
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer token,with,commas"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "x-api-key"]),
+        "secret-key"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_interactive_preserves_existing_regular_table_headers_when_prompt_left_blank()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.headers]\n",
+            "authorization = \"Bearer token,with,commas\"\n",
+            "x-api-key = \"secret-key\"\n",
+        ),
+    )?;
+
+    set_test_prompt_inputs(&["", ""])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: None,
+                header: vec![],
+                timeout_ms: None,
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer token,with,commas"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "x-api-key"]),
+        "secret-key"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_string_regular_table_header_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.headers]\n",
+            "authorization = 123\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        timeout_ms: None,
+    })
+    .expect_err("non-string regular table header should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.headers.authorization must be a string"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec![
+            "authorization=Bearer top-secret".to_owned(),
+            "x-api-key=secret-key".to_owned(),
+        ]),
+        timeout_ms: Some(5_000),
+    })?;
+
+    set_test_prompt_inputs(&["", "none"])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: None,
+                header: vec![],
+                timeout_ms: None,
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+    let api = table_at(&config, &["apis", "projects"]);
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://projects.internal.example/api")
+    );
+    assert!(api.get("headers").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_non_interactive_allows_missing_headers() -> Result<(), Box<dyn std::error::Error>>
+{
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1917,8 +2137,7 @@ fn config_add_api_non_interactive_allows_missing_auth_fields()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
-                auth_header: None,
-                auth_value: None,
+                header: vec![],
                 timeout_ms: Some(5_000),
             }),
         },
@@ -1931,14 +2150,13 @@ fn config_add_api_non_interactive_allows_missing_auth_fields()
         api.get("base_url").and_then(Value::as_str),
         Some("https://projects.internal.example/api")
     );
-    assert!(api.get("auth_header").is_none());
-    assert!(api.get("auth_value").is_none());
+    assert!(api.get("headers").is_none());
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_rejects_auth_header_without_auth_value_non_interactively()
+fn config_add_api_rejects_malformed_header_non_interactively()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -1967,24 +2185,23 @@ fn config_add_api_rejects_auth_header_without_auth_value_non_interactively()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
-                auth_header: Some("authorization".to_owned()),
-                auth_value: None,
+                header: vec!["authorization".to_owned()],
                 timeout_ms: Some(5_000),
             }),
         },
     ))
-    .expect_err("auth_header without auth_value should fail");
+    .expect_err("malformed header should fail");
 
     assert_eq!(
         error.to_string(),
-        "auth_value is required when auth_header is configured"
+        "header must be formatted as <name>=<value>; repeat --header for multiple upstream headers"
     );
 
     Ok(())
 }
 
 #[test]
-fn config_add_api_rejects_auth_value_without_auth_header_non_interactively()
+fn config_add_api_rejects_duplicate_header_keys_after_normalization()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -2013,17 +2230,140 @@ fn config_add_api_rejects_auth_value_without_auth_header_non_interactively()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
-                auth_header: None,
-                auth_value: Some("local-upstream-token".to_owned()),
+                header: vec![
+                    "Authorization=Bearer one".to_owned(),
+                    "authorization=Bearer two".to_owned(),
+                ],
                 timeout_ms: Some(5_000),
             }),
         },
     ))
-    .expect_err("auth_value without auth_header should fail");
+    .expect_err("duplicate normalized headers should fail");
 
     assert_eq!(
         error.to_string(),
-        "auth_value cannot be set without auth_header"
+        "apis.projects.headers contains duplicate header 'authorization'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_persists_one_header() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec![
+            " authorization = Bearer local-upstream-token ".to_owned(),
+        ]),
+        timeout_ms: Some(5_000),
+    })?;
+
+    let config = load_toml(&config_path)?;
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer local-upstream-token"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_persists_multiple_headers() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec![
+            "authorization=Bearer local-upstream-token".to_owned(),
+            "x-api-key = secret-value ".to_owned(),
+        ]),
+        timeout_ms: Some(5_000),
+    })?;
+
+    let config = load_toml(&config_path)?;
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer local-upstream-token"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "x-api-key"]),
+        "secret-value"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_rejects_invalid_header_name() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec!["bad header=value".to_owned()]),
+        timeout_ms: Some(5_000),
+    })
+    .expect_err("invalid header name should fail");
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("apis.projects.headers is invalid:"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_rejects_invalid_header_value() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec!["authorization=bad\nvalue".to_owned()]),
+        timeout_ms: Some(5_000),
+    })
+    .expect_err("invalid header value should fail");
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("apis.projects.headers is invalid:"),
+        "{error}"
     );
 
     Ok(())
@@ -2082,15 +2422,14 @@ fn config_add_api_invalid_mutation_does_not_create_missing_config()
         name: "projects".to_owned(),
         delete: false,
         base_url: Some("https://projects.internal.example/api".to_owned()),
-        auth_header: None,
-        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        headers: Some(vec!["authorization".to_owned()]),
         timeout_ms: Some(5_000),
     })
     .expect_err("invalid api mutation should fail");
 
     assert_eq!(
         error.to_string(),
-        "auth_value cannot be set without auth_header"
+        "header must be formatted as <name>=<value>; repeat --header for multiple upstream headers"
     );
     assert!(!config_path.exists());
 
@@ -2399,8 +2738,7 @@ fn encrypted_config_add_api_removes_stale_keyring_password_after_failed_decrypt(
         delete: false,
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
-        auth_header: Some("authorization".to_owned()),
-        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
         timeout_ms: Some(5_000),
     })
     .expect_err("stale keyring password should fail decrypt");
@@ -2435,8 +2773,7 @@ fn encrypted_config_add_api_preserves_password_workflow() -> Result<(), Box<dyn 
         delete: false,
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
-        auth_header: Some("authorization".to_owned()),
-        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
         timeout_ms: Some(5_000),
     })?;
 
@@ -2456,12 +2793,8 @@ fn encrypted_config_add_api_preserves_password_workflow() -> Result<(), Box<dyn 
         Some("https://projects.internal.example/api")
     );
     assert_eq!(
-        api.get("auth_header").and_then(Value::as_str),
-        Some("authorization")
-    );
-    assert_eq!(
-        api.get("auth_value").and_then(Value::as_str),
-        Some("Bearer local-upstream-token")
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer local-upstream-token"
     );
     assert_eq!(
         api.get("timeout_ms").and_then(Value::as_integer),
@@ -2502,8 +2835,7 @@ fn encrypted_config_add_api_backfills_keyring_after_flag_password_decrypt()
         delete: false,
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
-        auth_header: Some("authorization".to_owned()),
-        auth_value: Some("Bearer local-upstream-token".to_owned()),
+        headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
         timeout_ms: Some(5_000),
     })?;
 
@@ -2525,12 +2857,8 @@ fn encrypted_config_add_api_backfills_keyring_after_flag_password_decrypt()
         Some("https://projects.internal.example/api")
     );
     assert_eq!(
-        api.get("auth_header").and_then(Value::as_str),
-        Some("authorization")
-    );
-    assert_eq!(
-        api.get("auth_value").and_then(Value::as_str),
-        Some("Bearer local-upstream-token")
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer local-upstream-token"
     );
     assert_eq!(
         api.get("timeout_ms").and_then(Value::as_integer),
@@ -2918,8 +3246,7 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
                 delete: false,
                 name: None,
                 base_url: None,
-                auth_header: None,
-                auth_value: None,
+                header: vec![],
                 timeout_ms: Some(5_000),
             }),
         },

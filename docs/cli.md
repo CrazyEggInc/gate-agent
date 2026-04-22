@@ -170,8 +170,7 @@ Accepted flags:
 - `--log-level <level>`
 - `--name`
 - `--base-url`
-- `--auth-header`
-- `--auth-value`
+- repeated `--header <name=value>`
 - optional `--timeout-ms`
 - `-d` / `--delete`
 
@@ -182,11 +181,13 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
-- persists only `auth_header` and `auth_value`; `auth_scheme` is not part of the persisted API config model
-- `auth_header` is optional
-- `auth_value` is required when `auth_header` is configured and must be omitted otherwise
-- when `auth_header` is omitted, no upstream auth header is configured or injected
-- bearer-style auth uses the full header value in `auth_value`, for example `Bearer my-token`
+- each `--header` value must use `<name>=<value>` format
+- repeated `--header` flags define upstream headers for that invocation
+- bearer-style usage uses full value inside one repeated flag, for example `--header authorization=Bearer my-token`
+- creating a new API with omitted `--header` writes no headers
+- in non-interactive update mode, omitted `--header` preserves existing headers instead of clearing them
+- interactive prompt accepts `none` to clear headers
+- there is no separate non-interactive clear flag for headers
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
@@ -197,6 +198,10 @@ Behavior:
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
 - non-interactive delete requires explicit `--name`
 - interactive delete asks with destructive wording that says the action cannot be undone and defaults to No
+- the interactive questionnaire asks exactly:
+  - `API name:`
+  - `Base URL (example: https://projects.internal.example/api):`
+  - `Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers):`
 - explicit args keep the command non-interactive
 
 ### `config group`

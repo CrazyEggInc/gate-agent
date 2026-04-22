@@ -147,27 +147,24 @@ Validation expectations:
 Required fields:
 
 - `base_url: String`
-- `auth_header: Option<String>`
-- `auth_value: Option<String>`
+- `headers: { <header-name> = <value>, ... } | omitted`
 - `timeout_ms: u64 | omitted`
 - `description: Option<String>`
 - `docs_url: Option<String>`
-- `auth_scheme: Option<String>`
 
 Validation expectations:
 
 - slug must be a valid lowercase slug
 - `base_url` must parse as a URL
-- `auth_header`, when present, must parse as an HTTP header name
-- `auth_value` is required when `auth_header` is present
-- `auth_value` must be omitted when `auth_header` is omitted
-- when `auth_header` is omitted, no upstream auth header is injected
-- bearer-style auth is stored as the full header value in `auth_value`, for example `Bearer my-token`
+- `headers`, when present, must be a TOML inline table of HTTP header name → value pairs
+- each `headers` key must parse as an HTTP header name
+- reserved proxy-managed header names in `headers` are rejected with an error
+- each `headers` value must be a non-empty string
+- omitted `headers` means no configured injected headers
 - optional `description`, when present, must be non-empty
 - optional `docs_url`, when present, must parse as a URL and use `http` or `https`
 - omitted `timeout_ms` falls back to `5000`
 - explicit `timeout_ms` must be greater than zero
-- the parser accepts legacy `auth_scheme` on read, composes it into the in-memory `auth_value`, and rewrites config without persisting `auth_scheme`
 
 ## Operational expectations
 
@@ -191,8 +188,7 @@ group = "local-default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
-auth_header = "authorization"
-auth_value = "Bearer local-upstream-token"
+headers = { authorization = "Bearer local-upstream-token" }
 timeout_ms = 5000
 ```
 
@@ -243,6 +239,7 @@ When encryption is enabled:
 
 - resolves the target path using read precedence
 - prints plaintext TOML to stdout
+- prints raw plaintext TOML values exactly as stored
 - decrypts first when the selected file is encrypted, whether `age` content is ASCII-armored or binary
 
 ### `config edit`
@@ -259,8 +256,7 @@ Accepted flags:
 
 - `--name`
 - `--base-url`
-- `--auth-header`
-- `--auth-value`
+- repeated `--header <name=value>`
 - optional `--timeout-ms`
 - `-d` / `--delete`
 
@@ -270,13 +266,14 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one `[apis.<name>]` entry by default
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
-- persists `auth_header` only when upstream auth injection is configured
-- persists `auth_value` only when `auth_header` is present
-- persists bearer-style auth as the full header value in `auth_value`, for example `Bearer my-token`
-- when `auth_header` is omitted, writes no upstream auth fields and injects no upstream auth header at runtime
 - on interactive update, current values become prompt defaults and blank answers keep those defaults
 - on non-interactive update, omitted flags preserve current values instead of clearing them
-- entering `none` for API auth clears optional upstream auth fields; clearing auth removes both `auth_header` and `auth_value`
+- parses each `--header` value as `<name>=<value>` and stores them in `headers = { ... }`
+- repeated `--header` flags are merged into one header map
+- duplicate normalized header names are rejected
+- configured headers override collisions with same request header names at runtime
+- when no headers are supplied, writes no `headers` field and injects no configured upstream headers at runtime
+- entering `none` for headers clears configured upstream headers
 - uses `5000` when `--timeout-ms` is omitted during create or when no stored value exists yet
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
@@ -291,8 +288,7 @@ Interactive questionnaire flow:
 
 - `API name:`
 - `Base URL (example: https://projects.internal.example/api):`
-- `Auth header (default: authorization, use 'none' for no auth):`
-- `Auth value (example: Bearer my-token):` only when auth header was set
+- `Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers):`
 
 ### `config client`
 

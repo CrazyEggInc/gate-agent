@@ -250,6 +250,8 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
             Request::builder()
                 .uri("/proxy/projects/path?expand=1")
                 .header("authorization", format!("Bearer {token}"))
+                .header("x-api-key", "client-collision-value")
+                .header("x-custom", "preserved")
                 .body(Body::empty())?,
         )
         .await?;
@@ -261,6 +263,10 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
     assert_eq!(
         projects_request.headers.get("x-api-key").unwrap(),
         "projects-secret-value"
+    );
+    assert_eq!(
+        projects_request.headers.get("x-custom").unwrap(),
+        "preserved"
     );
     assert!(projects_request.headers.get("authorization").is_none());
 

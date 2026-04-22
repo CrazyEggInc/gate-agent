@@ -338,8 +338,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
             delete: true,
             name,
             base_url: None,
-            auth_header: None,
-            auth_value: None,
+            headers: None,
             timeout_ms: None,
         });
     }
@@ -361,42 +360,31 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         None
     };
 
-    let existing_auth_header = existing
-        .as_ref()
-        .and_then(|state| state.auth_header.as_deref());
-    let auth_header = if args.auth_header.is_some() || args.auth_value.is_some() {
-        args.auth_header
+    let headers = if !args.header.is_empty() {
+        Some(
+            args.header
+                .into_iter()
+                .filter_map(optional_non_empty)
+                .collect::<Vec<_>>(),
+        )
     } else if interactive_questionnaire_available() {
-        config::prompt_optional_text(
-            &config::prompt_message(
-                "Auth header",
-                None,
-                existing_auth_header,
-                Some("authorization"),
-                None,
-                Some("use 'none' for no auth"),
-            ),
-            existing_auth_header,
-            "config api accepts optional --auth-header",
+        let existing_headers = existing
+            .as_ref()
+            .map(render_api_headers_map)
+            .filter(|value| !value.is_empty());
+
+        match config::prompt_optional_text(
+            "Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers)",
+            existing_headers.as_deref(),
+            "config api accepts optional --header",
         )
         .map_err(|error| CommandError::new(error.to_string()))?
-    } else {
-        None
-    };
-
-    let auth_value = if args.auth_value.is_some() {
-        args.auth_value
-    } else if interactive_questionnaire_available() && auth_header.as_deref() != Some("none") {
-        match auth_header.as_deref() {
-            Some(header) if !header.trim().is_empty() => Some(prompt_required(
-                "Auth value",
-                existing
-                    .as_ref()
-                    .and_then(|state| state.auth_value.as_deref()),
-                Some("Bearer my-token"),
-                "config api requires --auth-value when auth_header is configured",
-            )?),
-            _ => None,
+        {
+            Some(prompted_headers) if prompted_headers.eq_ignore_ascii_case("none") => {
+                Some(vec![])
+            }
+            Some(prompted_headers) => Some(split_optional_header_segments(&prompted_headers)),
+            None => None,
         }
     } else {
         None
@@ -415,8 +403,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         delete: false,
         name,
         base_url,
-        auth_header,
-        auth_value,
+        headers,
         timeout_ms,
     })
 }
@@ -732,6 +719,14 @@ fn render_client_api_access_map(map: &config::ExistingClientPromptState) -> Stri
     render_access_map(&map.api_access)
 }
 
+fn render_api_headers_map(map: &config::ExistingApiState) -> String {
+    map.headers
+        .iter()
+        .map(|(name, value)| format!("{name}={}", escape_header_prompt_value(value)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn render_access_map(map: &std::collections::BTreeMap<String, AccessLevel>) -> String {
     map.iter()
         .map(|(api, level)| {
@@ -745,6 +740,59 @@ fn render_access_map(map: &std::collections::BTreeMap<String, AccessLevel>) -> S
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn split_optional_header_segments(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut escape = false;
+
+    for character in value.chars() {
+        if escape {
+            match character {
+                ',' | '\\' => current.push(character),
+                _ => {
+                    current.push('\\');
+                    current.push(character);
+                }
+            }
+            escape = false;
+            continue;
+        }
+
+        match character {
+            '\\' => escape = true,
+            ',' => {
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if escape {
+        current.push('\\');
+    }
+
+    segments.push(current);
+
+    segments
+        .into_iter()
+        .filter_map(optional_non_empty)
+        .collect()
+}
+
+fn escape_header_prompt_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(',', "\\,")
+}
+
+fn optional_non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 fn interactive_questionnaire_available() -> bool {
