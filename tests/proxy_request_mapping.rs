@@ -252,6 +252,37 @@ async fn request_mapping_applies_configured_basic_auth() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+async fn request_mapping_applies_username_only_basic_auth() -> Result<(), Box<dyn std::error::Error>>
+{
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("billing").expect("billing api config");
+
+    let mut api = api.clone();
+    api.headers.clear();
+    api.basic_auth = Some(gate_agent::config::secrets::ApiBasicAuth {
+        username: "billing-user".to_owned(),
+        password: secrecy::SecretString::from(String::new()),
+    });
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/billing/v1/projects")
+        .header("authorization", "Bearer client-token")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "billing", &api)?;
+
+    assert_eq!(
+        outbound.headers().get("authorization").unwrap(),
+        "Basic YmlsbGluZy11c2VyOg=="
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_mapping_preserves_encoded_path_and_query_bytes()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
