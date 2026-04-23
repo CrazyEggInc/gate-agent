@@ -18,8 +18,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#;
 
@@ -47,8 +46,7 @@ api_access = {{ projects = "read" }}
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = {{ x-api-key = "projects-secret-value" }}
 timeout_ms = 5000
 "#
     )

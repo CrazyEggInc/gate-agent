@@ -98,17 +98,14 @@ The outbound request must strip:
   - `X-Real-IP`
   - `Via`
 
-`auth_header` and `auth_value` form a required pair: either both are set or both are omitted.
+Each API may configure zero, one, or many upstream request headers to inject.
 
-When both are omitted, no upstream auth header is injected.
+Configured API headers are applied as header overlay on top of filtered client headers.
 
-When both are present, the proxy injects `auth_header: auth_value`, for example `authorization: Bearer my-token`.
+If configured API header name collides with forwarded client header name, configured API header wins and overwrites forwarded value.
 
-Bearer-style upstream auth is configured as the full header value in `auth_value`, for example `Bearer my-token`.
+This includes configured `Authorization` injection when present. Client `Authorization` is still stripped before forwarding, and configured API headers may add replacement `Authorization` or any other required upstream header.
 
-If only one of the pair is present, the config is invalid. Runtime config loading must fail with a clear error so the proxy does not start with a mismatched upstream auth configuration.
-
-The injected auth value overrides whatever client auth would otherwise have been forwarded.
 The proxy does not pass client-supplied topology headers upstream.
 
 ## Upstream execution

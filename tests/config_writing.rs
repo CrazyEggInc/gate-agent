@@ -238,7 +238,7 @@ fn config_init_prints_default_bearer_token_once_and_persists_only_hash()
 }
 
 #[test]
-fn add_api_upserts_single_entry_without_clobbering_unrelated_content()
+fn add_api_upserts_single_header_without_clobbering_unrelated_content()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("gate-agent.toml");
@@ -260,8 +260,10 @@ api_access = {}
         &ApiUpsert {
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/api".to_string(),
-            auth_header: Some("authorization".to_string()),
-            auth_value: Some("first-token".to_string()),
+            headers: std::collections::BTreeMap::from([(
+                "authorization".to_string(),
+                "first-token".to_string(),
+            )]),
             timeout_ms: 5_000,
         },
         None,
@@ -270,8 +272,8 @@ api_access = {}
     let first_contents = fs::read_to_string(&config_path)?;
     let first_projects = section_body(&first_contents, "apis.projects").unwrap();
     let projects_with_notes = first_projects.replacen(
-        "auth_value = \"first-token\"\n",
-        "# preserve this api comment\nauth_value = \"first-token\"\nnotes = \"keep-me\"\n",
+        "headers = { authorization = \"first-token\" }\n",
+        "# preserve this api comment\nheaders = { authorization = \"first-token\" }\nnotes = \"keep-me\"\n",
         1,
     );
     let first_projects_header = "[apis.projects]\n";
@@ -289,8 +291,10 @@ api_access = {}
         &ApiUpsert {
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/v2".to_string(),
-            auth_header: Some("x-service-token".to_string()),
-            auth_value: Some("second-token".to_string()),
+            headers: std::collections::BTreeMap::from([(
+                "x-service-token".to_string(),
+                "second-token".to_string(),
+            )]),
             timeout_ms: 7_500,
         },
         None,
@@ -300,8 +304,10 @@ api_access = {}
 
     assert!(contents.starts_with("# keep this comment"));
     assert_eq!(contents.matches("[apis.projects]").count(), 1);
-    assert!(!contents.contains("auth_scheme = \"Bearer\""));
     assert!(contents.contains("# preserve this api comment"));
+    assert!(!contents.contains("auth_header ="));
+    assert!(!contents.contains("auth_value ="));
+    assert!(!contents.contains("auth_scheme ="));
 
     let projects = section_body(&contents, "apis.projects").unwrap();
 
@@ -310,12 +316,11 @@ api_access = {}
         Some("https://projects.internal.example/v2")
     );
     assert_eq!(
-        find_string_value(projects, "auth_header").as_deref(),
-        Some("x-service-token")
-    );
-    assert_eq!(
-        find_string_value(projects, "auth_value").as_deref(),
-        Some("second-token")
+        find_inline_table_value(projects, "headers"),
+        Some(vec![(
+            "x-service-token".to_string(),
+            "second-token".to_string(),
+        )])
     );
     assert_eq!(
         find_string_value(projects, "notes").as_deref(),
@@ -327,7 +332,60 @@ api_access = {}
 }
 
 #[test]
-fn add_api_without_auth_header_removes_stale_auth_fields_and_legacy_auth_scheme()
+fn add_api_writes_multiple_headers_in_stable_order() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    write::upsert_api(
+        &config_path,
+        &ApiUpsert {
+            name: "projects".to_string(),
+            base_url: "https://projects.internal.example/api".to_string(),
+            headers: std::collections::BTreeMap::from([
+                ("x-zeta-token".to_string(), "zeta-secret".to_string()),
+                (
+                    "authorization".to_string(),
+                    "Bearer upstream-token".to_string(),
+                ),
+            ]),
+            timeout_ms: 5_000,
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let projects = section_body(&contents, "apis.projects").unwrap();
+
+    assert_eq!(
+        find_inline_table_value(projects, "headers"),
+        Some(vec![
+            (
+                "authorization".to_string(),
+                "Bearer upstream-token".to_string()
+            ),
+            ("x-zeta-token".to_string(), "zeta-secret".to_string()),
+        ])
+    );
+    assert!(projects.contains(
+        "headers = { authorization = \"Bearer upstream-token\", x-zeta-token = \"zeta-secret\" }"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn add_api_with_empty_headers_removes_headers_and_stale_legacy_auth_keys()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("gate-agent.toml");
@@ -355,8 +413,7 @@ notes = "keep-me"
         &ApiUpsert {
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/v2".to_string(),
-            auth_header: None,
-            auth_value: None,
+            headers: std::collections::BTreeMap::new(),
             timeout_ms: 7_500,
         },
         None,
@@ -369,8 +426,10 @@ notes = "keep-me"
         find_string_value(projects, "base_url").as_deref(),
         Some("https://projects.internal.example/v2")
     );
-    assert_eq!(find_string_value(projects, "auth_header"), None);
-    assert_eq!(find_string_value(projects, "auth_value"), None);
+    assert_eq!(find_inline_table_value(projects, "headers"), None);
+    assert!(!projects.contains("headers ="));
+    assert!(!projects.contains("auth_header ="));
+    assert!(!projects.contains("auth_value ="));
     assert!(!projects.contains("auth_scheme ="));
     assert!(contents.contains("# preserve this api comment"));
     assert_eq!(
@@ -398,10 +457,8 @@ fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_ha
             "projects",
             "--base-url",
             "https://projects.internal.example/api",
-            "--auth-header",
-            "authorization",
-            "--auth-value",
-            "Bearer upstream-token",
+            "--header",
+            "authorization=Bearer upstream-token",
         ])
         .output()?;
 
@@ -437,13 +494,14 @@ fn config_add_api_prints_implicit_default_bearer_token_once_and_persists_only_ha
         Some("https://projects.internal.example/api")
     );
     assert_eq!(
-        find_string_value(api, "auth_header").as_deref(),
-        Some("authorization")
+        find_inline_table_value(api, "headers"),
+        Some(vec![(
+            "authorization".to_string(),
+            "Bearer upstream-token".to_string(),
+        )])
     );
-    assert_eq!(
-        find_string_value(api, "auth_value").as_deref(),
-        Some("Bearer upstream-token")
-    );
+    assert!(!contents.contains("auth_header ="));
+    assert!(!contents.contains("auth_value ="));
     assert!(!api.contains("auth_scheme ="));
 
     Ok(())

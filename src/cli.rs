@@ -204,11 +204,11 @@ pub struct ConfigApiArgs {
     #[arg(long, help = "Base URL for the upstream API")]
     pub base_url: Option<String>,
 
-    #[arg(long, help = "Header name sent upstream")]
-    pub auth_header: Option<String>,
-
-    #[arg(long, help = "Secret or token sent upstream")]
-    pub auth_value: Option<String>,
+    #[arg(
+        long,
+        help = "Upstream headers as name=value pairs. Repeat flag to add multiple upstream headers"
+    )]
+    pub header: Vec<String>,
 
     #[arg(long, help = "Upstream timeout in milliseconds")]
     pub timeout_ms: Option<u64>,

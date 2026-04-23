@@ -4,6 +4,7 @@ use http::{
     header::{self, HeaderName, HeaderValue},
 };
 use secrecy::ExposeSecret;
+use std::collections::HashSet;
 use url::{Position, Url};
 
 use crate::{config::secrets::ApiConfig, error::AppError};
@@ -60,7 +61,7 @@ pub fn map_forward_request(
     let mut outbound_request = reqwest::Request::new(method, url);
 
     *outbound_request.headers_mut() = filter_request_headers(&headers);
-    inject_upstream_auth_header(outbound_request.headers_mut(), api_config)?;
+    overlay_configured_headers(outbound_request.headers_mut(), api_config)?;
     *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
 
     Ok(outbound_request)
@@ -142,34 +143,30 @@ fn is_client_forwarding_header(name: &HeaderName) -> bool {
     )
 }
 
-fn inject_upstream_auth_header(
+fn overlay_configured_headers(
     headers: &mut HeaderMap,
     api_config: &ApiConfig,
 ) -> Result<(), AppError> {
-    let (auth_header, auth_value) = match (
-        api_config.auth_header.as_ref(),
-        api_config.auth_value.as_ref(),
-    ) {
-        (None, None) => return Ok(()),
-        (Some(auth_header), Some(auth_value)) => (auth_header, auth_value),
-        (Some(_), None) => {
-            return Err(AppError::UpstreamBuild(
-                "upstream auth config is invalid: auth_header requires auth_value".to_owned(),
-            ));
+    for (name, value) in &api_config.headers {
+        if is_reserved_configured_header(name) {
+            return Err(AppError::UpstreamBuild(format!(
+                "reserved header in config: {name}"
+            )));
         }
-        (None, Some(_)) => {
-            return Err(AppError::UpstreamBuild(
-                "upstream auth config is invalid: auth_value requires auth_header".to_owned(),
-            ));
-        }
-    };
 
-    let auth_value = auth_value.expose_secret();
-    let auth_value = HeaderValue::from_str(auth_value).map_err(|error| {
-        AppError::UpstreamBuild(format!("invalid upstream auth header: {error}"))
-    })?;
-
-    headers.insert(auth_header.clone(), auth_value);
+        let value = HeaderValue::from_str(value.expose_secret()).map_err(|error| {
+            AppError::UpstreamBuild(format!("invalid configured upstream header: {error}"))
+        })?;
+        headers.insert(name.clone(), value);
+    }
 
     Ok(())
+}
+
+fn is_reserved_configured_header(name: &HeaderName) -> bool {
+    let connection_bound_names = HashSet::new();
+
+    name == header::HOST
+        || is_client_forwarding_header(name)
+        || is_hop_by_hop_header(name, &connection_bound_names)
 }

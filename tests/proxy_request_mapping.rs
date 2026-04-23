@@ -53,14 +53,12 @@ api_access = {{ projects = "read", billing = "write" }}
 
 [apis.projects]
 base_url = "{base_url}"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = {{ x-api-key = "projects-secret-value" }}
 timeout_ms = 5000
 
 [apis.billing]
 base_url = "{base_url}/api"
-auth_header = "authorization"
-auth_value = "Bearer billing-secret-token"
+headers = {{ authorization = "Bearer billing-secret-token" }}
 timeout_ms = 5000
 "#
     ))?;
@@ -200,8 +198,8 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
 }
 
 #[tokio::test]
-async fn request_mapping_uses_full_configured_auth_value_as_is()
--> Result<(), Box<dyn std::error::Error>> {
+async fn request_mapping_overlays_one_configured_header() -> Result<(), Box<dyn std::error::Error>>
+{
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_server(app).await?;
     let secrets = load_test_secrets(&base_url)?;
@@ -288,12 +286,18 @@ async fn request_mapping_strips_client_forwarding_headers() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn request_mapping_sets_raw_upstream_auth_header_when_value_has_no_scheme_prefix()
+async fn request_mapping_overlays_multiple_configured_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_server(app).await?;
     let secrets = load_test_secrets(&base_url)?;
     let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.headers.push((
+        "authorization".parse()?,
+        secrecy::SecretString::from("Bearer projects-secret-token".to_owned()),
+    ));
 
     let request = Request::builder()
         .method("GET")
@@ -301,7 +305,7 @@ async fn request_mapping_sets_raw_upstream_auth_header_when_value_has_no_scheme_
         .header("authorization", "Bearer client-token")
         .body(Body::empty())?;
 
-    let outbound = map_request(request, "projects", api)?;
+    let outbound = map_request(request, "projects", &api)?;
 
     assert_eq!(
         outbound
@@ -310,69 +314,19 @@ async fn request_mapping_sets_raw_upstream_auth_header_when_value_has_no_scheme_
             .expect("x-api-key header"),
         "projects-secret-value"
     );
-    assert!(outbound.headers().get("authorization").is_none());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn request_mapping_skips_upstream_auth_injection_when_auth_header_is_absent()
--> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
-    let base_url = spawn_server(app).await?;
-    let secrets = load_test_secrets(&base_url)?;
-    let api = secrets.apis.get("projects").expect("projects api config");
-
-    let mut api = api.clone();
-    api.auth_header = None;
-    api.auth_value = None;
-
-    let request = Request::builder()
-        .method("GET")
-        .uri("/proxy/projects")
-        .header("authorization", "Bearer client-token")
-        .header("x-custom", "preserved")
-        .body(Body::empty())?;
-
-    let outbound = map_request(request, "projects", &api)?;
-
-    assert!(outbound.headers().get("authorization").is_none());
-    assert!(outbound.headers().get("x-api-key").is_none());
-    assert_eq!(outbound.headers().get("x-custom").unwrap(), "preserved");
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn request_mapping_rejects_auth_header_without_auth_value()
--> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
-    let base_url = spawn_server(app).await?;
-    let secrets = load_test_secrets(&base_url)?;
-    let api = secrets.apis.get("projects").expect("projects api config");
-
-    let mut api = api.clone();
-    api.auth_header = Some("authorization".parse()?);
-    api.auth_value = None;
-
-    let request = Request::builder()
-        .method("GET")
-        .uri("/proxy/projects")
-        .body(Body::empty())?;
-
-    let error =
-        map_request(request, "projects", &api).expect_err("mismatched auth pair should fail");
-
     assert_eq!(
-        error.to_string(),
-        "failed to build upstream request: upstream auth config is invalid: auth_header requires auth_value"
+        outbound
+            .headers()
+            .get("authorization")
+            .expect("authorization header"),
+        "Bearer projects-secret-token"
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn request_mapping_rejects_auth_value_without_auth_header()
+async fn request_mapping_rejects_reserved_forwarding_configured_header()
 -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_server(app).await?;
@@ -380,9 +334,9 @@ async fn request_mapping_rejects_auth_value_without_auth_header()
     let api = secrets.apis.get("projects").expect("projects api config");
 
     let mut api = api.clone();
-    api.auth_header = None;
-    api.auth_value = Some(secrecy::SecretString::from(
-        "Bearer upstream-token".to_owned(),
+    api.headers.push((
+        "forwarded".parse()?,
+        secrecy::SecretString::from("for=198.51.100.1".to_owned()),
     ));
 
     let request = Request::builder()
@@ -390,13 +344,217 @@ async fn request_mapping_rejects_auth_value_without_auth_header()
         .uri("/proxy/projects")
         .body(Body::empty())?;
 
-    let error =
-        map_request(request, "projects", &api).expect_err("mismatched auth pair should fail");
+    let error = map_request(request, "projects", &api).unwrap_err();
+
+    assert!(matches!(
+        error,
+        gate_agent::error::AppError::UpstreamBuild(ref message)
+            if message == "reserved header in config: forwarded"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_rejects_reserved_hop_by_hop_configured_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.headers.push((
+        "te".parse()?,
+        secrecy::SecretString::from("trailers".to_owned()),
+    ));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .body(Body::empty())?;
+
+    let error = map_request(request, "projects", &api).unwrap_err();
+
+    assert!(matches!(
+        error,
+        gate_agent::error::AppError::UpstreamBuild(ref message)
+            if message == "reserved header in config: te"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_rejects_reserved_host_configured_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.headers.push((
+        "host".parse()?,
+        secrecy::SecretString::from("evil.example".to_owned()),
+    ));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .body(Body::empty())?;
+
+    let error = map_request(request, "projects", &api).unwrap_err();
+
+    assert!(matches!(
+        error,
+        gate_agent::error::AppError::UpstreamBuild(ref message)
+            if message == "reserved header in config: host"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_configured_headers_override_colliding_client_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.headers.push((
+        "x-custom".parse()?,
+        secrecy::SecretString::from("configured-value".to_owned()),
+    ));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .header("x-custom", "client-value")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "projects", &api)?;
 
     assert_eq!(
-        error.to_string(),
-        "failed to build upstream request: upstream auth config is invalid: auth_value requires auth_header"
+        outbound.headers().get("x-api-key").unwrap(),
+        "projects-secret-value"
     );
+    assert_eq!(
+        outbound.headers().get("x-custom").unwrap(),
+        "configured-value"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_invalid_configured_header_error_does_not_leak_secret_value()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let secret_value = "Bearer very-secret-token\nsecond-line";
+    let mut api = api.clone();
+    api.headers.push((
+        "authorization".parse()?,
+        secrecy::SecretString::from(secret_value.to_owned()),
+    ));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .body(Body::empty())?;
+
+    let error = map_request(request, "projects", &api).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("failed to build upstream request"));
+    assert!(message.contains("invalid configured upstream header"));
+    assert!(!message.contains("very-secret-token"));
+    assert!(!message.contains("second-line"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_keeps_unrelated_forwarded_client_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .header("x-custom", "preserved")
+        .header("content-type", "application/json")
+        .body(Body::empty())?;
+
+    assert_eq!(
+        map_request(request, "projects", api)?
+            .headers()
+            .get("x-custom")
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        map_request(
+            Request::builder()
+                .method("GET")
+                .uri("/proxy/projects")
+                .header("x-custom", "preserved")
+                .header("content-type", "application/json")
+                .body(Body::empty())?,
+            "projects",
+            api,
+        )?
+        .headers()
+        .get("content-type")
+        .unwrap(),
+        "application/json"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_mapping_without_configured_headers_keeps_only_filtered_forwarded_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_server(app).await?;
+    let secrets = load_test_secrets(&base_url)?;
+    let api = secrets.apis.get("projects").expect("projects api config");
+
+    let mut api = api.clone();
+    api.headers.clear();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/proxy/projects")
+        .header("authorization", "Bearer client-token")
+        .header("connection", "keep-alive, x-remove-me")
+        .header("host", "localhost:8787")
+        .header("x-custom", "preserved")
+        .header("x-remove-me", "remove this too")
+        .header("content-type", "application/json")
+        .body(Body::empty())?;
+
+    let outbound = map_request(request, "projects", &api)?;
+
+    assert!(outbound.headers().get("authorization").is_none());
+    assert_eq!(outbound.headers().get("x-custom").unwrap(), "preserved");
+    assert_eq!(
+        outbound.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    assert!(outbound.headers().get("connection").is_none());
+    assert!(outbound.headers().get("x-remove-me").is_none());
+    assert!(outbound.headers().get("host").is_none());
 
     Ok(())
 }

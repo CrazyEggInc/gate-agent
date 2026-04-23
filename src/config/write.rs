@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::Read;
@@ -22,8 +23,7 @@ const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
 pub struct ApiUpsert {
     pub name: String,
     pub base_url: String,
-    pub auth_header: Option<String>,
-    pub auth_value: Option<String>,
+    pub headers: BTreeMap<String, String>,
     pub timeout_ms: u64,
 }
 
@@ -146,29 +146,14 @@ pub fn upsert_api(
     let api_table = get_or_insert_table(apis, &api.name)?;
 
     set_string(api_table, "base_url", &api.base_url);
-    if let Some(auth_header) = api
-        .auth_header
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        set_string(api_table, "auth_header", auth_header);
-        if let Some(auth_value) = api
-            .auth_value
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            set_string(api_table, "auth_value", auth_value);
-        } else {
-            api_table.remove("auth_value");
-        }
-    } else {
-        api_table.remove("auth_header");
-        api_table.remove("auth_value");
-    }
-
+    api_table.remove("auth_header");
+    api_table.remove("auth_value");
     api_table.remove("auth_scheme");
+    if api.headers.is_empty() {
+        api_table.remove("headers");
+    } else {
+        set_string_inline_table(api_table, "headers", &api.headers);
+    }
     set_integer(api_table, "timeout_ms", api.timeout_ms)?;
 
     write_loaded_config(path, &loaded, &document.to_string(), password)
@@ -484,6 +469,14 @@ fn set_api_access_inline_table(
                 AccessLevel::Write => "write",
             }),
         );
+    }
+    table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
+}
+
+fn set_string_inline_table(table: &mut Table, key: &str, values: &BTreeMap<String, String>) {
+    let mut inline = toml_edit::InlineTable::new();
+    for (name, value_str) in values {
+        inline.insert(name, toml_edit::Value::from(value_str.as_str()));
     }
     table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
 }

@@ -43,8 +43,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#;
 
@@ -61,8 +60,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#;
 
@@ -79,8 +77,7 @@ api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://stdin-projects.internal.example"
-auth_header = "x-api-key"
-auth_value = "stdin-projects-secret-value"
+headers = { x-api-key = "stdin-projects-secret-value" }
 timeout_ms = 7000
 "#;
 
@@ -95,8 +92,7 @@ api_access = { projects = "read" }
 base_url = "https://projects.internal.example"
 description = "Project API"
 docs_url = "https://docs.internal.example/projects"
-auth_header = "x-api-key"
-auth_value = "projects-secret-value"
+headers = { x-api-key = "projects-secret-value" }
 timeout_ms = 5000
 "#;
 
