@@ -77,9 +77,16 @@ pub struct ApiConfig {
     pub slug: String,
     pub base_url: Url,
     pub headers: Vec<(HeaderName, SecretString)>,
+    pub basic_auth: Option<ApiBasicAuth>,
     pub description: Option<String>,
     pub docs_url: Option<Url>,
     pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiBasicAuth {
+    pub username: String,
+    pub password: SecretString,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,8 +143,16 @@ struct RawApiConfig {
     description: Option<String>,
     docs_url: Option<String>,
     headers: Option<BTreeMap<String, String>>,
+    basic_auth: Option<RawApiBasicAuth>,
     #[serde(default = "default_api_timeout_ms")]
     timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApiBasicAuth {
+    username: String,
+    password: String,
 }
 
 fn default_api_timeout_ms() -> u64 {
@@ -507,6 +522,17 @@ impl ApiConfig {
         )?;
 
         let headers = parse_api_headers(slug, raw_config.headers)?;
+        let basic_auth = parse_api_basic_auth(slug, raw_config.basic_auth)?;
+
+        if basic_auth.is_some()
+            && headers
+                .iter()
+                .any(|(name, _)| *name == HeaderName::from_static("authorization"))
+        {
+            return Err(ConfigError::new(format!(
+                "apis.{slug} cannot set both headers.authorization and basic_auth"
+            )));
+        }
 
         if raw_config.timeout_ms == 0 {
             return Err(ConfigError::new(format!(
@@ -520,9 +546,33 @@ impl ApiConfig {
             description,
             docs_url,
             headers,
+            basic_auth,
             timeout_ms: raw_config.timeout_ms,
         })
     }
+}
+
+fn parse_api_basic_auth(
+    slug: &str,
+    basic_auth: Option<RawApiBasicAuth>,
+) -> Result<Option<ApiBasicAuth>, ConfigError> {
+    let Some(basic_auth) = basic_auth else {
+        return Ok(None);
+    };
+
+    let username = required_raw_string(
+        &format!("apis.{slug}.basic_auth.username"),
+        basic_auth.username,
+    )?;
+    let password = required_raw_string(
+        &format!("apis.{slug}.basic_auth.password"),
+        basic_auth.password,
+    )?;
+
+    Ok(Some(ApiBasicAuth {
+        username,
+        password: SecretString::from(password),
+    }))
 }
 
 fn parse_api_headers(
@@ -568,6 +618,14 @@ fn required_string(field: &str, value: String) -> Result<String, ConfigError> {
     }
 
     Ok(trimmed.to_owned())
+}
+
+fn required_raw_string(field: &str, value: String) -> Result<String, ConfigError> {
+    if value.is_empty() {
+        return Err(ConfigError::new(format!("{field} cannot be empty")));
+    }
+
+    Ok(value)
 }
 
 fn optional_string(field: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {

@@ -17,7 +17,8 @@ use support::{
     bearer_token, bearer_token_for_client, bearer_token_with_access, capture_channel,
     capture_request, expired_bearer_token, load_multi_api_test_config,
     load_multi_api_test_config_without_projects_auth_header, load_test_config,
-    load_test_config_with_billing_timeout, spawn_chunked_upstream, spawn_upstream,
+    load_test_config_with_billing_basic_auth, load_test_config_with_billing_timeout,
+    spawn_chunked_upstream, spawn_upstream,
 };
 use tower::ServiceExt;
 
@@ -177,6 +178,38 @@ async fn proxy_route_uses_api_segment_for_billing_multi_api_token()
         "Bearer billing-secret-token"
     );
     assert!(billing_request.headers.get("x-api-key").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_forwards_configured_basic_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/api/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config_with_billing_basic_auth(&base_url)?;
+    let token = bearer_token("billing", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+    assert_eq!(
+        captured.headers.get("authorization").unwrap(),
+        "Basic YmlsbGluZy11c2VyOmJpbGxpbmctcGFzcw=="
+    );
 
     Ok(())
 }

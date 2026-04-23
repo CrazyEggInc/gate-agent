@@ -100,11 +100,17 @@ The outbound request must strip:
 
 Each API may configure zero, one, or many upstream request headers to inject.
 
+Each API may also configure `basic_auth` for upstream HTTP basic authentication.
+
 Configured API headers are applied as header overlay on top of filtered client headers.
 
 If configured API header name collides with forwarded client header name, configured API header wins and overwrites forwarded value.
 
 This includes configured `Authorization` injection when present. Client `Authorization` is still stripped before forwarding, and configured API headers may add replacement `Authorization` or any other required upstream header.
+
+When `basic_auth` is configured, the proxy injects `Authorization: Basic <base64(username:password)>` for upstream request.
+
+`basic_auth` and configured `headers.authorization` are mutually exclusive on same API config.
 
 The proxy does not pass client-supplied topology headers upstream.
 

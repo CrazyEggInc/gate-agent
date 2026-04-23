@@ -19,7 +19,7 @@ They must not be described elsewhere as already implemented.
 ## Auth and security
 
 - support additional upstream auth injection modes beyond static header injection
-  - examples: basic auth, signed headers, query-param auth, and provider-specific schemes
+  - examples: signed headers, query-param auth, and provider-specific schemes
 - support non-HS256 token verification models such as JWKS or remote issuer validation
 - support TLS or mTLS on the local listener when deployment requirements need it
 
