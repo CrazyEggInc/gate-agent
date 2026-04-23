@@ -83,6 +83,8 @@ Discovery expectations:
 - each listed API includes its configured slug
 - each listed API includes the effective access level available to that client
 - results may include operator-configured discovery metadata such as description and docs URL when present
+- tool `content` should contain a JSON object string with the full discovery payload, including safe generic `call_api` examples such as `{"api":"projects","method":"GET","path":"/<endpoint>"}`
+- `structuredContent` should be an empty object for now
 - results are suitable for tool-driven discovery and should direct the client to `call_api` for actual invocation
 
 `list_apis` is an authorization view, not a full config dump. It exposes what the authenticated client can call, not unrelated APIs or secret configuration.
@@ -100,6 +102,7 @@ Request expectations:
 - the client may provide request headers
 - the client may provide a request body
 - the client may provide an explicit content type when needed
+- the client may set `response_headers` to `all` to include all upstream response headers; omitted means only `content-type` and `date` are returned when present
 
 Authorization expectations:
 
@@ -121,11 +124,15 @@ Forwarding expectations:
 
 Response expectations:
 
-- include the upstream HTTP status code
-- include response headers in a structured form
-- include the upstream content type when known
-- include a parsed JSON body when the upstream response is JSON
-- include a text body when the upstream response is text
+- tool `content` should contain a JSON object string with the full upstream response payload
+- that JSON object should include the upstream HTTP status code
+- that JSON object should include response headers in a structured form
+- by default, that headers object should include only `content-type` and `date` when present
+- when `response_headers = "all"`, that headers object should include all upstream response headers that can be represented safely as strings
+- that JSON object should include the upstream content type when known
+- that JSON object should include a parsed JSON body when the upstream response is JSON
+- that JSON object should include a text body when the upstream response is text
+- `structuredContent` should be an empty object for now
 - preserve upstream success and failure HTTP statuses as response data rather than hiding them behind a synthetic success shape
 
 The MCP surface is intentionally JSON/text-friendly.
@@ -160,7 +167,7 @@ Authentication failures return the standard HTTP JSON error payload used by the 
 
 Once authentication succeeds, malformed MCP payloads and unsupported MCP methods fail as JSON-RPC responses.
 
-Tool execution failures must surface as tool errors with safe, structured error data.
+Tool execution failures must surface as tool errors with safe JSON object data in `content`, while `structuredContent` remains an empty object.
 
 ## Non-goals
 

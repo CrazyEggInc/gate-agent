@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::protocol::{ToolDefinition, ToolResult, ToolTextContent};
+use super::protocol::{ToolDefinition, ToolResult};
 
 const JSON_CONTENT_TYPE: &str = "application/json";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -47,6 +47,16 @@ struct CallApiArguments {
     body: Option<Value>,
     #[serde(default)]
     content_type: Option<String>,
+    #[serde(default)]
+    response_headers: ResponseHeadersMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResponseHeadersMode {
+    #[default]
+    Essential,
+    All,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +73,14 @@ struct ApiDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     docs_url: Option<String>,
     usage_hint: &'static str,
+    example_arguments: CallApiExampleArguments,
+}
+
+#[derive(Debug, Serialize)]
+struct CallApiExampleArguments {
+    api: String,
+    method: &'static str,
+    path: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,20 +125,20 @@ fn list_apis(state: &AppState, authorized: &AuthorizedRequest) -> Result<ToolRes
             description: api_config.description.clone(),
             docs_url: api_config.docs_url.as_ref().map(|url| url.to_string()),
             usage_hint: LIST_APIS_USAGE_HINT,
+            example_arguments: CallApiExampleArguments {
+                api: slug.clone(),
+                method: "GET",
+                path: "/<endpoint>",
+            },
         });
     }
 
     let payload = ListApisPayload { apis };
-    let structured = serde_json::to_value(&payload).map_err(|error| {
+    let content_json = serde_json::to_value(&payload).map_err(|error| {
         AppError::Internal(format!("failed to serialize MCP list_apis result: {error}"))
     })?;
 
-    Ok(ToolResult::success(
-        structured,
-        vec![ToolTextContent::text(
-            "Listed APIs available to the authenticated client.",
-        )],
-    ))
+    Ok(ToolResult::success(content_json))
 }
 
 async fn call_api(
@@ -131,18 +149,16 @@ async fn call_api(
     let arguments = arguments.unwrap_or(Value::Object(Map::new()));
     let arguments: CallApiArguments = serde_json::from_value(arguments)
         .map_err(|error| AppError::BadRequest(format!("invalid call_api arguments: {error}")))?;
+    let response_headers = arguments.response_headers;
     let forward_request = build_forward_request(arguments)?;
     let prepared = prepare_authorized_forward_request(forward_request, authorized)?;
     let forward = forward_prepared_request(state, prepared).await?;
-    let payload = map_call_api_response(forward.response).await?;
-    let structured = serde_json::to_value(&payload).map_err(|error| {
+    let payload = map_call_api_response(forward.response, response_headers).await?;
+    let content_json = serde_json::to_value(&payload).map_err(|error| {
         AppError::Internal(format!("failed to serialize MCP call_api result: {error}"))
     })?;
 
-    Ok(ToolResult::success(
-        structured,
-        vec![ToolTextContent::text("Upstream API call completed.")],
-    ))
+    Ok(ToolResult::success(content_json))
 }
 
 fn call_api_tool_definition() -> ToolDefinition {
@@ -179,7 +195,11 @@ fn call_api_tool_definition() -> ToolDefinition {
                 },
                 "headers": { "type": "object", "additionalProperties": { "type": "string" } },
                 "body": {},
-                "content_type": { "type": "string" }
+                "content_type": { "type": "string" },
+                "response_headers": {
+                    "type": "string",
+                    "enum": ["essential", "all"]
+                }
             },
             "required": ["api", "method", "path"],
             "additionalProperties": false
@@ -393,9 +413,10 @@ fn infer_content_type(body: &Value) -> String {
 
 async fn map_call_api_response(
     response: crate::proxy::response::ForwardedResponse,
+    response_headers: ResponseHeadersMode,
 ) -> Result<CallApiPayload, AppError> {
     let status = response.status.as_u16();
-    let headers = serialize_headers(&response.headers);
+    let headers = serialize_headers(&response.headers, response_headers);
     let content_type = response
         .headers
         .get(http::header::CONTENT_TYPE)
@@ -484,10 +505,17 @@ async fn collect_bounded_response_body(
     Ok(body.freeze())
 }
 
-fn serialize_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
+fn serialize_headers(
+    headers: &HeaderMap,
+    response_headers: ResponseHeadersMode,
+) -> BTreeMap<String, Vec<String>> {
     let mut grouped = BTreeMap::<String, Vec<String>>::new();
 
     for (name, value) in headers {
+        if !include_response_header(name.as_str(), response_headers) {
+            continue;
+        }
+
         if let Ok(value) = value.to_str() {
             grouped
                 .entry(name.as_str().to_owned())
@@ -497,6 +525,15 @@ fn serialize_headers(headers: &HeaderMap) -> BTreeMap<String, Vec<String>> {
     }
 
     grouped
+}
+
+fn include_response_header(name: &str, response_headers: ResponseHeadersMode) -> bool {
+    match response_headers {
+        ResponseHeadersMode::All => true,
+        ResponseHeadersMode::Essential => {
+            name.eq_ignore_ascii_case("content-type") || name.eq_ignore_ascii_case("date")
+        }
+    }
 }
 
 fn is_json_content_type(content_type: &str) -> bool {
