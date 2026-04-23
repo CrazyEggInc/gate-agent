@@ -1741,6 +1741,62 @@ timeout_ms = 5000
 }
 
 #[test]
+fn secrets_config_loads_api_with_basic_auth_username_only() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = "billing-user" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+    let basic_auth = api.basic_auth.as_ref().expect("billing basic auth");
+
+    assert_eq!(basic_auth.username, "billing-user");
+    assert_eq!(basic_auth.password.expose_secret(), "");
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_api_with_basic_auth_empty_password()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = "billing-user", password = "" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+    let basic_auth = api.basic_auth.as_ref().expect("billing basic auth");
+
+    assert_eq!(basic_auth.username, "billing-user");
+    assert_eq!(basic_auth.password.expose_secret(), "");
+
+    Ok(())
+}
+
+#[test]
 fn secrets_config_rejects_basic_auth_with_authorization_header()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(

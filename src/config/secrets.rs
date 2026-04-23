@@ -152,7 +152,7 @@ struct RawApiConfig {
 #[serde(deny_unknown_fields)]
 struct RawApiBasicAuth {
     username: String,
-    password: String,
+    password: Option<String>,
 }
 
 fn default_api_timeout_ms() -> u64 {
@@ -564,10 +564,13 @@ fn parse_api_basic_auth(
         &format!("apis.{slug}.basic_auth.username"),
         basic_auth.username,
     )?;
-    let password = required_raw_string(
-        &format!("apis.{slug}.basic_auth.password"),
-        basic_auth.password,
-    )?;
+    let password = match basic_auth.password {
+        Some(password) if password.is_empty() => String::new(),
+        Some(password) => {
+            required_raw_string(&format!("apis.{slug}.basic_auth.password"), password)?
+        }
+        None => String::new(),
+    };
 
     Ok(Some(ApiBasicAuth {
         username,

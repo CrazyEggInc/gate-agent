@@ -110,6 +110,8 @@ This includes configured `Authorization` injection when present. Client `Authori
 
 When `basic_auth` is configured, the proxy injects `Authorization: Basic <base64(username:password)>` for upstream request.
 
+If `basic_auth.password` is omitted, the proxy still injects basic auth and encodes `username:` with empty password.
+
 `basic_auth` and configured `headers.authorization` are mutually exclusive on same API config.
 
 The proxy does not pass client-supplied topology headers upstream.
