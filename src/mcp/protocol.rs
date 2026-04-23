@@ -126,25 +126,28 @@ where
 }
 
 impl ToolResult {
-    pub fn success(structured_content: Value, content: Vec<ToolTextContent>) -> Self {
+    pub fn success(content_json: Value) -> Self {
+        let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
         Self {
-            content,
-            structured_content,
+            content: vec![ToolTextContent::text(text)],
+            structured_content: json!({}),
             is_error: false,
         }
     }
 
     pub fn app_error(error: &crate::error::AppError) -> Self {
+        let content_json = json!({
+            "code": error.code(),
+            "message": match error {
+                crate::error::AppError::BadRequest(message)
+                | crate::error::AppError::ResponseMapping(message) => message,
+                _ => error.safe_message(),
+            }
+        });
+        let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
         Self {
-            content: vec![ToolTextContent::text(error.safe_message())],
-            structured_content: json!({
-                "code": error.code(),
-                "message": match error {
-                    crate::error::AppError::BadRequest(message)
-                    | crate::error::AppError::ResponseMapping(message) => message,
-                    _ => error.safe_message(),
-                }
-            }),
+            content: vec![ToolTextContent::text(text)],
+            structured_content: json!({}),
             is_error: true,
         }
     }

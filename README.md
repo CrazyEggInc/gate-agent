@@ -119,6 +119,38 @@ If you create a fresh config with `gate-agent config init`, the command prints t
 
 See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the MCP contract, and `docs/pending.md` for intentionally deferred work.
 
+## MCP client setup
+
+Use one of these config shapes.
+
+### HTTP MCP config
+
+```json
+{
+  "gate-agent": {
+    "url": "http://127.0.0.1:8787/mcp",
+    "headers": {
+      "Authorization": "Bearer <your-token>"
+    }
+  }
+}
+```
+
+### Local command config
+
+```json
+{
+  "gate-agent": {
+    "command": "gate-agent",
+    "args": ["start"],
+    "env": {
+      "GATE_AGENT_CONFIG": "~/.config/gate-agent/secrets",
+      "GATE_AGENT_PASSWORD": "<your-config-password>"
+    }
+  }
+}
+```
+
 ## Development
 
 Use Cargo only for repo-local development:

@@ -22,6 +22,15 @@ async fn json_body(
     )?)
 }
 
+fn tool_content_json(payload: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(
+        payload["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool content text should exist"),
+    )
+    .expect("tool content should be valid JSON")
+}
+
 #[tokio::test]
 async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -437,6 +446,13 @@ async fn mcp_route_lists_only_supported_mcp_tools() -> Result<(), Box<dyn std::e
         "^/"
     );
     assert_eq!(
+        payload["result"]["tools"][0]["inputSchema"]["properties"]["response_headers"],
+        serde_json::json!({
+            "type": "string",
+            "enum": ["essential", "all"]
+        })
+    );
+    assert_eq!(
         payload["result"]["tools"][1]["inputSchema"],
         serde_json::json!({
             "type": "object",
@@ -482,6 +498,10 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
     assert_eq!(payload["result"]["isError"], false);
     assert_eq!(
         payload["result"]["structuredContent"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        tool_content_json(&payload),
         serde_json::json!({
             "apis": [
                 {
@@ -489,14 +509,24 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
                     "access_level": "write",
                     "description": "Billing API",
                     "docs_url": "https://docs.internal.example/billing",
-                    "usage_hint": "Call this API with the call_api tool."
+                    "usage_hint": "Call this API with the call_api tool.",
+                    "example_arguments": {
+                        "api": "billing",
+                        "method": "GET",
+                        "path": "/<endpoint>"
+                    }
                 },
                 {
                     "slug": "projects",
                     "access_level": "write",
                     "description": "Projects API",
                     "docs_url": "https://docs.internal.example/projects",
-                    "usage_hint": "Call this API with the call_api tool."
+                    "usage_hint": "Call this API with the call_api tool.",
+                    "example_arguments": {
+                        "api": "projects",
+                        "method": "GET",
+                        "path": "/<endpoint>"
+                    }
                 }
             ]
         })
@@ -553,18 +583,22 @@ async fn mcp_route_call_api_uses_shared_forwarding_logic_for_json_requests()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(payload["result"]["structuredContent"]["status"], 201);
     assert_eq!(
-        payload["result"]["structuredContent"]["content_type"],
-        "application/json"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["status"], 201);
+    assert_eq!(content["content_type"], "application/json");
     assert_eq!(
-        payload["result"]["structuredContent"]["body_json"],
+        content["headers"]["content-type"],
+        serde_json::json!(["application/json"])
+    );
+    assert!(content["headers"]["date"].is_string() || content["headers"]["date"].is_array());
+    assert!(content["headers"].get("x-upstream").is_none());
+    assert_eq!(
+        content["body_json"],
         serde_json::json!({"ok": true, "source": "mcp"})
-    );
-    assert_eq!(
-        payload["result"]["structuredContent"]["headers"]["x-upstream"],
-        serde_json::json!(["present"])
     );
 
     let captured = rx.await?;
@@ -583,6 +617,62 @@ async fn mcp_route_call_api_uses_shared_forwarding_logic_for_json_requests()
     assert_eq!(
         captured.body,
         bytes::Bytes::from_static(br#"{"name":"New task"}"#)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_route_call_api_can_return_all_response_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = axum::Router::new().route(
+        "/api/{*path}",
+        axum::routing::any(|| async {
+            let mut response = Response::new(Body::from(r#"{"ok":true}"#));
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            response
+                .headers_mut()
+                .insert("x-upstream", HeaderValue::from_static("present"));
+            response
+        }),
+    );
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = bearer_token("billing", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/headers","response_headers":"all"}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload = json_body(response).await?;
+
+    assert_eq!(payload["result"]["isError"], false);
+    assert_eq!(
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
+    );
+    let content = tool_content_json(&payload);
+    assert_eq!(
+        content["headers"]["content-type"],
+        serde_json::json!(["application/json"])
+    );
+    assert_eq!(
+        content["headers"]["x-upstream"],
+        serde_json::json!(["present"])
     );
 
     Ok(())
@@ -624,11 +714,13 @@ async fn mcp_route_call_api_returns_text_responses() -> Result<(), Box<dyn std::
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(payload["result"]["structuredContent"]["status"], 200);
     assert_eq!(
-        payload["result"]["structuredContent"]["body_text"],
-        "hello from upstream"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["status"], 200);
+    assert_eq!(content["body_text"], "hello from upstream");
 
     Ok(())
 }
@@ -664,13 +756,12 @@ async fn mcp_route_call_api_rejects_unsupported_request_content_type()
 
     assert_eq!(payload["result"]["isError"], true);
     assert_eq!(
-        payload["result"]["structuredContent"]["code"],
-        "bad_request"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
-    assert_eq!(
-        payload["result"]["structuredContent"]["message"],
-        "unsupported MCP request content type"
-    );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "bad_request");
+    assert_eq!(content["message"], "unsupported MCP request content type");
 
     Ok(())
 }
@@ -714,13 +805,12 @@ async fn mcp_route_call_api_rejects_unsupported_request_content_type_without_bod
 
     assert_eq!(payload["result"]["isError"], true);
     assert_eq!(
-        payload["result"]["structuredContent"]["code"],
-        "bad_request"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
-    assert_eq!(
-        payload["result"]["structuredContent"]["message"],
-        "unsupported MCP request content type"
-    );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "bad_request");
+    assert_eq!(content["message"], "unsupported MCP request content type");
 
     assert!(rx.try_recv().is_err());
 
@@ -758,11 +848,13 @@ async fn mcp_route_call_api_rejects_path_with_embedded_query_or_fragment()
 
     assert_eq!(payload["result"]["isError"], true);
     assert_eq!(
-        payload["result"]["structuredContent"]["code"],
-        "bad_request"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "bad_request");
     assert_eq!(
-        payload["result"]["structuredContent"]["message"],
+        content["message"],
         "path must not include query or fragment components"
     );
 
@@ -807,11 +899,13 @@ async fn mcp_route_call_api_rejects_unsupported_binary_upstream_response()
 
     assert_eq!(payload["result"]["isError"], true);
     assert_eq!(
-        payload["result"]["structuredContent"]["code"],
-        "response_mapping"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "response_mapping");
     assert_eq!(
-        payload["result"]["structuredContent"]["message"],
+        content["message"],
         "unsupported MCP upstream response content type"
     );
 
@@ -860,11 +954,13 @@ async fn mcp_route_call_api_rejects_oversized_upstream_response_body()
 
     assert_eq!(payload["result"]["isError"], true);
     assert_eq!(
-        payload["result"]["structuredContent"]["code"],
-        "response_mapping"
+        payload["result"]["structuredContent"],
+        serde_json::json!({})
     );
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "response_mapping");
     assert_eq!(
-        payload["result"]["structuredContent"]["message"],
+        content["message"],
         "MCP upstream response body exceeds 1048576 bytes"
     );
 
