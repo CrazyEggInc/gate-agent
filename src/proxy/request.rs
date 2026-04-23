@@ -1,4 +1,5 @@
 use axum::body::Body;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{
     HeaderMap, Method, Request, Uri,
     header::{self, HeaderName, HeaderValue},
@@ -62,6 +63,7 @@ pub fn map_forward_request(
 
     *outbound_request.headers_mut() = filter_request_headers(&headers);
     overlay_configured_headers(outbound_request.headers_mut(), api_config)?;
+    overlay_basic_auth(outbound_request.headers_mut(), api_config)?;
     *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
 
     Ok(outbound_request)
@@ -159,6 +161,27 @@ fn overlay_configured_headers(
         })?;
         headers.insert(name.clone(), value);
     }
+
+    Ok(())
+}
+
+fn overlay_basic_auth(headers: &mut HeaderMap, api_config: &ApiConfig) -> Result<(), AppError> {
+    let Some(basic_auth) = &api_config.basic_auth else {
+        return Ok(());
+    };
+
+    let value = format!(
+        "Basic {}",
+        STANDARD.encode(format!(
+            "{}:{}",
+            basic_auth.username,
+            basic_auth.password.expose_secret()
+        ))
+    );
+    let value = HeaderValue::from_str(&value).map_err(|error| {
+        AppError::UpstreamBuild(format!("invalid configured upstream basic auth: {error}"))
+    })?;
+    headers.insert(header::AUTHORIZATION, value);
 
     Ok(())
 }

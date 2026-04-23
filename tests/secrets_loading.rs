@@ -1455,7 +1455,7 @@ extra_header = "nope"
     assert!(
         error
             .to_string()
-            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `headers`, `timeout_ms`")
+            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `headers`, `basic_auth`, `timeout_ms`")
     );
 
     Ok(())
@@ -1708,6 +1708,118 @@ timeout_ms = 5000
     );
     assert_eq!(api.headers[1].0.as_str(), "x-api-key");
     assert_eq!(api.headers[1].1.expose_secret(), "secondary-secret");
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_api_with_basic_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = "billing-user", password = "billing-pass" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+    let basic_auth = api.basic_auth.as_ref().expect("billing basic auth");
+
+    assert_eq!(basic_auth.username, "billing-user");
+    assert_eq!(basic_auth.password.expose_secret(), "billing-pass");
+    assert!(api.headers.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_basic_auth_with_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { authorization = "Bearer billing-secret-token" }
+basic_auth = { username = "billing-user", password = "billing-pass" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "apis.billing cannot set both headers.authorization and basic_auth"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_empty_basic_auth_username() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = "", password = "billing-pass" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "apis.billing.basic_auth.username cannot be empty"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_preserves_raw_basic_auth_values_without_trim_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = "write" }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = " billing-user ", password = " billing-pass " }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+    let basic_auth = api.basic_auth.as_ref().expect("billing basic auth");
+
+    assert_eq!(basic_auth.username, " billing-user ");
+    assert_eq!(basic_auth.password.expose_secret(), " billing-pass ");
 
     Ok(())
 }

@@ -148,6 +148,7 @@ Required fields:
 
 - `base_url: String`
 - `headers: { <header-name> = <value>, ... } | omitted`
+- `basic_auth: { username = <value>, password = <value> } | omitted`
 - `timeout_ms: u64 | omitted`
 - `description: Option<String>`
 - `docs_url: Option<String>`
@@ -161,6 +162,8 @@ Validation expectations:
 - reserved proxy-managed header names in `headers` are rejected with an error
 - each `headers` value must be a non-empty string
 - omitted `headers` means no configured injected headers
+- `basic_auth`, when present, must be a TOML inline table with non-empty `username` and `password` strings
+- `basic_auth` and `headers.authorization` cannot both be configured on same API
 - optional `description`, when present, must be non-empty
 - optional `docs_url`, when present, must parse as a URL and use `http` or `https`
 - omitted `timeout_ms` falls back to `5000`
@@ -189,6 +192,15 @@ group = "local-default"
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
 headers = { authorization = "Bearer local-upstream-token" }
+timeout_ms = 5000
+```
+
+Another valid upstream auth shape is HTTP basic auth:
+
+```toml
+[apis.billing]
+base_url = "https://billing.internal.example"
+basic_auth = { username = "user", password = "password" }
 timeout_ms = 5000
 ```
 
