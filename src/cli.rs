@@ -204,6 +204,9 @@ pub struct ConfigApiArgs {
     #[arg(long, help = "Base URL for the upstream API")]
     pub base_url: Option<String>,
 
+    #[arg(long, help = "Configure upstream HTTP Basic auth interactively")]
+    pub basic_auth: bool,
+
     #[arg(
         long,
         help = "Upstream headers as name=value pairs. Repeat flag to add multiple upstream headers"

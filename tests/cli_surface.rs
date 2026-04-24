@@ -206,6 +206,8 @@ fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Erro
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--base-url"));
+    assert!(stdout.contains("--basic-auth"));
+    assert!(stdout.contains("Configure upstream HTTP Basic auth interactively"));
     assert!(stdout.contains("--header"));
     assert!(stdout.contains("Repeat flag to add multiple upstream headers"));
     assert!(stdout.contains("--timeout-ms"));
@@ -216,6 +218,32 @@ fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Erro
     assert!(!stdout.contains("--auth-scheme"));
 
     Ok(())
+}
+
+#[test]
+fn config_api_accepts_basic_auth_flag() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "api",
+        "--name",
+        "billing",
+        "--base-url",
+        "https://billing.internal.example",
+        "--basic-auth",
+    ])
+    .expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Api(args) => {
+                assert!(args.basic_auth);
+                assert!(args.header.is_empty());
+            }
+            other => panic!("expected api variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
 }
 
 #[test]

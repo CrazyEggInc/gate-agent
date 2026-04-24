@@ -79,6 +79,7 @@ fn api_args(config: PathBuf, headers: &[&str]) -> ConfigApiArgs {
         delete: false,
         name: Some("projects".to_owned()),
         base_url: Some("https://example.test/api".to_owned()),
+        basic_auth: false,
         header: headers.iter().map(|header| (*header).to_owned()).collect(),
         timeout_ms: Some(5_000),
     }
@@ -450,6 +451,103 @@ fn config_command_dispatch_runs_api_subcommand_without_upstream_headers()
 }
 
 #[test]
+fn config_command_dispatch_basic_auth_flag_still_requires_interactive_prompts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: true,
+            header: vec![],
+            timeout_ms: Some(5_000),
+        }),
+    }))
+    .expect_err("basic auth flag should fail without interactive prompts");
+
+    assert_eq!(
+        error.to_string(),
+        "config api --basic-auth requires interactive username prompt"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_basic_auth_flag_prompts_username_and_password()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["", "projects-user", "projects-pass"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: true,
+            header: vec![],
+            timeout_ms: Some(5_000),
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_table)
+        .expect("projects api config");
+
+    assert_eq!(
+        api.get("basic_auth")
+            .and_then(|value| value.get("username"))
+            .and_then(Value::as_str),
+        Some("projects-user")
+    );
+    assert_eq!(
+        api.get("basic_auth")
+            .and_then(|value| value.get("password"))
+            .and_then(Value::as_str),
+        Some("projects-pass")
+    );
+    assert!(api.get("headers").is_none());
+
+    Ok(())
+}
+
+#[test]
 fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
@@ -473,6 +571,7 @@ fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: false,
             header: vec!["authorization=Bearer top-secret".to_owned()],
             timeout_ms: Some(9_000),
         }),
@@ -486,6 +585,7 @@ fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api/v2".to_owned()),
+            basic_auth: false,
             header: vec!["authorization=Bearer rotated-secret".to_owned()],
             timeout_ms: None,
         }),
@@ -542,6 +642,7 @@ fn config_command_dispatch_api_preserves_existing_headers_when_header_omitted()
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: false,
             header: vec![
                 "authorization=Bearer top-secret".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -558,6 +659,7 @@ fn config_command_dispatch_api_preserves_existing_headers_when_header_omitted()
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api/v2".to_owned()),
+            basic_auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -623,6 +725,7 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://projects.internal.example/api".to_owned()),
+            basic_auth: false,
             header: vec![
                 "authorization=Bearer top-secret".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -633,7 +736,7 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "none"],
+        &["", "none", "n"],
         &[
             "config",
             "api",
@@ -663,7 +766,7 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 }
 
 #[test]
-fn config_command_dispatch_interactive_api_prompt_uses_generic_headers_text()
+fn config_command_dispatch_interactive_api_prompts_headers_before_basic_auth()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -682,7 +785,7 @@ fn config_command_dispatch_interactive_api_prompt_uses_generic_headers_text()
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["projects", "https://projects.internal.example/api", "none"],
+        &["projects", "https://projects.internal.example/api", "", "n"],
         &[
             "config",
             "api",
@@ -699,14 +802,20 @@ fn config_command_dispatch_interactive_api_prompt_uses_generic_headers_text()
 
     let combined = normalize_pty_output(&tty_output.transcript);
 
-    assert!(
-        combined.contains(
-            "Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers):"
-        ),
-        "{combined}"
-    );
-    assert!(!combined.contains("Auth header"), "{combined}");
-    assert!(!combined.contains("Auth value"), "{combined}");
+    let headers_prompt = "Headers (example: x-api-key=secret; leave empty for no headers):";
+    let basic_auth_prompt = "Configure basic auth? (blank skips basic auth) [y/N]";
+
+    assert!(combined.contains(headers_prompt), "{combined}");
+    assert!(combined.contains(basic_auth_prompt), "{combined}");
+    assert!(!combined.contains("Auth mode"), "{combined}");
+
+    let headers_index = combined
+        .find(headers_prompt)
+        .expect("headers prompt present");
+    let basic_auth_index = combined
+        .find(basic_auth_prompt)
+        .expect("basic auth prompt present");
+    assert!(headers_index < basic_auth_index, "{combined}");
 
     let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
     let api = written
@@ -740,6 +849,7 @@ fn config_command_dispatch_rejects_malformed_api_prompt_headers()
                 "projects",
                 "https://projects.internal.example/api",
                 "authorization",
+                "n",
             ])?,
         );
     }
@@ -752,6 +862,7 @@ fn config_command_dispatch_rejects_malformed_api_prompt_headers()
             delete: false,
             name: None,
             base_url: None,
+            basic_auth: false,
             header: Vec::new(),
             timeout_ms: Some(5_000),
         }),
@@ -792,6 +903,7 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
             delete: false,
             name: Some("projects".to_owned()),
             base_url: Some("https://projects.internal.example/api".to_owned()),
+            basic_auth: false,
             header: vec![
                 "authorization=Bearer token,with,commas".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -802,7 +914,7 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", ""],
+        &["", "", "n"],
         &[
             "config",
             "api",
@@ -837,6 +949,200 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
             .and_then(|value| value.get("x-api-key"))
             .and_then(Value::as_str),
         Some("secret-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_interactive_api_basic_auth_create_persists_prompted_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[
+                "billing",
+                "https://billing.internal.example/api",
+                "x-api-key=secondary-secret",
+                "y",
+                "billing-user",
+                "billing-pass",
+            ])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            base_url: None,
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    assert_eq!(
+        written
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("basic_auth"))
+            .and_then(|value| value.get("username"))
+            .and_then(Value::as_str),
+        Some("billing-user")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_interactive_api_none_clears_existing_basic_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = { billing = "read" }
+
+[apis.billing]
+base_url = "https://billing.internal.example/api"
+basic_auth = { username = "billing-user", password = "billing-pass" }
+headers = { x-api-key = "keep-me" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["", "", "n"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("billing".to_owned()),
+            base_url: None,
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    assert!(
+        written
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("basic_auth"))
+            .is_none()
+    );
+    assert_eq!(
+        written
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("headers"))
+            .and_then(|value| value.get("x-api-key"))
+            .and_then(Value::as_str),
+        Some("keep-me")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_interactive_api_header_input_clears_existing_basic_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = { billing = "read" }
+
+[apis.billing]
+base_url = "https://billing.internal.example/api"
+basic_auth = { username = "billing-user", password = "billing-pass" }
+headers = { x-api-key = "keep-me" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["", "authorization=Bearer rotated-token", "n"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("billing".to_owned()),
+            base_url: None,
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("billing"))
+        .and_then(Value::as_table)
+        .expect("billing api config");
+
+    assert!(api.get("basic_auth").is_none());
+    assert_eq!(
+        api.get("headers")
+            .and_then(|value| value.get("authorization"))
+            .and_then(Value::as_str),
+        Some("Bearer rotated-token")
     );
 
     Ok(())

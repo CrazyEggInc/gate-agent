@@ -339,6 +339,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
             name,
             base_url: None,
             headers: None,
+            auth: config::ConfigApiAuthSelection::Preserve,
             timeout_ms: None,
         });
     }
@@ -346,10 +347,11 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
     let existing =
         config::load_existing_api_state(args.config.as_deref(), args.password.clone(), &name)
             .map_err(|error| CommandError::new(error.to_string()))?;
+    let interactive = interactive_questionnaire_available();
 
     let base_url = if args.base_url.is_some() {
         args.base_url
-    } else if interactive_questionnaire_available() {
+    } else if interactive {
         Some(prompt_required(
             "Base URL",
             existing.as_ref().map(|state| state.base_url.as_str()),
@@ -360,6 +362,13 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         None
     };
 
+    let header_default = existing
+        .as_ref()
+        .map(|state| {
+            render_api_headers_for_prompt(state, &config::ConfigApiAuthSelection::Preserve)
+        })
+        .filter(|value| !value.is_empty());
+
     let headers = if !args.header.is_empty() {
         Some(
             args.header
@@ -367,27 +376,28 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
                 .filter_map(optional_non_empty)
                 .collect::<Vec<_>>(),
         )
-    } else if interactive_questionnaire_available() {
-        let existing_headers = existing
-            .as_ref()
-            .map(render_api_headers_map)
-            .filter(|value| !value.is_empty());
-
+    } else if interactive {
         match config::prompt_optional_text(
-            "Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers)",
-            existing_headers.as_deref(),
+            &header_prompt_message(header_default.as_deref()),
+            header_default.as_deref(),
             "config api accepts optional --header",
         )
         .map_err(|error| CommandError::new(error.to_string()))?
         {
-            Some(prompted_headers) if prompted_headers.eq_ignore_ascii_case("none") => {
-                Some(vec![])
-            }
+            Some(prompted_headers) if prompted_headers.eq_ignore_ascii_case("none") => Some(vec![]),
             Some(prompted_headers) => Some(split_optional_header_segments(&prompted_headers)),
             None => None,
         }
     } else {
         None
+    };
+
+    let resolved_auth = if args.basic_auth {
+        prompt_basic_auth(existing.as_ref())?
+    } else if interactive {
+        resolve_prompted_api_auth(existing.as_ref(), headers.as_ref())?
+    } else {
+        config::ConfigApiAuthSelection::Preserve
     };
 
     let timeout_ms = if args.timeout_ms.is_some() {
@@ -404,8 +414,127 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         name,
         base_url,
         headers,
+        auth: resolved_auth,
         timeout_ms,
     })
+}
+
+fn resolve_prompted_api_auth(
+    existing: Option<&config::ExistingApiState>,
+    headers: Option<&Vec<String>>,
+) -> Result<config::ConfigApiAuthSelection, CommandError> {
+    let configure_basic_auth = config::prompt_yes_no(
+        &config::prompt_message(
+            "Configure basic auth?",
+            None,
+            None,
+            None,
+            None,
+            existing
+                .and_then(|state| state.basic_auth.as_ref())
+                .map(|_| "blank keeps current basic auth")
+                .or(Some("blank skips basic auth")),
+        ),
+        existing.is_some_and(|state| state.basic_auth.is_some()),
+        "config api requires interactive prompts to resolve basic auth",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    if configure_basic_auth {
+        return prompt_basic_auth(existing);
+    }
+
+    if headers_contain_authorization(headers) {
+        return Ok(config::ConfigApiAuthSelection::Header);
+    }
+
+    if existing.is_some_and(|state| state.basic_auth.is_some()) {
+        return Ok(config::ConfigApiAuthSelection::None);
+    }
+
+    Ok(config::ConfigApiAuthSelection::Preserve)
+}
+
+fn prompt_basic_auth(
+    existing: Option<&config::ExistingApiState>,
+) -> Result<config::ConfigApiAuthSelection, CommandError> {
+    let existing_basic_auth = existing.and_then(|state| state.basic_auth.as_ref());
+    let username = config::prompt_required_text(
+        &config::prompt_message(
+            "Basic auth username",
+            None,
+            existing_basic_auth.map(|state| state.username.as_str()),
+            None,
+            None,
+            None,
+        ),
+        existing_basic_auth.map(|state| state.username.as_str()),
+        "config api --basic-auth requires interactive username prompt",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+    let password = config::prompt_optional_text(
+        &config::prompt_message(
+            "Basic auth password",
+            None,
+            None,
+            None,
+            None,
+            existing_basic_auth
+                .map(|_| "blank keeps existing password")
+                .or(Some("blank stores empty password")),
+        ),
+        None,
+        "config api --basic-auth requires interactive password prompt",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    let password = match (password, existing_basic_auth) {
+        (Some(password), _) => Some(password),
+        (None, Some(_)) => None,
+        (None, None) => Some(String::new()),
+    };
+
+    Ok(config::ConfigApiAuthSelection::Basic { username, password })
+}
+
+fn headers_contain_authorization(headers: Option<&Vec<String>>) -> bool {
+    headers.is_some_and(|headers| {
+        headers.iter().any(|header| {
+            header
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+        })
+    })
+}
+
+fn header_prompt_message(default: Option<&str>) -> String {
+    config::prompt_message(
+        "Headers",
+        None,
+        default,
+        Some("x-api-key=secret"),
+        None,
+        Some(match default {
+            Some(_) => "leave empty to keep current headers; enter 'none' to clear",
+            None => "leave empty for no headers",
+        }),
+    )
+}
+
+fn render_api_headers_for_prompt(
+    state: &config::ExistingApiState,
+    auth: &config::ConfigApiAuthSelection,
+) -> String {
+    let mut headers = state.headers.clone();
+
+    match auth {
+        config::ConfigApiAuthSelection::None | config::ConfigApiAuthSelection::Basic { .. } => {
+            headers.remove("authorization");
+        }
+        config::ConfigApiAuthSelection::Preserve | config::ConfigApiAuthSelection::Header => {}
+    }
+
+    render_headers_map(&headers)
 }
 
 fn resolve_config_group_args(
@@ -719,9 +848,8 @@ fn render_client_api_access_map(map: &config::ExistingClientPromptState) -> Stri
     render_access_map(&map.api_access)
 }
 
-fn render_api_headers_map(map: &config::ExistingApiState) -> String {
-    map.headers
-        .iter()
+fn render_headers_map(map: &std::collections::BTreeMap<String, String>) -> String {
+    map.iter()
         .map(|(name, value)| format!("{name}={}", escape_header_prompt_value(value)))
         .collect::<Vec<_>>()
         .join(",")

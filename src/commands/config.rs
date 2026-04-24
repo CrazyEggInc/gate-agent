@@ -20,7 +20,8 @@ use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
 use crate::config::secrets::SecretsConfig;
 use crate::config::secrets::{AccessLevel, is_valid_slug};
 use crate::config::write::{
-    self, ApiUpsert, ClientAccessUpsert, ClientUpsert, GroupUpsert, WriteConfigError,
+    self, ApiBasicAuthUpsert, ApiUpsert, ClientAccessUpsert, ClientUpsert, GroupUpsert,
+    WriteConfigError,
 };
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
@@ -116,6 +117,23 @@ pub struct ConfigValidateArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExistingApiBasicAuthState {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigApiAuthSelection {
+    Preserve,
+    Header,
+    None,
+    Basic {
+        username: String,
+        password: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigApiArgs {
     pub config: Option<PathBuf>,
     pub password: Option<String>,
@@ -124,6 +142,7 @@ pub struct ConfigApiArgs {
     pub delete: bool,
     pub base_url: Option<String>,
     pub headers: Option<Vec<String>>,
+    pub auth: ConfigApiAuthSelection,
     pub timeout_ms: Option<u64>,
 }
 
@@ -233,6 +252,7 @@ struct ExistingClientState {
 pub struct ExistingApiState {
     pub base_url: String,
     pub headers: BTreeMap<String, String>,
+    pub basic_auth: Option<ExistingApiBasicAuthState>,
     pub timeout_ms: u64,
 }
 
@@ -406,13 +426,13 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
             .unwrap_or_default(),
     )?;
     validate_base_url(&base_url, &args.name)?;
-    let headers = match args.headers.as_deref() {
-        Some(headers) => parse_api_headers(headers, &args.name)?,
-        None => existing
-            .as_ref()
-            .map(|state| state.headers.clone())
-            .unwrap_or_default(),
+    let parsed_headers = match args.headers.as_deref() {
+        Some(headers) => Some(parse_api_headers(headers, &args.name)?),
+        None => None,
     };
+
+    let (headers, basic_auth) =
+        resolve_api_auth_state(&args.name, existing.as_ref(), parsed_headers, &args.auth)?;
 
     let timeout_ms = args
         .timeout_ms
@@ -435,6 +455,7 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
             name: args.name.clone(),
             base_url,
             headers,
+            basic_auth,
             timeout_ms,
         },
         prepared.password.as_ref(),
@@ -914,8 +935,120 @@ fn load_existing_api_state_from_prepared(
             "headers",
             &format!("apis.{api_name}.headers"),
         )?,
+        basic_auth: parse_api_basic_auth_table(api_table, &format!("apis.{api_name}.basic_auth"))?,
         timeout_ms,
     }))
+}
+
+fn parse_api_basic_auth_table(
+    table: &Table,
+    field_label: &str,
+) -> Result<Option<ExistingApiBasicAuthState>, ConfigCommandError> {
+    let Some(item) = table.get("basic_auth") else {
+        return Ok(None);
+    };
+
+    let basic_auth = if let Some(table) = item.as_table() {
+        table
+    } else if let Some(table) = item.as_value().and_then(toml_edit::Value::as_inline_table) {
+        let username = table
+            .get("username")
+            .and_then(toml_edit::Value::as_str)
+            .ok_or_else(|| {
+                ConfigCommandError::new(format!("{field_label}.username must be a string"))
+            })?
+            .to_owned();
+        let password = match table.get("password") {
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| {
+                    ConfigCommandError::new(format!("{field_label}.password must be a string"))
+                })?
+                .to_owned(),
+            None => String::new(),
+        };
+
+        return Ok(Some(ExistingApiBasicAuthState { username, password }));
+    } else {
+        return Err(ConfigCommandError::new(format!(
+            "{field_label} must be a table or inline table"
+        )));
+    };
+
+    let username = find_string_value(basic_auth, "username").ok_or_else(|| {
+        ConfigCommandError::new(format!("{field_label}.username must be a string"))
+    })?;
+    let password = match basic_auth.get("password") {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| {
+                ConfigCommandError::new(format!("{field_label}.password must be a string"))
+            })?
+            .to_owned(),
+        None => String::new(),
+    };
+
+    Ok(Some(ExistingApiBasicAuthState { username, password }))
+}
+
+fn resolve_api_auth_state(
+    slug: &str,
+    existing: Option<&ExistingApiState>,
+    parsed_headers: Option<BTreeMap<String, String>>,
+    auth: &ConfigApiAuthSelection,
+) -> Result<(BTreeMap<String, String>, Option<ApiBasicAuthUpsert>), ConfigCommandError> {
+    let parsed_headers_have_authorization = parsed_headers
+        .as_ref()
+        .is_some_and(|headers| headers.contains_key("authorization"));
+    let mut headers = parsed_headers.unwrap_or_else(|| {
+        existing
+            .map(|state| state.headers.clone())
+            .unwrap_or_default()
+    });
+
+    let basic_auth = match auth {
+        ConfigApiAuthSelection::Preserve => existing
+            .and_then(|state| state.basic_auth.as_ref())
+            .map(existing_basic_auth_to_upsert),
+        ConfigApiAuthSelection::Header => None,
+        ConfigApiAuthSelection::None => {
+            headers.remove("authorization");
+            None
+        }
+        ConfigApiAuthSelection::Basic { username, password } => {
+            if parsed_headers_have_authorization {
+                return Err(ConfigCommandError::new(format!(
+                    "apis.{slug} cannot set both headers.authorization and basic_auth"
+                )));
+            }
+
+            headers.remove("authorization");
+            Some(ApiBasicAuthUpsert {
+                username: trimmed_required("basic_auth.username", username)?,
+                password: match password {
+                    Some(password) => Some(password.clone()),
+                    None => existing
+                        .and_then(|state| state.basic_auth.as_ref())
+                        .map(|state| state.password.clone()),
+                },
+            })
+        }
+    };
+
+    if basic_auth.is_some() && headers.contains_key("authorization") {
+        return Err(ConfigCommandError::new(format!(
+            "apis.{slug} cannot set both headers.authorization and basic_auth"
+        )));
+    }
+
+    Ok((headers, basic_auth))
+}
+
+fn existing_basic_auth_to_upsert(state: &ExistingApiBasicAuthState) -> ApiBasicAuthUpsert {
+    ApiBasicAuthUpsert {
+        username: state.username.clone(),
+        password: Some(state.password.clone()),
+    }
 }
 
 fn load_existing_group_state_from_prepared(

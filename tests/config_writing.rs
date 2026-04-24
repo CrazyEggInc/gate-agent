@@ -264,6 +264,7 @@ api_access = {}
                 "authorization".to_string(),
                 "first-token".to_string(),
             )]),
+            basic_auth: None,
             timeout_ms: 5_000,
         },
         None,
@@ -295,6 +296,7 @@ api_access = {}
                 "x-service-token".to_string(),
                 "second-token".to_string(),
             )]),
+            basic_auth: None,
             timeout_ms: 7_500,
         },
         None,
@@ -359,6 +361,7 @@ api_access = {}
                     "Bearer upstream-token".to_string(),
                 ),
             ]),
+            basic_auth: None,
             timeout_ms: 5_000,
         },
         None,
@@ -380,6 +383,120 @@ api_access = {}
     assert!(projects.contains(
         "headers = { authorization = \"Bearer upstream-token\", x-zeta-token = \"zeta-secret\" }"
     ));
+
+    Ok(())
+}
+
+#[test]
+fn add_api_with_basic_auth_writes_basic_auth_table() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[apis]
+"#,
+    )?;
+
+    write::upsert_api(
+        &config_path,
+        &ApiUpsert {
+            name: "billing".to_string(),
+            base_url: "https://billing.internal.example/api".to_string(),
+            headers: std::collections::BTreeMap::from([(
+                "x-api-key".to_string(),
+                "secondary-secret".to_string(),
+            )]),
+            basic_auth: Some(write::ApiBasicAuthUpsert {
+                username: "billing-user".to_string(),
+                password: Some("billing-pass".to_string()),
+            }),
+            timeout_ms: 5_000,
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    let billing = section_body(&contents, "apis.billing").unwrap();
+    assert!(
+        billing
+            .contains("basic_auth = { username = \"billing-user\", password = \"billing-pass\" }")
+    );
+    assert!(billing.contains("headers = { x-api-key = \"secondary-secret\" }"));
+
+    Ok(())
+}
+
+#[test]
+fn add_api_switching_to_basic_auth_removes_only_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[apis.billing]
+base_url = "https://billing.internal.example/api"
+headers = { authorization = "Bearer old-token", x-api-key = "keep-me" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    write::upsert_api(
+        &config_path,
+        &ApiUpsert {
+            name: "billing".to_string(),
+            base_url: "https://billing.internal.example/api".to_string(),
+            headers: std::collections::BTreeMap::from([(
+                "x-api-key".to_string(),
+                "keep-me".to_string(),
+            )]),
+            basic_auth: Some(write::ApiBasicAuthUpsert {
+                username: "billing-user".to_string(),
+                password: None,
+            }),
+            timeout_ms: 5_000,
+        },
+        None,
+    )?;
+
+    let parsed: toml::Value = fs::read_to_string(&config_path)?.parse()?;
+    assert_eq!(
+        parsed
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("headers"))
+            .and_then(|value| value.get("authorization")),
+        None
+    );
+    assert_eq!(
+        parsed
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("headers"))
+            .and_then(|value| value.get("x-api-key"))
+            .and_then(toml::Value::as_str),
+        Some("keep-me")
+    );
+    assert_eq!(
+        parsed
+            .get("apis")
+            .and_then(|value| value.get("billing"))
+            .and_then(|value| value.get("basic_auth"))
+            .and_then(|value| value.get("username"))
+            .and_then(toml::Value::as_str),
+        Some("billing-user")
+    );
 
     Ok(())
 }
@@ -414,6 +531,7 @@ notes = "keep-me"
             name: "projects".to_string(),
             base_url: "https://projects.internal.example/v2".to_string(),
             headers: std::collections::BTreeMap::new(),
+            basic_auth: None,
             timeout_ms: 7_500,
         },
         None,
