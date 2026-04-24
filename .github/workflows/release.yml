@@ -11,7 +11,7 @@ on:
         required: false
         type: string
       version:
-        description: Release version or tag name. Leave empty to publish a SHA-based release.
+        description: Release version or tag name. Leave empty to publish a SHA-based dry-run build.
         required: false
         type: string
       publish:
@@ -37,6 +37,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.ref || github.sha) || github.ref }}
+          fetch-depth: 0
 
       - name: Resolve release metadata
         id: meta
@@ -61,6 +62,26 @@ jobs:
             verify_tag=false
           fi
 
+          if [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            expected_version="${release_tag#v}"
+            cargo_version="$(
+              awk -F ' *= *' '
+                $1 == "version" {
+                  gsub(/"/, "", $2)
+                  print $2
+                  exit
+                }
+              ' Cargo.toml
+            )"
+            if [[ "${cargo_version}" != "${expected_version}" ]]; then
+              echo "Cargo.toml version ${cargo_version} does not match release tag ${release_tag}" >&2
+              exit 1
+            fi
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "release tag must match vX.Y.Z: ${release_tag}" >&2
+            exit 1
+          fi
+
           {
             echo "checkout_ref=${checkout_ref}"
             echo "release_tag=${release_tag}"
@@ -68,9 +89,38 @@ jobs:
             echo "verify_tag=${verify_tag}"
           } >> "${GITHUB_OUTPUT}"
 
+  validate:
+    name: validate source
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+
   build:
     name: build (${{ matrix.asset_name }})
-    needs: prepare
+    needs:
+      - prepare
+      - validate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -102,24 +152,25 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --bin gate-agent --target ${{ matrix.target }}
 
-      - name: Package archive
+      - name: Package archives
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           set -euo pipefail
-          archive_name="gate-agent-${RELEASE_TAG}-${{ matrix.asset_name }}.tar.gz"
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/gate-agent" "dist/gate-agent"
-          chmod +x "dist/gate-agent"
-          tar -C dist -czf "dist/${archive_name}" gate-agent
-          rm "dist/gate-agent"
+          versioned_archive="gate-agent-${RELEASE_TAG}-${{ matrix.asset_name }}.tar.gz"
+          latest_archive="gate-agent-latest-${{ matrix.asset_name }}.tar.gz"
+          mkdir -p dist/package dist/assets
+          cp "target/${{ matrix.target }}/release/gate-agent" "dist/package/gate-agent"
+          chmod +x "dist/package/gate-agent"
+          tar -C dist/package -czf "dist/assets/${versioned_archive}" gate-agent
+          cp "dist/assets/${versioned_archive}" "dist/assets/${latest_archive}"
 
-      - name: Upload packaged archive
+      - name: Upload packaged archives
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: dist/*
+          path: dist/assets/*
           if-no-files-found: error
 
   publish:
@@ -136,15 +187,15 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate aggregate checksums
+      - name: Generate checksums
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           set -euo pipefail
-          checksum_file="gate-agent-${RELEASE_TAG}-sha256sums.txt"
           cd dist
-          sha256sum gate-agent-*.tar.gz > "${checksum_file}"
+          sha256sum "gate-agent-${RELEASE_TAG}"-*.tar.gz > "gate-agent-${RELEASE_TAG}-sha256sums.txt"
+          sha256sum gate-agent-latest-*.tar.gz > gate-agent-latest-sha256sums.txt
 
       - name: Publish GitHub release assets
         shell: bash
@@ -158,13 +209,16 @@ jobs:
           set -euo pipefail
           if ! gh release view -R "${GH_REPO}" "${RELEASE_TAG}" >/dev/null 2>&1; then
             if [[ "${VERIFY_TAG}" == "true" ]]; then
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --notes ""
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --generate-notes
             else
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --notes ""
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes
             fi
           fi
           gh release upload -R "${GH_REPO}" "${RELEASE_TAG}" \
-            "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz#linux-x64" \
-            "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz#macos-arm64" \
+            "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz" \
+            "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz" \
             "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt" \
+            "dist/gate-agent-latest-linux-x64.tar.gz" \
+            "dist/gate-agent-latest-macos-arm64.tar.gz" \
+            "dist/gate-agent-latest-sha256sums.txt" \
             --clobber

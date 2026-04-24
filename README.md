@@ -11,21 +11,21 @@
 
 ## Install
 
+Install the latest published release:
+
 ```sh
-VERSION="$(awk -F ' *= *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) TARGET=linux-x64 ;;
   Darwin-arm64) TARGET=macos-arm64 ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-ARCHIVE="gate-agent-v${VERSION}-${TARGET}.tar.gz"
-CHECKSUMS="gate-agent-v${VERSION}-sha256sums.txt"
+ARCHIVE="gate-agent-latest-${TARGET}.tar.gz"
+CHECKSUMS="gate-agent-latest-sha256sums.txt"
+BASE_URL="https://github.com/CrazyEggInc/gate-agent/releases/latest/download"
 
-curl -L -O \
-  "https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}/${CHECKSUMS}"
-curl -L -O \
-  "https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}/${ARCHIVE}"
+curl -fsSLO "${BASE_URL}/${CHECKSUMS}"
+curl -fsSLO "${BASE_URL}/${ARCHIVE}"
 
 if command -v shasum >/dev/null 2>&1; then
   grep " ${ARCHIVE}\$" "${CHECKSUMS}" | shasum -a 256 -c -
@@ -33,6 +33,22 @@ else
   grep " ${ARCHIVE}\$" "${CHECKSUMS}" | sha256sum --check -
 fi
 
+tar -xzf "${ARCHIVE}"
+install gate-agent /usr/local/bin/gate-agent
+```
+
+Install a pinned release by setting `VERSION` and using versioned assets:
+
+```sh
+VERSION=1.2.3
+TARGET=linux-x64
+ARCHIVE="gate-agent-v${VERSION}-${TARGET}.tar.gz"
+CHECKSUMS="gate-agent-v${VERSION}-sha256sums.txt"
+BASE_URL="https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}"
+
+curl -fsSLO "${BASE_URL}/${CHECKSUMS}"
+curl -fsSLO "${BASE_URL}/${ARCHIVE}"
+grep " ${ARCHIVE}\$" "${CHECKSUMS}" | sha256sum --check -
 tar -xzf "${ARCHIVE}"
 install gate-agent /usr/local/bin/gate-agent
 ```
@@ -194,5 +210,9 @@ See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the M
 
 1. update `version = "..."` in `Cargo.toml`
 2. merge that change to `master`
-3. create tag `vX.Y.Z` from the same commit
-4. let GitHub Actions build and publish release artifacts from that tag
+3. run GitHub Actions workflow `prepare release` with `dry_run=true`
+4. re-run `prepare release` with `dry_run=false` to create tag `vX.Y.Z`
+5. let the tag-triggered `release` workflow validate, build, checksum, and publish assets
+6. verify latest and pinned install commands against the published release
+
+See `docs/release.md` for release assets, checksum behavior, retries, and recovery.
