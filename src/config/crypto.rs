@@ -11,6 +11,9 @@ use super::ConfigError;
 const AGE_HEADER: &str = "-----BEGIN AGE ENCRYPTED FILE-----";
 const MAX_SCRYPT_WORK_FACTOR: u8 = 30;
 
+#[cfg(debug_assertions)]
+const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigFileFormat {
     PlaintextToml,
@@ -118,7 +121,7 @@ pub fn load_config_text(
 }
 
 pub fn encrypt_string(plaintext: &str, password: &SecretString) -> Result<String, ConfigError> {
-    let encryptor = Encryptor::with_user_passphrase(password.clone());
+    let encryptor = passphrase_encryptor(password)?;
     let mut output = Vec::new();
     let armored = ArmoredWriter::wrap_output(&mut output, Format::AsciiArmor)
         .map_err(|error| ConfigError::new(format!("failed to start age armor writer: {error}")))?;
@@ -139,6 +142,46 @@ pub fn encrypt_string(plaintext: &str, password: &SecretString) -> Result<String
 
     String::from_utf8(output)
         .map_err(|error| ConfigError::new(format!("encrypted config output is not utf-8: {error}")))
+}
+
+fn passphrase_encryptor(password: &SecretString) -> Result<Encryptor, ConfigError> {
+    #[cfg(debug_assertions)]
+    if let Some(work_factor) = test_scrypt_work_factor()? {
+        let mut recipient = age::scrypt::Recipient::new(password.clone());
+        recipient.set_work_factor(work_factor);
+
+        return Encryptor::with_recipients(std::iter::once(&recipient as _)).map_err(|error| {
+            ConfigError::new(format!("failed to configure test encryption: {error}"))
+        });
+    }
+
+    Ok(Encryptor::with_user_passphrase(password.clone()))
+}
+
+#[cfg(debug_assertions)]
+fn test_scrypt_work_factor() -> Result<Option<u8>, ConfigError> {
+    let value = match std::env::var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR) {
+        Ok(value) => value,
+        Err(_) => {
+            #[cfg(test)]
+            return Ok(Some(4));
+
+            #[cfg(not(test))]
+            return Ok(None);
+        }
+    };
+    let work_factor = value.parse::<u8>().map_err(|error| {
+        ConfigError::new(format!(
+            "{TEST_SCRYPT_WORK_FACTOR_ENV_VAR} must be an unsigned integer: {error}"
+        ))
+    })?;
+    if work_factor > MAX_SCRYPT_WORK_FACTOR {
+        return Err(ConfigError::new(format!(
+            "{TEST_SCRYPT_WORK_FACTOR_ENV_VAR} must be an unsigned integer no greater than {MAX_SCRYPT_WORK_FACTOR}"
+        )));
+    }
+
+    Ok(Some(work_factor))
 }
 
 pub fn decrypt_string(
