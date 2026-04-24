@@ -24,6 +24,7 @@ const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
+const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
 
 const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
@@ -88,6 +89,7 @@ impl EnvGuard {
         std::env::set_current_dir(current_dir)?;
         unsafe {
             std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
+            std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
         }
 
         Ok(Self {
@@ -124,6 +126,7 @@ fn tracked_env_vars() -> Vec<&'static str> {
         TEST_PROMPT_INPUTS_ENV_VAR,
         TEST_PROMPT_PASSWORD_ENV_VAR,
         DISABLE_INTERACTIVE_ENV_VAR,
+        TEST_SCRYPT_WORK_FACTOR_ENV_VAR,
     ]
 }
 
@@ -149,7 +152,9 @@ fn write_binary_age_config(
         std::fs::create_dir_all(parent)?;
     }
 
-    let encryptor = Encryptor::with_user_passphrase(password.clone());
+    let mut recipient = age::scrypt::Recipient::new(password.clone());
+    recipient.set_work_factor(4);
+    let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as _))?;
     let mut output = Vec::new();
     let mut writer = encryptor.wrap_output(&mut output)?;
     std::io::Write::write_all(&mut writer, contents.as_bytes())?;
@@ -773,7 +778,11 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
 #[test]
 fn encrypted_config_rotate_client_secret_preserves_password_workflow()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
     let config_path = temp_dir.path().join("gate-agent.secrets");
     let password = SecretString::from("top-secret-password".to_owned());
 
@@ -3572,7 +3581,11 @@ fn config_validate_returns_json_error_for_invalid_bearer_config()
 #[test]
 fn encrypted_config_add_client_preserves_password_workflow()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
     let config_path = temp_dir.path().join("gate-agent.secrets");
     let password = SecretString::from("top-secret-password".to_owned());
 

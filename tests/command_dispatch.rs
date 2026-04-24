@@ -17,6 +17,7 @@ use toml::Value;
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
+const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
 const VERSION_DISPATCH_HELPER_ENV_VAR: &str = "GATE_AGENT_VERSION_DISPATCH_HELPER";
 const VERSION_DISPATCH_HELPER_TEST: &str =
     "version_command_dispatch_skips_tracing_bootstrap_helper";
@@ -170,6 +171,24 @@ timeout_ms = 5000
     .to_owned()
 }
 
+fn encrypt_test_config(
+    contents: &str,
+    password: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut recipient =
+        age::scrypt::Recipient::new(age::secrecy::SecretString::from(password.to_owned()));
+    recipient.set_work_factor(4);
+    let encrypted = age::Encryptor::with_recipients(std::iter::once(&recipient as _))?;
+    let mut encrypted_bytes = Vec::new();
+    {
+        let mut writer = encrypted.wrap_output(&mut encrypted_bytes)?;
+        writer.write_all(contents.as_bytes())?;
+        writer.finish()?;
+    }
+
+    Ok(encrypted_bytes)
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -227,6 +246,7 @@ struct EnvGuard {
     original_home: Option<String>,
     original_test_prompt_inputs: Option<String>,
     original_disable_interactive: Option<String>,
+    original_test_scrypt_work_factor: Option<String>,
 }
 
 impl EnvGuard {
@@ -235,10 +255,12 @@ impl EnvGuard {
         let original_home = std::env::var("HOME").ok();
         let original_test_prompt_inputs = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok();
         let original_disable_interactive = std::env::var(DISABLE_INTERACTIVE_ENV_VAR).ok();
+        let original_test_scrypt_work_factor = std::env::var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR).ok();
 
         std::env::set_current_dir(current_dir)?;
         unsafe {
             std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
+            std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
         }
 
         Ok(Self {
@@ -246,6 +268,7 @@ impl EnvGuard {
             original_home,
             original_test_prompt_inputs,
             original_disable_interactive,
+            original_test_scrypt_work_factor,
         })
     }
 }
@@ -268,6 +291,11 @@ impl Drop for EnvGuard {
             match &self.original_disable_interactive {
                 Some(value) => std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, value),
                 None => std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR),
+            }
+
+            match &self.original_test_scrypt_work_factor {
+                Some(value) => std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, value),
+                None => std::env::remove_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR),
             }
         }
     }
@@ -1747,15 +1775,7 @@ fn config_command_dispatch_client_rotate_secret_inherits_parent_password_for_enc
         std::env::set_var("HOME", temp_dir.path().join("home"));
     }
 
-    let encrypted =
-        age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(password.to_owned()));
-    let mut encrypted_bytes = Vec::new();
-    {
-        let mut writer = encrypted.wrap_output(&mut encrypted_bytes)?;
-        use std::io::Write as _;
-        writer.write_all(encrypted_client_config().as_bytes())?;
-        writer.finish()?;
-    }
+    let encrypted_bytes = encrypt_test_config(&encrypted_client_config(), password)?;
     write_config_bytes(&config_path, &encrypted_bytes)?;
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
@@ -1815,15 +1835,7 @@ fn config_command_dispatch_client_rotate_secret_prefers_nested_password_over_par
         std::env::set_var("HOME", temp_dir.path().join("home"));
     }
 
-    let encrypted =
-        age::Encryptor::with_user_passphrase(age::secrecy::SecretString::from(password.to_owned()));
-    let mut encrypted_bytes = Vec::new();
-    {
-        let mut writer = encrypted.wrap_output(&mut encrypted_bytes)?;
-        use std::io::Write as _;
-        writer.write_all(encrypted_client_config().as_bytes())?;
-        writer.finish()?;
-    }
+    let encrypted_bytes = encrypt_test_config(&encrypted_client_config(), password)?;
     write_config_bytes(&config_path, &encrypted_bytes)?;
 
     gate_agent::commands::run(Command::Config(ConfigArgs {
