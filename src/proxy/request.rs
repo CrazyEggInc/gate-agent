@@ -64,7 +64,9 @@ pub fn map_forward_request(
     *outbound_request.headers_mut() = filter_request_headers(&headers);
     overlay_configured_headers(outbound_request.headers_mut(), api_config)?;
     overlay_basic_auth(outbound_request.headers_mut(), api_config)?;
-    *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
+    if !matches!(*outbound_request.method(), Method::GET | Method::HEAD) {
+        *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
+    }
 
     Ok(outbound_request)
 }

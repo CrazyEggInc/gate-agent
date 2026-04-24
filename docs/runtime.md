@@ -69,9 +69,7 @@ Runtime rules:
 
 ## HTTP client behavior
 
-Upstream HTTP behavior must be explicit.
-
-Redirects must not be followed implicitly. Timeouts must be explicit and owned by the proxy.
+Upstream redirects are followed by the shared outbound HTTP client. Timeouts remain explicit and owned by the proxy.
 
 ## Error model
 

@@ -71,6 +71,8 @@ The MCP surface does not negotiate sessions or issue follow-up credentials durin
 
 No other tools are part of the supported product contract.
 
+`tools/list` is a static MCP tool catalog. It must describe the available tools and their input schemas only. It must not include configured API entries, API descriptions, or API docs URLs.
+
 ## list_apis discovery contract
 
 `list_apis` is the discovery tool for the authenticated client.
@@ -82,8 +84,12 @@ Discovery expectations:
 - only APIs present in the authenticated client's effective `api_access` are listed
 - each listed API includes its configured slug
 - each listed API includes the effective access level available to that client
-- results may include operator-configured discovery metadata such as description and docs URL when present
-- tool `content` should contain a JSON object string with the full discovery payload, including safe generic `call_api` examples such as `{"api":"projects","method":"GET","path":"/<endpoint>"}`
+- each listed API includes operator-configured `description` when present
+- each listed API includes operator-configured `docs_url` when present
+- API-specific discovery metadata belongs here, not in `tools/list`
+- tool `content` should contain a JSON object string with the full discovery payload, including safe generic `call_api` examples such as `{"api":"projects","method":"GET","path":"/<endpoint>","query":{"example":"value"}}`
+- discovery must tell clients that query parameters belong in `call_api.query`, not in `call_api.path`
+- `call_api.path` examples must stay path-only and must not embed `?query` or `#fragment` components
 - `structuredContent` should be an empty object for now
 - results are suitable for tool-driven discovery and should direct the client to `call_api` for actual invocation
 
@@ -97,8 +103,9 @@ Request expectations:
 
 - the client specifies the target API slug
 - the client specifies the outbound HTTP method
-- the client specifies a path that begins with `/`
-- the client may provide query parameters
+- `path` is the upstream path to call and must start with `/`
+- `path` must not include query strings or fragments
+- the client provides query parameters with the optional `query` object, for example `{"path":"/users","query":{"active":true}}`
 - the client may provide request headers
 - the client may provide a request body
 - the client may provide an explicit content type when needed
@@ -114,6 +121,7 @@ Authorization expectations:
 Forwarding expectations:
 
 - outbound routing, upstream credential injection, timeout handling, and header filtering follow the same proxy behavior as `/proxy`
+- `query` object parameters are encoded and appended to the configured upstream request URL
 - client-supplied bearer auth is not forwarded upstream as client auth
 - client topology headers are not forwarded upstream
 - safe client headers may be forwarded when allowed by the proxy contract
