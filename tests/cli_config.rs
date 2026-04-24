@@ -6,9 +6,9 @@ use std::sync::{Mutex, OnceLock};
 use age::Encryptor;
 use assert_cmd::Command;
 use gate_agent::commands::config::{
-    ConfigApiArgs, ConfigClientArgs, ConfigGroupArgs, ConfigInitArgs, ConfigRotateSecretArgs,
-    ConfigShowArgs, ConfigValidateArgs, apply_api, apply_client, apply_group, init,
-    rotate_client_secret, show, validate,
+    ConfigApiArgs, ConfigApiAuthSelection, ConfigClientArgs, ConfigGroupArgs, ConfigInitArgs,
+    ConfigRotateSecretArgs, ConfigShowArgs, ConfigValidateArgs, apply_api, apply_client,
+    apply_group, init, rotate_client_secret, show, validate,
 };
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::password::PASSWORD_ENV_VAR;
@@ -1730,6 +1730,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
         "projects",
         "https://projects.internal.example/api",
         "authorization=Bearer local-upstream-token",
+        "",
     ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
@@ -1741,6 +1742,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
                 delete: false,
                 name: None,
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),
@@ -1783,7 +1785,12 @@ fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    set_test_prompt_inputs(&["projects", "https://projects.internal.example/api", "none"])?;
+    set_test_prompt_inputs(&[
+        "projects",
+        "https://projects.internal.example/api",
+        "none",
+        "",
+    ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1794,6 +1801,7 @@ fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
                 delete: false,
                 name: None,
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),
@@ -1841,10 +1849,11 @@ fn config_update_api_interactive_preserves_existing_no_headers_when_prompt_left_
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
-    set_test_prompt_inputs(&["", ""])?;
+    set_test_prompt_inputs(&["", "", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1855,6 +1864,7 @@ fn config_update_api_interactive_preserves_existing_no_headers_when_prompt_left_
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -1905,10 +1915,11 @@ fn config_update_api_interactive_preserves_existing_header_values_with_commas_wh
             "authorization=Bearer token,with,commas".to_owned(),
             "x-api-key=secret-key".to_owned(),
         ]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
-    set_test_prompt_inputs(&["", ""])?;
+    set_test_prompt_inputs(&["", "", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1919,6 +1930,7 @@ fn config_update_api_interactive_preserves_existing_header_values_with_commas_wh
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -1970,7 +1982,7 @@ fn config_update_api_interactive_preserves_existing_regular_table_headers_when_p
         ),
     )?;
 
-    set_test_prompt_inputs(&["", ""])?;
+    set_test_prompt_inputs(&["", "", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1981,6 +1993,7 @@ fn config_update_api_interactive_preserves_existing_regular_table_headers_when_p
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2032,6 +2045,7 @@ fn config_update_api_rejects_non_string_regular_table_header_entry()
         name: "projects".to_owned(),
         base_url: None,
         headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: None,
     })
     .expect_err("non-string regular table header should fail");
@@ -2075,10 +2089,11 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
             "authorization=Bearer top-secret".to_owned(),
             "x-api-key=secret-key".to_owned(),
         ]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
-    set_test_prompt_inputs(&["", "none"])?;
+    set_test_prompt_inputs(&["", "none", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -2089,6 +2104,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2103,6 +2119,620 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
         Some("https://projects.internal.example/api")
     );
     assert!(api.get("headers").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_preserves_existing_basic_auth_when_auth_not_changed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })?;
+
+    let config = load_toml(&config_path)?;
+
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "base_url"]),
+        "https://projects.internal.example/api"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "basic_auth", "username"]),
+        "billing-user"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "basic_auth", "password"]),
+        "billing-pass"
+    );
+    assert_eq!(
+        config
+            .get("apis")
+            .and_then(|value| value.get("projects"))
+            .and_then(|value| value.get("timeout_ms"))
+            .and_then(Value::as_integer),
+        Some(7_500)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_preserves_existing_username_only_basic_auth_when_auth_not_changed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let basic_auth = table_at(&config, &["apis", "projects", "basic_auth"]);
+
+    assert_eq!(
+        basic_auth.get("username").and_then(Value::as_str),
+        Some("billing-user")
+    );
+    assert!(basic_auth.get("password").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_preserves_existing_basic_auth_regular_table_when_auth_not_changed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.basic_auth]\n",
+            "username = \"billing-user\"\n",
+            "password = \"billing-pass\"\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })?;
+
+    let config = load_toml(&config_path)?;
+
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "base_url"]),
+        "https://projects.internal.example/api"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "basic_auth", "username"]),
+        "billing-user"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "basic_auth", "password"]),
+        "billing-pass"
+    );
+    assert_eq!(
+        config
+            .get("apis")
+            .and_then(|value| value.get("projects"))
+            .and_then(|value| value.get("timeout_ms"))
+            .and_then(Value::as_integer),
+        Some(7_500)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_table_basic_auth_item() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = \"billing-user:billing-pass\"\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("non-table basic_auth should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth must be a table or inline table"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_empty_inline_basic_auth_username()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = \"\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("empty inline basic_auth username should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth.username cannot be empty"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_empty_regular_table_basic_auth_username()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.basic_auth]\n",
+            "username = \" \"\n",
+            "password = \"billing-pass\"\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("empty regular table basic_auth username should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth.username cannot be empty"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_string_inline_basic_auth_username()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = 123, password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("non-string inline basic_auth username should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("apis.projects.basic_auth.username must be a string"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_string_regular_table_basic_auth_username()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.basic_auth]\n",
+            "username = 123\n",
+            "password = \"billing-pass\"\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("non-string regular table basic_auth username should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("apis.projects.basic_auth.username must be a string"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_string_inline_basic_auth_password()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = 123 }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("non-string inline basic_auth password should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("apis.projects.basic_auth.password must be a string"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_non_string_regular_table_basic_auth_password()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.basic_auth]\n",
+            "username = \"billing-user\"\n",
+            "password = 123\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("non-string regular table basic_auth password should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth.password must be a string"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_unknown_inline_basic_auth_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", token = \"ignored\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("unknown inline basic_auth key should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth.token is not supported"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_rejects_unknown_regular_table_basic_auth_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { projects = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.projects.basic_auth]\n",
+            "username = \"billing-user\"\n",
+            "token = \"ignored\"\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(7_500),
+    })
+    .expect_err("unknown regular table basic_auth key should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.projects.basic_auth.token is not supported"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_header_auth_clears_existing_basic_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { billing = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.billing]\n",
+            "base_url = \"https://billing.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: None,
+        headers: Some(vec!["authorization=Bearer rotated-token".to_owned()]),
+        auth: ConfigApiAuthSelection::Header,
+        timeout_ms: None,
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let api = table_at(&config, &["apis", "billing"]);
+
+    assert!(api.get("basic_auth").is_none());
+    assert_eq!(
+        string_at(&config, &["apis", "billing", "headers", "authorization"]),
+        "Bearer rotated-token"
+    );
 
     Ok(())
 }
@@ -2137,6 +2767,7 @@ fn config_add_api_non_interactive_allows_missing_headers() -> Result<(), Box<dyn
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),
@@ -2151,6 +2782,345 @@ fn config_add_api_non_interactive_allows_missing_headers() -> Result<(), Box<dyn
         Some("https://projects.internal.example/api")
     );
     assert!(api.get("headers").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_basic_auth_non_interactive_persists_basic_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: Some("https://billing.internal.example/api".to_owned()),
+        headers: Some(vec!["x-api-key=secondary-secret".to_owned()]),
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: Some("billing-pass".to_owned()),
+        },
+        timeout_ms: Some(5_000),
+    })?;
+
+    let config = load_toml(&config_path)?;
+    assert_eq!(
+        string_at(&config, &["apis", "billing", "basic_auth", "username"]),
+        "billing-user"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "billing", "basic_auth", "password"]),
+        "billing-pass"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "billing", "headers", "x-api-key"]),
+        "secondary-secret"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_basic_auth_non_interactive_with_password_none_omits_password_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: Some("https://billing.internal.example/api".to_owned()),
+        headers: None,
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: None,
+        },
+        timeout_ms: Some(5_000),
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let basic_auth = table_at(&config, &["apis", "billing", "basic_auth"]);
+
+    assert_eq!(
+        basic_auth.get("username").and_then(Value::as_str),
+        Some("billing-user")
+    );
+    assert!(basic_auth.get("password").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_basic_auth_non_interactive_with_password_none_clears_password_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { billing = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.billing]\n",
+            "base_url = \"https://billing.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: None,
+        },
+        timeout_ms: None,
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let basic_auth = table_at(&config, &["apis", "billing", "basic_auth"]);
+
+    assert_eq!(
+        basic_auth.get("username").and_then(Value::as_str),
+        Some("billing-user")
+    );
+    assert!(basic_auth.get("password").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_basic_auth_removes_mixed_case_existing_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { billing = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.billing]\n",
+            "base_url = \"https://billing.internal.example/api\"\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.billing.headers]\n",
+            "Authorization = \"Bearer stale-token\"\n",
+            "x-api-key = \"secondary-secret\"\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: Some("billing-pass".to_owned()),
+        },
+        timeout_ms: None,
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let headers = table_at(&config, &["apis", "billing", "headers"]);
+
+    assert!(headers.get("Authorization").is_none());
+    assert_eq!(
+        headers.get("x-api-key").and_then(Value::as_str),
+        Some("secondary-secret")
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "billing", "basic_auth", "username"]),
+        "billing-user"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_none_removes_mixed_case_existing_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { billing = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.billing]\n",
+            "base_url = \"https://billing.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.billing.headers]\n",
+            "Authorization = \"Bearer stale-token\"\n",
+            "x-api-key = \"secondary-secret\"\n",
+        ),
+    )?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::None,
+        timeout_ms: None,
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let api = table_at(&config, &["apis", "billing"]);
+    let headers = table_at(&config, &["apis", "billing", "headers"]);
+
+    assert!(api.get("basic_auth").is_none());
+    assert!(headers.get("Authorization").is_none());
+    assert_eq!(
+        headers.get("x-api-key").and_then(Value::as_str),
+        Some("secondary-secret")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_preserve_rejects_mixed_case_authorization_with_existing_basic_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.default]\n",
+            "bearer_token_id = \"0011223344556677\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = { billing = \"read\" }\n\n",
+            "[groups]\n\n",
+            "[apis.billing]\n",
+            "base_url = \"https://billing.internal.example/api\"\n",
+            "basic_auth = { username = \"billing-user\", password = \"billing-pass\" }\n",
+            "timeout_ms = 5000\n\n",
+            "[apis.billing.headers]\n",
+            "Authorization = \"Bearer stale-token\"\n",
+        ),
+    )?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: None,
+        headers: None,
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: None,
+    })
+    .expect_err("mixed-case authorization header conflict should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.billing cannot set both headers.authorization and basic_auth"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_rejects_basic_auth_with_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: Some("https://billing.internal.example/api".to_owned()),
+        headers: Some(vec!["authorization=Bearer bad-idea".to_owned()]),
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: Some("billing-pass".to_owned()),
+        },
+        timeout_ms: Some(5_000),
+    })
+    .expect_err("authorization header conflict should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.billing cannot set both headers.authorization and basic_auth"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_api_rejects_basic_auth_with_uppercase_cli_authorization_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(&config_path, VALID_BEARER_VALIDATE_CONFIG)?;
+
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "billing".to_owned(),
+        base_url: Some("https://billing.internal.example/api".to_owned()),
+        headers: Some(vec!["Authorization=Bearer bad-idea".to_owned()]),
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: Some("billing-pass".to_owned()),
+        },
+        timeout_ms: Some(5_000),
+    })
+    .expect_err("authorization header conflict should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "apis.billing cannot set both headers.authorization and basic_auth"
+    );
 
     Ok(())
 }
@@ -2185,6 +3155,7 @@ fn config_add_api_rejects_malformed_header_non_interactively()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
+                basic_auth: false,
                 header: vec!["authorization".to_owned()],
                 timeout_ms: Some(5_000),
             }),
@@ -2230,6 +3201,7 @@ fn config_add_api_rejects_duplicate_header_keys_after_normalization()
                 delete: false,
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
+                basic_auth: false,
                 header: vec![
                     "Authorization=Bearer one".to_owned(),
                     "authorization=Bearer two".to_owned(),
@@ -2265,6 +3237,7 @@ fn config_add_api_persists_one_header() -> Result<(), Box<dyn std::error::Error>
         headers: Some(vec![
             " authorization = Bearer local-upstream-token ".to_owned(),
         ]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
@@ -2295,6 +3268,7 @@ fn config_add_api_persists_multiple_headers() -> Result<(), Box<dyn std::error::
             "authorization=Bearer local-upstream-token".to_owned(),
             "x-api-key = secret-value ".to_owned(),
         ]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
@@ -2326,6 +3300,7 @@ fn config_add_api_rejects_invalid_header_name() -> Result<(), Box<dyn std::error
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["bad header=value".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })
     .expect_err("invalid header name should fail");
@@ -2355,6 +3330,7 @@ fn config_add_api_rejects_invalid_header_value() -> Result<(), Box<dyn std::erro
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["authorization=bad\nvalue".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })
     .expect_err("invalid header value should fail");
@@ -2423,6 +3399,7 @@ fn config_add_api_invalid_mutation_does_not_create_missing_config()
         delete: false,
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["authorization".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })
     .expect_err("invalid api mutation should fail");
@@ -2739,6 +3716,7 @@ fn encrypted_config_add_api_removes_stale_keyring_password_after_failed_decrypt(
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })
     .expect_err("stale keyring password should fail decrypt");
@@ -2774,6 +3752,7 @@ fn encrypted_config_add_api_preserves_password_workflow() -> Result<(), Box<dyn 
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
@@ -2836,6 +3815,7 @@ fn encrypted_config_add_api_backfills_keyring_after_flag_password_decrypt()
         name: "projects".to_owned(),
         base_url: Some("https://projects.internal.example/api".to_owned()),
         headers: Some(vec!["authorization=Bearer local-upstream-token".to_owned()]),
+        auth: ConfigApiAuthSelection::Preserve,
         timeout_ms: Some(5_000),
     })?;
 
@@ -3246,6 +4226,7 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
                 delete: false,
                 name: None,
                 base_url: None,
+                basic_auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),

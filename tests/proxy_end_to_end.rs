@@ -11,7 +11,19 @@ use axum::{
     http::{Request, Response, StatusCode, header::HeaderValue},
     routing::any,
 };
-use gate_agent::{app::AppState, config::secrets::AccessLevel, proxy::router::build_router};
+use gate_agent::{
+    app::AppState,
+    commands::config::{
+        ConfigApiArgs, ConfigApiAuthSelection, ConfigGroupArgs, apply_api, apply_group,
+    },
+    config::{
+        ConfigSource,
+        app_config::AppConfig,
+        secrets::{AccessLevel, SecretsConfig},
+        write,
+    },
+    proxy::router::build_router,
+};
 use http_body_util::BodyExt;
 use support::{
     bearer_token, bearer_token_for_client, bearer_token_with_access, capture_channel,
@@ -20,6 +32,7 @@ use support::{
     load_test_config_with_billing_basic_auth, load_test_config_with_billing_timeout,
     spawn_chunked_upstream, spawn_upstream,
 };
+use tempfile::tempdir;
 use tower::ServiceExt;
 
 async fn assert_upstream_redirect_is_not_followed(
@@ -206,6 +219,71 @@ async fn proxy_route_forwards_configured_basic_auth() -> Result<(), Box<dyn std:
 
     let captured = rx.await?;
     assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+    assert_eq!(
+        captured.headers.get("authorization").unwrap(),
+        "Basic YmlsbGluZy11c2VyOmJpbGxpbmctcGFzcw=="
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_route_forwards_basic_auth_written_by_config_api()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route("/api/{*path}", any(capture_request))
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    let token = write::init_config_with_default_bearer_token(&config_path, false, None)?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: "debug".to_owned(),
+        name: "billing".to_owned(),
+        delete: false,
+        base_url: Some(format!("{base_url}/api")),
+        headers: None,
+        auth: ConfigApiAuthSelection::Basic {
+            username: "billing-user".to_owned(),
+            password: Some("billing-pass".to_owned()),
+        },
+        timeout_ms: Some(5_000),
+    })?;
+
+    apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: "debug".to_owned(),
+        name: "local-default".to_owned(),
+        delete: false,
+        api_access: vec!["billing=write".to_owned()],
+    })?;
+
+    let config = AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_path.clone()),
+        SecretsConfig::load_from_file(&config_path)?,
+    );
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/billing/v1/invoices")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = rx.await?;
+    assert_eq!(captured.path_and_query, "/api/v1/invoices");
     assert_eq!(
         captured.headers.get("authorization").unwrap(),
         "Basic YmlsbGluZy11c2VyOmJpbGxpbmctcGFzcw=="

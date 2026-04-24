@@ -170,6 +170,7 @@ Accepted flags:
 - `--log-level <level>`
 - `--name`
 - `--base-url`
+- `--basic-auth`
 - repeated `--header <name=value>`
 - optional `--timeout-ms`
 - `-d` / `--delete`
@@ -181,13 +182,29 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
+- explicitly supplied `config api` inputs such as `--name`, `--base-url`, and any `--header` flags skip their own prompts
+- omitted header input can still prompt in interactive `config api` sessions
+- optional Basic-auth setup can still prompt in interactive `config api` sessions even when `--basic-auth` is omitted
+- `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
+- `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
 - each `--header` value must use `<name>=<value>` format
-- repeated `--header` flags define upstream headers for that invocation
+- repeated `--header` flags replace the stored upstream header map with exactly the provided headers for that invocation, subject to auth-mode rules below
+- repeated `--header` still manages generic upstream headers
 - bearer-style usage uses full value inside one repeated flag, for example `--header authorization=Bearer my-token`
+- `--basic-auth` rejects same invocation when provided headers include `authorization`
 - creating a new API with omitted `--header` writes no headers
 - in non-interactive update mode, omitted `--header` preserves existing headers instead of clearing them
+- when switching auth modes without `--header`, existing non-authorization headers are preserved
+- when one or more `--header` values are supplied during an auth-mode switch, the stored header map is first replaced by the provided headers, then `headers.authorization` is removed if the selected auth mode does not allow it
+- in interactive create or when no headers are configured yet, leaving headers blank means no headers
+- in interactive update, blank headers answer keeps current headers
 - interactive prompt accepts `none` to clear headers
 - there is no separate non-interactive clear flag for headers
+- interactive blank answers keep defaults
+- switching auth modes preserves non-auth headers unless replacement `--header` values are supplied
+- normal interactive flow asks for headers before optional Basic auth setup
+- after headers, CLI offers optional Basic auth setup
+- enabling Basic auth removes only `headers.authorization`; unrelated headers stay
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
@@ -201,8 +218,17 @@ Behavior:
 - the interactive questionnaire asks exactly:
   - `API name:`
   - `Base URL (example: https://projects.internal.example/api):`
-  - `Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers):`
-- explicit args keep the command non-interactive
+  - `Headers (example: x-api-key=secret; leave empty for no headers):`
+- after headers, the questionnaire offers optional Basic auth setup
+- when Basic auth is enabled, the questionnaire also asks for Basic auth username and password on single lines using current stored username as default when available
+- on create, blank Basic auth password stores empty password
+- on create, entering `none` as Basic auth password stores username-only Basic auth without a `password` key
+- on update, blank Basic auth password clears the stored `password` key and keeps the username
+- on update, entering `none` as Basic auth password also clears the stored `password` key and keeps the username
+- any other Basic auth password text stores that text as `basic_auth.password`
+- existing Basic auth password prompt includes `blank clears existing password; enter password to keep or change`
+- new Basic auth password prompt includes `blank stores empty password; enter 'none' for username-only basic auth`
+- explicit `config api` args skip prompts only for their own inputs; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
 
 ### `config group`
 
