@@ -11,16 +11,15 @@
 
 ## Install
 
-Download a release binary from GitHub Releases and put `gate-agent` on your `PATH`.
-
-Use one archive name:
-
-- Linux: `gate-agent-v${VERSION}-linux-x64.tar.gz`
-- macOS Apple Silicon: `gate-agent-v${VERSION}-macos-arm64.tar.gz`
-
 ```sh
-VERSION=1.2.3
-ARCHIVE="gate-agent-v${VERSION}-linux-x64.tar.gz"
+VERSION="$(awk -F ' *= *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) TARGET=linux-x64 ;;
+  Darwin-arm64) TARGET=macos-arm64 ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+ARCHIVE="gate-agent-v${VERSION}-${TARGET}.tar.gz"
 CHECKSUMS="gate-agent-v${VERSION}-sha256sums.txt"
 
 curl -L -O \
@@ -38,9 +37,81 @@ tar -xzf "${ARCHIVE}"
 install gate-agent /usr/local/bin/gate-agent
 ```
 
-## Quick local flow
+## Quickstart
 
-Assumes `gate-agent` is already installed.
+```sh
+gate-agent config init
+# Save the generated secret/token printed by init.
+
+# Register for a free TheCatAPI key.
+export THE_CAT_API_KEY='<thecatapi key>'
+
+gate-agent config api \
+  --name cats \
+  --base-url https://api.thecatapi.com/v1 \
+  --header "x-api-key=$THE_CAT_API_KEY"
+
+gate-agent config group \
+  --name local-default \
+  --api-access cats=read
+
+gate-agent start
+
+export GATE_AGENT_TOKEN='<token from config init>'
+curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  'http://127.0.0.1:8787/proxy/cats/images/search?limit=10'
+```
+
+## MCP client setup
+
+Use one of these config shapes.
+
+### MCP Remote Config (recommended)
+
+Use this after the server is already running through `gate-agent start`.
+
+```json
+{
+  "gate-agent": {
+    "url": "http://127.0.0.1:8787/mcp",
+    "headers": {
+      "Authorization": "Bearer <your-token>"
+    }
+  }
+}
+```
+
+### MCP Command Config
+
+Less safe: `GATE_AGENT_PASSWORD` must be hardcoded in the client config.
+
+```json
+{
+  "gate-agent": {
+    "command": "gate-agent",
+    "args": ["start"],
+    "env": {
+      "GATE_AGENT_CONFIG": "~/.config/gate-agent/secrets",
+      "GATE_AGENT_PASSWORD": "<your-config-password>"
+    }
+  }
+}
+```
+
+## Development
+
+Use Cargo only for repo-local development:
+
+```sh
+cargo run -- start --config=.secrets --log-level=debug
+cargo test
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+### Example with a test server
+
+Uses the committed sample config and dummy api server.
 
 ```sh
 # setup local files and dummy upstream
@@ -53,7 +124,7 @@ curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
 
 # start gate-agent
-gate-agent start --config .secrets --log-level info
+cargo run -- start --config=.secrets --log-level=info
 
 # call gate-agent with the sample local bearer token
 export GATE_AGENT_TOKEN='default.s3cr3t'
@@ -118,49 +189,6 @@ curl -sS http://127.0.0.1:8787/mcp \
 If you create a fresh config with `gate-agent config init`, the command prints the default client bearer token once. Save it then; the config file only stores the token id, hash, and expiry.
 
 See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the MCP contract, and `docs/pending.md` for intentionally deferred work.
-
-## MCP client setup
-
-Use one of these config shapes.
-
-### HTTP MCP config
-
-```json
-{
-  "gate-agent": {
-    "url": "http://127.0.0.1:8787/mcp",
-    "headers": {
-      "Authorization": "Bearer <your-token>"
-    }
-  }
-}
-```
-
-### Local command config
-
-```json
-{
-  "gate-agent": {
-    "command": "gate-agent",
-    "args": ["start"],
-    "env": {
-      "GATE_AGENT_CONFIG": "~/.config/gate-agent/secrets",
-      "GATE_AGENT_PASSWORD": "<your-config-password>"
-    }
-  }
-}
-```
-
-## Development
-
-Use Cargo only for repo-local development:
-
-```sh
-cargo run -- start --config .secrets --log-level debug
-cargo test
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-```
 
 ## Release process
 
