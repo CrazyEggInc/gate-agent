@@ -147,8 +147,8 @@ Validation expectations:
 Required fields:
 
 - `base_url: String`
-- `headers: { <header-name> = <value>, ... } | omitted`
-- `basic_auth: { username = <value>, password = <value> } | { username = <value> } | omitted`
+- `headers: TOML table or inline table of <header-name> = <value> pairs | omitted`
+- `basic_auth: TOML table or inline table with username and optional password | omitted`
 - `timeout_ms: u64 | omitted`
 - `description: Option<String>`
 - `docs_url: Option<String>`
@@ -157,13 +157,13 @@ Validation expectations:
 
 - slug must be a valid lowercase slug
 - `base_url` must parse as a URL
-- `headers`, when present, must be a TOML inline table of HTTP header name → value pairs
+- `headers`, when present, must be a TOML table or inline table of HTTP header name → value pairs
 - each `headers` key must parse as an HTTP header name
 - reserved proxy-managed header names in `headers` are rejected with an error
 - each `headers` value must be a non-empty string
 - omitted `headers` means no configured injected headers
-- `basic_auth`, when present, must be a TOML inline table with non-empty `username`
-- `basic_auth.password` is optional; when omitted, upstream basic auth uses empty password
+- `basic_auth`, when present, must be a TOML table or inline table with non-empty `username`
+- `basic_auth.password` is optional; when omitted, config stores username-only Basic auth and upstream Basic auth uses an empty password
 - `basic_auth` and `headers.authorization` cannot both be configured on same API
 - optional `description`, when present, must be non-empty
 - optional `docs_url`, when present, must parse as a URL and use `http` or `https`
@@ -274,10 +274,18 @@ When encryption is enabled:
 
 ### `config api`
 
+`config api` owns upstream auth mode for each API entry. Supported modes are:
+
+- no upstream auth
+- static `headers.authorization`
+- `basic_auth = { username = ..., password = ... }`
+- `basic_auth = { username = ... }`
+
 Accepted flags:
 
 - `--name`
 - `--base-url`
+- `--basic-auth`
 - repeated `--header <name=value>`
 - optional `--timeout-ms`
 - `-d` / `--delete`
@@ -290,12 +298,30 @@ Behavior:
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - on interactive update, current values become prompt defaults and blank answers keep those defaults
 - on non-interactive update, omitted flags preserve current values instead of clearing them
+- `--basic-auth` selects upstream Basic auth mode
+- `--basic-auth` never accepts credentials on command line
+- `--basic-auth` still prompts for username and password
 - parses each `--header` value as `<name>=<value>` and stores them in `headers = { ... }`
+- when reading an existing API entry, accepts `headers` and `basic_auth` as regular TOML tables or inline tables; CLI-managed updates write those fields as inline tables
 - repeated `--header` flags are merged into one header map
 - duplicate normalized header names are rejected
 - configured headers override collisions with same request header names at runtime
 - when no headers are supplied, writes no `headers` field and injects no configured upstream headers at runtime
+- in interactive create or when no headers are configured yet, leaving headers blank means no configured upstream headers
+- on interactive update, leaving headers blank keeps current configured headers
 - entering `none` for headers clears configured upstream headers
+- when Basic auth is selected interactively, CLI prompts for username and password
+- username is required
+- on create, blank password stores empty password for upstream Basic auth
+- on create, entering `none` at the password prompt stores username-only Basic auth as `basic_auth = { username = "..." }`
+- on update, blank password clears the stored password key and keeps the username, resulting in `basic_auth = { username = "..." }`
+- on update, entering `none` at the password prompt also clears the stored password key and keeps the username
+- any other password prompt text stores that text as `basic_auth.password`
+- interactive flow prompts for headers before any optional Basic auth setup
+- after headers, CLI offers optional Basic auth setup
+- enabling Basic auth removes only `headers.authorization`; unrelated headers stay configured
+- `basic_auth` and `headers.authorization` cannot coexist on same API
+- switching from header auth to Basic auth removes only `headers.authorization`; unrelated headers stay configured
 - uses `5000` when `--timeout-ms` is omitted during create or when no stored value exists yet
 - preserves encrypted-vs-plaintext format on update
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
@@ -310,7 +336,11 @@ Interactive questionnaire flow:
 
 - `API name:`
 - `Base URL (example: https://projects.internal.example/api):`
-- `Headers (example: authorization=Bearer my-token,x-api-key=secret; use 'none' for no headers):`
+- `Headers (example: x-api-key=secret; leave empty for no headers):`
+- optional Basic auth follow-up after headers
+- `Basic auth username:` and `Basic auth password:` when operator enables Basic auth
+- for existing Basic auth, the password prompt says `blank clears existing password; enter password to keep or change`
+- for new Basic auth, the password prompt says `blank stores empty password; enter 'none' for username-only basic auth`
 
 ### `config client`
 

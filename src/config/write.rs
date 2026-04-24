@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -19,11 +19,31 @@ use super::crypto::{
 
 const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApiBasicAuthUpsert {
+    pub username: String,
+    pub password: Option<String>,
+}
+
+impl Debug for ApiBasicAuthUpsert {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("ApiBasicAuthUpsert");
+        debug.field("username", &self.username);
+
+        if self.password.is_some() {
+            debug.field("password", &"[REDACTED]");
+        }
+
+        debug.finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiUpsert {
     pub name: String,
     pub base_url: String,
     pub headers: BTreeMap<String, String>,
+    pub basic_auth: Option<ApiBasicAuthUpsert>,
     pub timeout_ms: u64,
 }
 
@@ -149,11 +169,20 @@ pub fn upsert_api(
     api_table.remove("auth_header");
     api_table.remove("auth_value");
     api_table.remove("auth_scheme");
+
     if api.headers.is_empty() {
         api_table.remove("headers");
     } else {
         set_string_inline_table(api_table, "headers", &api.headers);
     }
+
+    match &api.basic_auth {
+        Some(basic_auth) => set_basic_auth_inline_table(api_table, basic_auth),
+        None => {
+            api_table.remove("basic_auth");
+        }
+    }
+
     set_integer(api_table, "timeout_ms", api.timeout_ms)?;
 
     write_loaded_config(path, &loaded, &document.to_string(), password)
@@ -479,6 +508,18 @@ fn set_string_inline_table(table: &mut Table, key: &str, values: &BTreeMap<Strin
         inline.insert(name, toml_edit::Value::from(value_str.as_str()));
     }
     table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
+}
+
+fn set_basic_auth_inline_table(table: &mut Table, basic_auth: &ApiBasicAuthUpsert) {
+    let mut inline = toml_edit::InlineTable::new();
+    inline.insert(
+        "username",
+        toml_edit::Value::from(basic_auth.username.as_str()),
+    );
+    if let Some(password) = basic_auth.password.as_deref() {
+        inline.insert("password", toml_edit::Value::from(password));
+    }
+    table["basic_auth"] = Item::Value(toml_edit::Value::InlineTable(inline));
 }
 
 fn apply_bearer_metadata(table: &mut Table, metadata: &BearerTokenMetadata) {
