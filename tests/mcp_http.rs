@@ -440,6 +440,10 @@ async fn mcp_route_lists_only_supported_mcp_tools() -> Result<(), Box<dyn std::e
     assert_eq!(payload["result"]["tools"].as_array().unwrap().len(), 2);
     assert_eq!(payload["result"]["tools"][0]["name"], "call_api");
     assert_eq!(payload["result"]["tools"][1]["name"], "list_apis");
+    let tools_json = serde_json::to_string(&payload["result"]["tools"])?;
+    assert!(!tools_json.contains("docs_url"));
+    assert!(!tools_json.contains("description\":\"Billing API"));
+    assert!(!tools_json.contains("https://docs.internal.example"));
     assert!(payload["result"]["tools"][0]["inputSchema"].is_object());
     assert_eq!(
         payload["result"]["tools"][0]["inputSchema"]["properties"]["path"]["pattern"],
@@ -503,17 +507,21 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
     assert_eq!(
         tool_content_json(&payload),
         serde_json::json!({
+            "call_api_query_guidance": "Pass query parameters in call_api.query, not in call_api.path. Keep path path-only, for example path /users with query {\"active\":true}.",
             "apis": [
                 {
                     "slug": "billing",
                     "access_level": "write",
                     "description": "Billing API",
                     "docs_url": "https://docs.internal.example/billing",
-                    "usage_hint": "Call this API with the call_api tool.",
+                    "usage_hint": "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.",
                     "example_arguments": {
                         "api": "billing",
                         "method": "GET",
-                        "path": "/<endpoint>"
+                        "path": "/<endpoint>",
+                        "query": {
+                            "example": "value"
+                        }
                     }
                 },
                 {
@@ -521,11 +529,14 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
                     "access_level": "write",
                     "description": "Projects API",
                     "docs_url": "https://docs.internal.example/projects",
-                    "usage_hint": "Call this API with the call_api tool.",
+                    "usage_hint": "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.",
                     "example_arguments": {
                         "api": "projects",
                         "method": "GET",
-                        "path": "/<endpoint>"
+                        "path": "/<endpoint>",
+                        "query": {
+                            "example": "value"
+                        }
                     }
                 }
             ]

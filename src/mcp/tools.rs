@@ -23,7 +23,8 @@ use super::protocol::{ToolDefinition, ToolResult};
 
 const JSON_CONTENT_TYPE: &str = "application/json";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
-const LIST_APIS_USAGE_HINT: &str = "Call this API with the call_api tool.";
+const CALL_API_QUERY_GUIDANCE: &str = "Pass query parameters in call_api.query, not in call_api.path. Keep path path-only, for example path /users with query {\"active\":true}.";
+const LIST_APIS_USAGE_HINT: &str = "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.";
 const MCP_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +62,7 @@ enum ResponseHeadersMode {
 
 #[derive(Debug, Serialize)]
 struct ListApisPayload {
+    call_api_query_guidance: &'static str,
     apis: Vec<ApiDescriptor>,
 }
 
@@ -81,6 +83,7 @@ struct CallApiExampleArguments {
     api: String,
     method: &'static str,
     path: &'static str,
+    query: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,11 +132,15 @@ fn list_apis(state: &AppState, authorized: &AuthorizedRequest) -> Result<ToolRes
                 api: slug.clone(),
                 method: "GET",
                 path: "/<endpoint>",
+                query: serde_json::json!({ "example": "value" }),
             },
         });
     }
 
-    let payload = ListApisPayload { apis };
+    let payload = ListApisPayload {
+        call_api_query_guidance: CALL_API_QUERY_GUIDANCE,
+        apis,
+    };
     let content_json = serde_json::to_value(&payload).map_err(|error| {
         AppError::Internal(format!("failed to serialize MCP list_apis result: {error}"))
     })?;
@@ -170,9 +177,14 @@ fn call_api_tool_definition() -> ToolDefinition {
             "properties": {
                 "api": { "type": "string" },
                 "method": { "type": "string" },
-                "path": { "type": "string", "pattern": "^/" },
+                "path": {
+                    "type": "string",
+                    "pattern": "^/",
+                    "description": "Path to call on the selected API. Do not include query strings or fragments; pass query parameters with the query argument."
+                },
                 "query": {
                     "type": "object",
+                    "description": "Optional query parameters to append to the upstream request URL. Use this instead of embedding a query string in path.",
                     "additionalProperties": {
                         "anyOf": [
                             { "type": "string" },

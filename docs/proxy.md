@@ -124,7 +124,8 @@ Behavior:
 
 - outbound requests run under the configured upstream timeout
 - upstream timeouts surface distinctly from other upstream failures
-- redirect behavior must stay explicit rather than silently following upstream redirects
+- upstream redirects are followed by the shared outbound HTTP client
+- redirect loops or excessive redirects surface as upstream request failures
 
 ## Response mapping
 
