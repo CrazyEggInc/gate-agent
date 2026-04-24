@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use reqwest::{Client, redirect};
+use reqwest::Client;
 
 use crate::auth::bearer::validate_token;
 use crate::config::ConfigSource;
@@ -32,7 +32,6 @@ pub struct ClientApiAccessEntry<'a> {
 impl AppState {
     pub fn from_config(config: &AppConfig) -> Result<Self, AppError> {
         let client = Client::builder()
-            .redirect(redirect::Policy::none())
             .build()
             .map_err(|error| AppError::Internal(format!("failed to build http client: {error}")))?;
 

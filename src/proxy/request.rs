@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, HttpBody as _};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{
     HeaderMap, Method, Request, Uri,
@@ -64,7 +64,9 @@ pub fn map_forward_request(
     *outbound_request.headers_mut() = filter_request_headers(&headers);
     overlay_configured_headers(outbound_request.headers_mut(), api_config)?;
     overlay_basic_auth(outbound_request.headers_mut(), api_config)?;
-    *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
+    if body.size_hint().exact() != Some(0) {
+        *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
+    }
 
     Ok(outbound_request)
 }

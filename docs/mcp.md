@@ -97,12 +97,18 @@ Request expectations:
 
 - the client specifies the target API slug
 - the client specifies the outbound HTTP method
-- the client specifies a path that begins with `/`
-- the client may provide query parameters
+- the client specifies a path that begins with `/` and does not include query strings or fragments
+- the client may provide query parameters separately through `query`
 - the client may provide request headers
 - the client may provide a request body
 - the client may provide an explicit content type when needed
 - the client may set `response_headers` to `all` to include all upstream response headers; omitted means only `content-type` and `date` are returned when present
+
+Valid `call_api` argument examples:
+
+```json
+{ "api": "projects", "method": "GET", "path": "/v1/tasks", "query": { "limit": 10 } }
+```
 
 Authorization expectations:
 

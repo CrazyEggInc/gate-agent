@@ -440,15 +440,40 @@ async fn mcp_route_lists_only_supported_mcp_tools() -> Result<(), Box<dyn std::e
     assert_eq!(payload["result"]["tools"].as_array().unwrap().len(), 2);
     assert_eq!(payload["result"]["tools"][0]["name"], "call_api");
     assert_eq!(payload["result"]["tools"][1]["name"], "list_apis");
+    assert!(
+        payload["result"]["tools"][1]["description"]
+            .as_str()
+            .unwrap()
+            .contains("docs_url")
+    );
     assert!(payload["result"]["tools"][0]["inputSchema"].is_object());
     assert_eq!(
         payload["result"]["tools"][0]["inputSchema"]["properties"]["path"]["pattern"],
         "^/"
     );
+    assert!(
+        payload["result"]["tools"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("query")
+    );
+    assert!(
+        payload["result"]["tools"][0]["inputSchema"]["properties"]["path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Do not include query strings")
+    );
+    assert!(
+        payload["result"]["tools"][0]["inputSchema"]["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("upstream request")
+    );
     assert_eq!(
         payload["result"]["tools"][0]["inputSchema"]["properties"]["response_headers"],
         serde_json::json!({
             "type": "string",
+            "description": "Use essential for content-type/date only, or all to include all upstream response headers that can be represented as strings.",
             "enum": ["essential", "all"]
         })
     );
@@ -813,6 +838,50 @@ async fn mcp_route_call_api_rejects_unsupported_request_content_type_without_bod
     assert_eq!(content["message"], "unsupported MCP request content type");
 
     assert!(rx.try_recv().is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_route_call_api_allows_query_argument() -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route(
+            "/api/{*path}",
+            any(
+                |axum::extract::State(sender): axum::extract::State<support::CaptureSender>,
+                 request: Request<Body>| async move {
+                    capture_request(axum::extract::State(sender), request).await;
+                    StatusCode::NO_CONTENT
+                },
+            ),
+        )
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = bearer_token("billing", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/message","query":{"limit":10}}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload = json_body(response).await?;
+
+    assert_eq!(payload["result"]["isError"], false);
+    let captured = rx.await?;
+    assert_eq!(captured.path_and_query, "/api/message?limit=10");
 
     Ok(())
 }

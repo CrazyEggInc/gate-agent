@@ -35,7 +35,7 @@ use support::{
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-async fn assert_upstream_redirect_is_not_followed(
+async fn assert_upstream_redirect_is_followed(
     redirect_status: StatusCode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let redirect_target_hits = Arc::new(AtomicUsize::new(0));
@@ -75,14 +75,10 @@ async fn assert_upstream_redirect_is_not_followed(
         )
         .await?;
 
-    assert_eq!(response.status(), redirect_status);
-    assert_eq!(
-        response.headers().get("location").unwrap(),
-        "/api/redirect-target"
-    );
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await?.to_bytes();
-    assert_eq!(body, bytes::Bytes::from_static(b"redirect response"));
-    assert_eq!(redirect_target_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(body, bytes::Bytes::from_static(b""));
+    assert_eq!(redirect_target_hits.load(Ordering::SeqCst), 1);
 
     Ok(())
 }
@@ -661,10 +657,9 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
 }
 
 #[tokio::test]
-async fn proxy_route_returns_upstream_redirects_without_following_them()
--> Result<(), Box<dyn std::error::Error>> {
-    assert_upstream_redirect_is_not_followed(StatusCode::FOUND).await?;
-    assert_upstream_redirect_is_not_followed(StatusCode::TEMPORARY_REDIRECT).await?;
+async fn proxy_route_follows_upstream_redirects() -> Result<(), Box<dyn std::error::Error>> {
+    assert_upstream_redirect_is_followed(StatusCode::FOUND).await?;
+    assert_upstream_redirect_is_followed(StatusCode::TEMPORARY_REDIRECT).await?;
 
     Ok(())
 }

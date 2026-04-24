@@ -164,15 +164,26 @@ async fn call_api(
 fn call_api_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "call_api",
-        description: "Call an allowed upstream API through gate-agent.",
+        description: "Call an allowed upstream API through gate-agent. Put query parameters in query, not in path.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "api": { "type": "string" },
-                "method": { "type": "string" },
-                "path": { "type": "string", "pattern": "^/" },
+                "api": {
+                    "type": "string",
+                    "description": "Configured API slug to call. Use list_apis to discover allowed values."
+                },
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method to send upstream, such as GET or POST."
+                },
+                "path": {
+                    "type": "string",
+                    "pattern": "^/",
+                    "description": "Upstream path beginning with /. Do not include query strings or fragments; put query parameters in query."
+                },
                 "query": {
                     "type": "object",
+                    "description": "Optional query parameters to add to the upstream request. Values may be strings, numbers, booleans, null, or arrays of those values.",
                     "additionalProperties": {
                         "anyOf": [
                             { "type": "string" },
@@ -193,11 +204,19 @@ fn call_api_tool_definition() -> ToolDefinition {
                         ]
                     }
                 },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "headers": {
+                    "type": "object",
+                    "description": "Optional request headers to forward when allowed by proxy header filtering.",
+                    "additionalProperties": { "type": "string" }
+                },
                 "body": {},
-                "content_type": { "type": "string" },
+                "content_type": {
+                    "type": "string",
+                    "description": "Content-Type for body. JSON and text request bodies are supported."
+                },
                 "response_headers": {
                     "type": "string",
+                    "description": "Use essential for content-type/date only, or all to include all upstream response headers that can be represented as strings.",
                     "enum": ["essential", "all"]
                 }
             },
@@ -210,7 +229,7 @@ fn call_api_tool_definition() -> ToolDefinition {
 fn list_apis_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "list_apis",
-        description: "List APIs allowed for the authenticated client.",
+        description: "List APIs allowed for the authenticated client, including configured API description and docs_url metadata when present.",
         input_schema: json!({
             "type": "object",
             "properties": {},
