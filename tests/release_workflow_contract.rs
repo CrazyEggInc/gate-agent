@@ -18,7 +18,8 @@ fn release_workflow_enforces_tag_and_cargo_version_match() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
 
-    assert!(workflow.contains("^v[0-9]+\\.[0-9]+\\.[0-9]+$"));
+    assert!(workflow.contains("^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"));
+    assert!(workflow.contains("release tag must match vX.Y.Z or vX.Y.Z-prerelease"));
     assert!(workflow.contains("expected_version=\"${release_tag#v}\""));
     assert!(
         workflow.contains(
@@ -38,7 +39,18 @@ fn release_workflow_uploads_versioned_assets_and_stable_latest_aliases() {
     assert!(workflow.contains("gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz"));
     assert!(workflow.contains("gate-agent-latest-linux-x64.tar.gz"));
     assert!(workflow.contains("gate-agent-latest-macos-arm64.tar.gz"));
+    assert!(workflow.contains("if [[ \"${RELEASE_TAG}\" != *-* ]]; then"));
     assert!(workflow.contains("--clobber"));
+}
+
+#[test]
+fn release_workflow_marks_prerelease_tags_as_github_prereleases() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    assert!(workflow.contains("if [[ \"${RELEASE_TAG}\" == *-* ]]; then"));
+    assert!(workflow.contains("prerelease_args=(--prerelease)"));
+    assert!(workflow.contains("\"${prerelease_args[@]}\""));
 }
 
 #[test]

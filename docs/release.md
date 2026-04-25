@@ -14,13 +14,15 @@ Each published release must include these versioned archives:
 - `gate-agent-vX.Y.Z-macos-arm64.tar.gz`
 - `gate-agent-vX.Y.Z-sha256sums.txt`
 
-Each published release must also include stable latest aliases:
+Prerelease versions use the same shape with the prerelease suffix, for example `gate-agent-v1.2.3-beta-linux-x64.tar.gz`.
+
+Each published stable release must also include stable latest aliases:
 
 - `gate-agent-latest-linux-x64.tar.gz`
 - `gate-agent-latest-macos-arm64.tar.gz`
 - `gate-agent-latest-sha256sums.txt`
 
-The stable latest aliases are uploaded to every release. Installers should use GitHub's `releases/latest/download` URLs when they want the newest release, and versioned `releases/download/vX.Y.Z` URLs when they need a pinned version.
+The stable latest aliases are uploaded to stable releases only. Prereleases are marked as GitHub prereleases and publish only versioned assets. Installers should use GitHub's `releases/latest/download` URLs when they want the newest stable release, and versioned `releases/download/vX.Y.Z` or `releases/download/vX.Y.Z-prerelease` URLs when they need a pinned version.
 
 ## Checksum contract
 
@@ -50,20 +52,20 @@ Maintainers prepare a release through GitHub Actions workflow `prepare release`.
 
 Inputs:
 
-- `version`: semantic version without `v`, for example `1.2.3`
+- `version`: semantic version without `v`, for example `1.2.3` or `1.2.3-beta`
 - `ref`: source ref to release, default `master`
 - `dry_run`: when `true`, validate only and do not create a tag
 
 The workflow validates:
 
-1. version matches `X.Y.Z`
+1. version matches `X.Y.Z` or `X.Y.Z-prerelease`
 2. `Cargo.toml` package version equals the requested version
-3. tag `vX.Y.Z` does not already exist
+3. tag `vX.Y.Z` or `vX.Y.Z-prerelease` does not already exist
 4. source passes `cargo fmt --all --check`
 5. source passes `cargo clippy --all-targets --all-features -- -D warnings`
 6. source passes `cargo test --all-targets --all-features`
 
-When `dry_run=false`, the workflow creates annotated tag `vX.Y.Z` at the checked-out commit and pushes it. That tag triggers the release workflow.
+When `dry_run=false`, the workflow creates annotated tag `vX.Y.Z` or `vX.Y.Z-prerelease` at the checked-out commit and pushes it. That tag triggers the release workflow.
 
 ## Release workflow
 
@@ -77,8 +79,8 @@ For a real tag release, the workflow:
 4. builds optimized Linux x64 and macOS ARM64 binaries
 5. creates versioned archives and stable latest alias archives
 6. creates versioned and latest checksum manifests
-7. creates or reuses the GitHub release for the tag
-8. uploads all artifacts with `--clobber` so retries replace partial uploads
+7. creates or reuses the GitHub release for the tag, marking tags with a prerelease suffix as GitHub prereleases
+8. uploads versioned artifacts for all releases and stable latest alias artifacts for stable releases only, using `--clobber` so retries replace partial uploads
 
 ## Failure and recovery
 

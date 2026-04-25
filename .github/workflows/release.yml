@@ -62,7 +62,8 @@ jobs:
             verify_tag=false
           fi
 
-          if [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          release_tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ "${release_tag}" =~ ${release_tag_pattern} ]]; then
             expected_version="${release_tag#v}"
             cargo_version="$(
               awk -F ' *= *' '
@@ -78,7 +79,7 @@ jobs:
               exit 1
             fi
           elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            echo "release tag must match vX.Y.Z: ${release_tag}" >&2
+            echo "release tag must match vX.Y.Z or vX.Y.Z-prerelease: ${release_tag}" >&2
             exit 1
           fi
 
@@ -207,18 +208,30 @@ jobs:
           VERIFY_TAG: ${{ needs.prepare.outputs.verify_tag }}
         run: |
           set -euo pipefail
+          prerelease_args=()
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
+            prerelease_args=(--prerelease)
+          fi
+
           if ! gh release view -R "${GH_REPO}" "${RELEASE_TAG}" >/dev/null 2>&1; then
             if [[ "${VERIFY_TAG}" == "true" ]]; then
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --generate-notes
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}"
             else
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}"
             fi
           fi
-          gh release upload -R "${GH_REPO}" "${RELEASE_TAG}" \
-            "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz" \
-            "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz" \
-            "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt" \
-            "dist/gate-agent-latest-linux-x64.tar.gz" \
-            "dist/gate-agent-latest-macos-arm64.tar.gz" \
-            "dist/gate-agent-latest-sha256sums.txt" \
-            --clobber
+
+          release_assets=(
+            "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz"
+            "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz"
+            "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt"
+          )
+          if [[ "${RELEASE_TAG}" != *-* ]]; then
+            release_assets+=(
+              "dist/gate-agent-latest-linux-x64.tar.gz"
+              "dist/gate-agent-latest-macos-arm64.tar.gz"
+              "dist/gate-agent-latest-sha256sums.txt"
+            )
+          fi
+
+          gh release upload -R "${GH_REPO}" "${RELEASE_TAG}" "${release_assets[@]}" --clobber
