@@ -29,7 +29,8 @@ fn readme_points_maintainers_to_prepare_release_and_release_docs() {
 
     assert!(readme.contains("run GitHub Actions workflow `prepare release` with `dry_run=true`"));
     assert!(
-        readme.contains("re-run `prepare release` with `dry_run=false` to create tag `vX.Y.Z`")
+        readme.contains("re-run `prepare release` with `dry_run=false` to bump Cargo metadata")
     );
+    assert!(readme.contains("create tag `vX.Y.Z` or `vX.Y.Z-prerelease`"));
     assert!(readme.contains("See `docs/release.md`"));
 }
