@@ -22,7 +22,8 @@ fn prepare_release_workflow_checks_version_shape_cargo_version_and_existing_tag(
     let workflow = fs::read_to_string(".github/workflows/prepare-release.yml")
         .expect("prepare release workflow should be readable");
 
-    assert!(workflow.contains("^[0-9]+\\.[0-9]+\\.[0-9]+$"));
+    assert!(workflow.contains("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"));
+    assert!(workflow.contains("release version must match X.Y.Z or X.Y.Z-prerelease"));
     assert!(workflow.contains(
         "Cargo.toml version ${cargo_version} does not match release version ${RELEASE_VERSION}"
     ));
