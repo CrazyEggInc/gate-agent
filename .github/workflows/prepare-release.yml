@@ -13,13 +13,14 @@ on:
         default: master
         type: string
       dry_run:
-        description: Validate only. Do not create or push the release tag.
+        description: Validate only. Do not push the version bump or release tag.
         required: false
         default: true
         type: boolean
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   prepare:
@@ -37,6 +38,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
 
@@ -53,24 +57,29 @@ jobs:
             exit 1
           fi
 
+          release_tag="v${RELEASE_VERSION}"
+          if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
+            echo "release tag already exists: ${release_tag}" >&2
+            exit 1
+          fi
+
+      - name: Bump package version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          cargo metadata --format-version 1 --no-deps | jq -e '.packages[] | select(.name == "gate-agent")' >/dev/null
+          cargo set-version "${RELEASE_VERSION}"
+          cargo metadata --format-version 1 >/dev/null
           cargo_version="$(
-            awk -F ' *= *' '
-              $1 == "version" {
-                gsub(/"/, "", $2)
-                print $2
-                exit
-              }
-            ' Cargo.toml
+            cargo metadata --format-version 1 --no-deps \
+              | jq -r '.packages[] | select(.name == "gate-agent") | .version'
           )"
 
           if [[ "${cargo_version}" != "${RELEASE_VERSION}" ]]; then
             echo "Cargo.toml version ${cargo_version} does not match release version ${RELEASE_VERSION}" >&2
-            exit 1
-          fi
-
-          release_tag="v${RELEASE_VERSION}"
-          if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
-            echo "release tag already exists: ${release_tag}" >&2
             exit 1
           fi
 
@@ -83,16 +92,41 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
-      - name: Create release tag
+      - name: Commit version bump and create release tag
         if: ${{ !inputs.dry_run }}
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
+
+          release_branch="${RELEASE_REF#refs/heads/}"
+
+          if ! git ls-remote --exit-code --heads origin "${release_branch}" >/dev/null; then
+            echo "non-dry release ref must be a branch that can receive the version bump: ${RELEASE_REF}" >&2
+            exit 1
+          fi
+
           release_tag="v${RELEASE_VERSION}"
           git \
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            add Cargo.toml Cargo.lock
+          if ! git diff --cached --quiet; then
+            git \
+              -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(release): prepare ${release_tag}"
+          fi
+          git \
+            -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             tag -a "${release_tag}" -m "Release ${release_tag}"
-          git push origin "refs/tags/${release_tag}"
+          git push --atomic origin "HEAD:refs/heads/${release_branch}" "refs/tags/${release_tag}"
+          gh workflow run release.yml \
+            --ref "${release_branch}" \
+            -f ref="${release_tag}" \
+            -f version="${release_tag}" \
+            -f publish=true

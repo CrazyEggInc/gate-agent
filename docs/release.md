@@ -54,22 +54,22 @@ Inputs:
 
 - `version`: semantic version without `v`, for example `1.2.3` or `1.2.3-beta`
 - `ref`: source ref to release, default `master`
-- `dry_run`: when `true`, validate only and do not create a tag
+- `dry_run`: when `true`, validate only and do not push the version bump or create a tag
 
 The workflow validates:
 
 1. version matches `X.Y.Z` or `X.Y.Z-prerelease`
-2. `Cargo.toml` package version equals the requested version
-3. tag `vX.Y.Z` or `vX.Y.Z-prerelease` does not already exist
+2. tag `vX.Y.Z` or `vX.Y.Z-prerelease` does not already exist
+3. `Cargo.toml` can be bumped with `cargo set-version` and `Cargo.lock` can be refreshed with `cargo metadata`
 4. source passes `cargo fmt --all --check`
 5. source passes `cargo clippy --all-targets --all-features -- -D warnings`
 6. source passes `cargo test --all-targets --all-features`
 
-When `dry_run=false`, the workflow creates annotated tag `vX.Y.Z` or `vX.Y.Z-prerelease` at the checked-out commit and pushes it. That tag triggers the release workflow.
+When `dry_run=false`, the workflow commits the `Cargo.toml` and `Cargo.lock` version bump to the selected branch, creates annotated tag `vX.Y.Z` or `vX.Y.Z-prerelease` at that commit, pushes both, and dispatches the release workflow for the tag. Non-dry runs require `ref` to be a branch that can receive the version bump.
 
 ## Release workflow
 
-The release workflow runs on pushed tags matching `v*.*.*` and optionally through manual dispatch for dry-run builds.
+The release workflow runs on pushed tags matching `v*.*.*` and through manual dispatch. The prepare release workflow uses manual dispatch after it pushes a tag, because GitHub does not start push-triggered workflows from tags pushed with the workflow `GITHUB_TOKEN`.
 
 For a real tag release, the workflow:
 

@@ -208,11 +208,9 @@ See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the M
 
 ## Release process
 
-1. update `version = "..."` in `Cargo.toml`
-2. merge that change to `master`
-3. run GitHub Actions workflow `prepare release` with `dry_run=true`
-4. re-run `prepare release` with `dry_run=false` to create tag `vX.Y.Z` or `vX.Y.Z-prerelease`
-5. let the tag-triggered `release` workflow validate, build, checksum, and publish assets
-6. verify latest and pinned install commands against the published release
+1. run GitHub Actions workflow `prepare release` with `dry_run=true`
+2. re-run `prepare release` with `dry_run=false` to bump Cargo metadata and create tag `vX.Y.Z` or `vX.Y.Z-prerelease`
+3. let the dispatched `release` workflow validate, build, checksum, and publish assets
+4. verify latest and pinned install commands against the published release
 
 See `docs/release.md` for release assets, checksum behavior, retries, and recovery.
