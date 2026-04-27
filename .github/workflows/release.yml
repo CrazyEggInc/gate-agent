@@ -209,15 +209,17 @@ jobs:
         run: |
           set -euo pipefail
           prerelease_args=()
+          latest_args=(--latest)
           if [[ "${RELEASE_TAG}" == *-* ]]; then
             prerelease_args=(--prerelease)
+            latest_args=(--latest=false)
           fi
 
           if ! gh release view -R "${GH_REPO}" "${RELEASE_TAG}" >/dev/null 2>&1; then
             if [[ "${VERIFY_TAG}" == "true" ]]; then
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}"
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --verify-tag --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}" "${latest_args[@]}"
             else
-              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}"
+              gh release create -R "${GH_REPO}" "${RELEASE_TAG}" --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes "${prerelease_args[@]}" "${latest_args[@]}"
             fi
           fi
 

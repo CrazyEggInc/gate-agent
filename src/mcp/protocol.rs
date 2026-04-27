@@ -130,7 +130,7 @@ impl ToolResult {
         let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
         Self {
             content: vec![ToolTextContent::text(text)],
-            structured_content: json!({}),
+            structured_content: content_json,
             is_error: false,
         }
     }
@@ -147,7 +147,7 @@ impl ToolResult {
         let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
         Self {
             content: vec![ToolTextContent::text(text)],
-            structured_content: json!({}),
+            structured_content: content_json,
             is_error: true,
         }
     }

@@ -31,6 +31,13 @@ fn tool_content_json(payload: &serde_json::Value) -> serde_json::Value {
     .expect("tool content should be valid JSON")
 }
 
+fn assert_structured_content_matches_content(payload: &serde_json::Value) {
+    assert_eq!(
+        payload["result"]["structuredContent"],
+        tool_content_json(payload)
+    );
+}
+
 #[tokio::test]
 async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -500,10 +507,7 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
     assert_eq!(payload["jsonrpc"], "2.0");
     assert_eq!(payload["id"], 2);
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     assert_eq!(
         tool_content_json(&payload),
         serde_json::json!({
@@ -594,10 +598,7 @@ async fn mcp_route_call_api_uses_shared_forwarding_logic_for_json_requests()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["status"], 201);
     assert_eq!(content["content_type"], "application/json");
@@ -672,10 +673,7 @@ async fn mcp_route_call_api_can_return_all_response_headers()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(
         content["headers"]["content-type"],
@@ -725,10 +723,7 @@ async fn mcp_route_call_api_returns_text_responses() -> Result<(), Box<dyn std::
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], false);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["status"], 200);
     assert_eq!(content["body_text"], "hello from upstream");
@@ -766,10 +761,7 @@ async fn mcp_route_call_api_rejects_unsupported_request_content_type()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], true);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["code"], "bad_request");
     assert_eq!(content["message"], "unsupported MCP request content type");
@@ -815,10 +807,7 @@ async fn mcp_route_call_api_rejects_unsupported_request_content_type_without_bod
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], true);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["code"], "bad_request");
     assert_eq!(content["message"], "unsupported MCP request content type");
@@ -858,10 +847,7 @@ async fn mcp_route_call_api_rejects_path_with_embedded_query_or_fragment()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], true);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["code"], "bad_request");
     assert_eq!(
@@ -909,10 +895,7 @@ async fn mcp_route_call_api_rejects_unsupported_binary_upstream_response()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], true);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["code"], "response_mapping");
     assert_eq!(
@@ -964,10 +947,7 @@ async fn mcp_route_call_api_rejects_oversized_upstream_response_body()
     let payload = json_body(response).await?;
 
     assert_eq!(payload["result"]["isError"], true);
-    assert_eq!(
-        payload["result"]["structuredContent"],
-        serde_json::json!({})
-    );
+    assert_structured_content_matches_content(&payload);
     let content = tool_content_json(&payload);
     assert_eq!(content["code"], "response_mapping");
     assert_eq!(
