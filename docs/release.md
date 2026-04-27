@@ -22,7 +22,7 @@ Each published stable release must also include stable latest aliases:
 - `gate-agent-latest-macos-arm64.tar.gz`
 - `gate-agent-latest-sha256sums.txt`
 
-The stable latest aliases are uploaded to stable releases only. Prereleases are marked as GitHub prereleases and publish only versioned assets. Installers should use GitHub's `releases/latest/download` URLs when they want the newest stable release, and versioned `releases/download/vX.Y.Z` or `releases/download/vX.Y.Z-prerelease` URLs when they need a pinned version.
+The stable latest aliases are uploaded to stable releases only. Prereleases are marked as GitHub prereleases, do not update GitHub's latest release pointer, and publish only versioned assets. Stable releases explicitly update GitHub's latest release pointer. Installers should use GitHub's `releases/latest/download` URLs when they want the newest stable release, and versioned `releases/download/vX.Y.Z` or `releases/download/vX.Y.Z-prerelease` URLs when they need a pinned version.
 
 ## Checksum contract
 
@@ -79,7 +79,7 @@ For a real tag release, the workflow:
 4. builds optimized Linux x64 and macOS ARM64 binaries
 5. creates versioned archives and stable latest alias archives
 6. creates versioned and latest checksum manifests
-7. creates or reuses the GitHub release for the tag, marking tags with a prerelease suffix as GitHub prereleases
+7. creates or reuses the GitHub release for the tag, marking tags with a prerelease suffix as GitHub prereleases without updating the latest release pointer
 8. uploads versioned artifacts for all releases and stable latest alias artifacts for stable releases only, using `--clobber` so retries replace partial uploads
 
 ## Failure and recovery

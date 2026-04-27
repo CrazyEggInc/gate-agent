@@ -54,6 +54,16 @@ fn release_workflow_marks_prerelease_tags_as_github_prereleases() {
 }
 
 #[test]
+fn release_workflow_keeps_prereleases_out_of_latest_pointer() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    assert!(workflow.contains("latest_args=(--latest)"));
+    assert!(workflow.contains("latest_args=(--latest=false)"));
+    assert!(workflow.contains("\"${latest_args[@]}\""));
+}
+
+#[test]
 fn release_workflow_generates_separate_checksum_manifests() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
