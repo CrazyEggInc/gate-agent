@@ -93,7 +93,7 @@ fn client_args(config: PathBuf, name: &str) -> ConfigClientArgs {
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: Some(name.to_owned()),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=read,reports=write".to_owned()],
         command: None,
@@ -135,7 +135,7 @@ fn rotate_secret_parent_args_with_forbidden_flags(
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete,
         name: Some("mobile-app".to_owned()),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: group.map(str::to_owned),
         api_access: api_access.iter().map(|value| (*value).to_owned()).collect(),
         command: Some(ConfigClientSubcommand::RotateSecret(
@@ -813,7 +813,13 @@ fn config_command_dispatch_interactive_api_prompts_headers_before_basic_auth()
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["projects", "https://projects.internal.example/api", "", "n"],
+        &[
+            "",
+            "projects",
+            "https://projects.internal.example/api",
+            "",
+            "n",
+        ],
         &[
             "config",
             "api",
@@ -1455,7 +1461,7 @@ fn config_command_dispatch_runs_client_subcommand() -> Result<(), Box<dyn std::e
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some("2030-01-02T03:04:05Z")
+        Some("2030-01-02T00:00:00Z")
     );
     assert_eq!(
         client
@@ -1528,7 +1534,7 @@ fn config_command_dispatch_runs_client_rotate_secret_subcommand()
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some("2030-01-02T03:04:05Z")
+        Some("2030-01-02T00:00:00Z")
     );
 
     Ok(())
@@ -1545,7 +1551,7 @@ fn config_command_dispatch_client_rotate_secret_inherits_parent_flags()
     std::fs::create_dir_all(&workspace)?;
     let _env = EnvGuard::enter(&workspace)?;
     let config_path = workspace.join("nested/secrets.toml");
-    let rotated_expiry = "2031-02-03T04:05:06Z";
+    let rotated_expiry = "2031-02-03";
 
     unsafe {
         std::env::set_var("HOME", temp_dir.path().join("home"));
@@ -1604,7 +1610,7 @@ fn config_command_dispatch_client_rotate_secret_inherits_parent_flags()
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some(rotated_expiry)
+        Some("2031-02-03T00:00:00Z")
     );
     assert!(
         written
@@ -1785,7 +1791,7 @@ fn config_command_dispatch_client_rotate_secret_inherits_parent_password_for_enc
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
             name: Some("mobile-app".to_owned()),
-            bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+            bearer_token_expires_at: Some("2031-02-03".to_owned()),
             group: None,
             api_access: vec![],
             command: Some(ConfigClientSubcommand::RotateSecret(
@@ -1814,7 +1820,7 @@ fn config_command_dispatch_client_rotate_secret_inherits_parent_password_for_enc
             .and_then(|value| value.get("mobile-app"))
             .and_then(|value| value.get("bearer_token_expires_at"))
             .and_then(Value::as_str),
-        Some("2031-02-03T04:05:06Z")
+        Some("2031-02-03T00:00:00Z")
     );
 
     Ok(())
@@ -1845,7 +1851,7 @@ fn config_command_dispatch_client_rotate_secret_prefers_nested_password_over_par
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
             name: Some("wrong-client".to_owned()),
-            bearer_token_expires_at: Some("2039-12-31T23:59:59Z".to_owned()),
+            bearer_token_expires_at: Some("2039-12-31".to_owned()),
             group: None,
             api_access: vec![],
             command: Some(ConfigClientSubcommand::RotateSecret(
@@ -1855,7 +1861,7 @@ fn config_command_dispatch_client_rotate_secret_prefers_nested_password_over_par
                     log_level: DEFAULT_LOG_LEVEL.to_owned(),
                     log_level_explicitly_set: false,
                     name: "mobile-app".to_owned(),
-                    bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+                    bearer_token_expires_at: Some("2031-02-03".to_owned()),
                 },
             )),
         }),
@@ -1874,7 +1880,7 @@ fn config_command_dispatch_client_rotate_secret_prefers_nested_password_over_par
             .and_then(|value| value.get("mobile-app"))
             .and_then(|value| value.get("bearer_token_expires_at"))
             .and_then(Value::as_str),
-        Some("2031-02-03T04:05:06Z")
+        Some("2031-02-03T00:00:00Z")
     );
     assert!(
         written
@@ -1948,7 +1954,7 @@ fn config_command_dispatch_resolves_client_rotate_secret_name_interactively()
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some("2030-01-02T03:04:05Z")
+        Some("2030-01-02T00:00:00Z")
     );
     assert_eq!(
         client
@@ -2052,7 +2058,7 @@ fn cli_rejects_bearer_token_flag_for_config_client() {
         "--bearer-token",
         "partner-secret",
         "--bearer-token-expires-at",
-        "2030-01-02T03:04:05Z",
+        "2030-01-02",
         "--api-access",
         "projects=read",
     ]);
@@ -2210,7 +2216,7 @@ fn config_command_dispatch_client_prints_generated_bearer_token_once()
             "--name",
             "mobile-app",
             "--bearer-token-expires-at",
-            "2030-01-02T03:04:05Z",
+            "2030-01-02",
             "--api-access",
             "projects=read,reports=write",
         ])
@@ -2248,7 +2254,7 @@ fn config_command_dispatch_client_prints_generated_bearer_token_once()
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some("2030-01-02T03:04:05Z")
+        Some("2030-01-02T00:00:00Z")
     );
 
     Ok(())
@@ -2323,7 +2329,7 @@ fn config_command_dispatch_client_rotate_secret_prints_generated_bearer_token_on
         client
             .get("bearer_token_expires_at")
             .and_then(Value::as_str),
-        Some("2030-01-02T03:04:05Z")
+        Some("2030-01-02T00:00:00Z")
     );
 
     Ok(())

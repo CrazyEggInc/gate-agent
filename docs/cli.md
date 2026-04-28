@@ -209,7 +209,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts show existing API names when present and make clear that choosing an existing name updates that record
+- interactive name prompts list existing API names as `<name> (edit)` for up/down selection and include an `add new api` entry; selecting an existing API updates it, selecting `add new api` asks for the new name
+- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for them in a single-line format with minimal wording
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
@@ -252,7 +253,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts show existing group names when present and make clear that choosing an existing name updates that record
+- interactive name prompts list existing group names as `<name> (edit)` for up/down selection and include an `add new group` entry; selecting an existing group updates it, selecting `add new group` asks for the new name
+- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
@@ -279,17 +281,19 @@ Rules and behavior:
 - `--group` and `--api-access` are mutually exclusive
 - `--api-access` accepts `read` and `write`
 - repeated `--api-access` flags are merged
-- if `--bearer-token-expires-at` is supplied, it must use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ`
+- if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
 - one flag may contain comma-separated pairs such as `--api-access projects=read,billing=write`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
-- interactive name prompts show existing client names when present and make clear that choosing an existing name updates that record
+- interactive name prompts list existing client names as `<name> (edit)` for up/down selection and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name
+- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - when required fields are omitted in an interactive create flow, the command prompts for them
 - in the interactive client flow, the CLI asks for `Access mode` before prompting for `Group name`
-- when groups already exist, the `Group name` prompt shows those slugs as available options so the operator can pick one or type a new slug directly
+- when groups already exist, the `Group name` prompt lists those slugs as `<name> (edit)` for up/down selection and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - `Group name` is required when `Access mode` is `group`; a blank response fails instead of falling back to inline `api_access`
 - prompts stay single-line and avoid extra descriptive text when the question itself is already clear
+- when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future and expects `YYYY-MM-DD`
 - if the client does not already exist, the command generates a bearer token and prints it once for operator capture
 - if the client already exists, existing token metadata is preserved unless a future rotation workflow changes it
 - if the config file does not exist yet and `--password` is supplied, the bootstrap config is created encrypted
@@ -320,8 +324,8 @@ Rules and behavior:
 - rotates credentials for one existing client only
 - fails if config file does not already exist
 - fails if target client does not already exist
-- when required fields are omitted in an interactive session, the command prompts for the client name and shows existing client names when present
-- if `--bearer-token-expires-at` is supplied, it must use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ`
+- when required fields are omitted in an interactive session, the command prompts for the client name with an up/down selector of existing clients
+- if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
 - if `--bearer-token-expires-at` is omitted, existing expiry is preserved exactly and used as the interactive default when rotating an existing client
 - rotation generates a brand-new bearer token and replaces persisted `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - existing `group` or inline `api_access` stays unchanged

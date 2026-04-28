@@ -488,7 +488,7 @@ fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: Some("partner-readonly".to_owned()),
         api_access: vec![],
     })?;
@@ -503,7 +503,7 @@ fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
             "--name",
             "partner",
             "--bearer-token-expires-at",
-            "2030-01-02T03:04:05Z",
+            "2030-01-02",
         ],
         "\n\n",
     )?;
@@ -516,7 +516,11 @@ fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
         "{stderr}"
     );
     assert!(
-        stderr.contains("Group name — existing groups: local-default, partner-readonly (default: partner-readonly):"),
+        !stderr.contains("Group name:")
+            && stderr.contains("local-default")
+            && stderr.contains("partner-readonly")
+            && stderr.contains("(edit)")
+            && stderr.contains("add new group"),
         "{stderr}"
     );
 
@@ -587,7 +591,7 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
             "--name",
             "partner",
             "--bearer-token-expires-at",
-            "2031-02-03T04:05:06Z",
+            "2031-02-03",
             "--api-access",
             "projects=write",
         ])
@@ -605,7 +609,7 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
     assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
     assert_eq!(
         string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
-        "2031-02-03T04:05:06Z"
+        "2031-02-03T00:00:00Z"
     );
     assert_eq!(
         string_at(&config, &["clients", "partner", "api_access", "projects"]),
@@ -628,7 +632,7 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })?;
@@ -645,7 +649,7 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
     })?;
 
     assert_eq!(outcome.path, config_path);
-    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T04:05:06Z");
+    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T00:00:00Z");
     assert!(split_full_token(&outcome.generated_bearer_token).is_some());
 
     let after = load_toml(&config_path)?;
@@ -661,7 +665,7 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
     );
     assert_eq!(
         string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
-        "2031-02-03T04:05:06Z"
+        "2031-02-03T00:00:00Z"
     );
     assert_eq!(
         string_at(&after, &["clients", "partner", "api_access", "projects"]),
@@ -692,7 +696,7 @@ fn config_rotate_client_secret_updates_expiry_when_override_is_supplied()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: Some("partner-readonly".to_owned()),
         api_access: vec![],
     })?;
@@ -702,17 +706,17 @@ fn config_rotate_client_secret_updates_expiry_when_override_is_supplied()
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2034-05-06T07:08:09Z".to_owned()),
+        bearer_token_expires_at: Some("2034-05-06".to_owned()),
     })?;
 
     assert_eq!(outcome.path, config_path);
-    assert_eq!(outcome.bearer_token_expires_at, "2034-05-06T07:08:09Z");
+    assert_eq!(outcome.bearer_token_expires_at, "2034-05-06T00:00:00Z");
 
     let after = load_toml(&config_path)?;
     assert_client_metadata_matches(&after, "partner", &outcome.generated_bearer_token);
     assert_eq!(
         string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
-        "2034-05-06T07:08:09Z"
+        "2034-05-06T00:00:00Z"
     );
     assert_eq!(
         string_at(&after, &["clients", "partner", "group"]),
@@ -740,7 +744,7 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         &ClientUpsert {
             name: "partner".to_owned(),
             bearer_token: Some(existing_token.to_owned()),
-            bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+            bearer_token_expires_at: Some("2030-01-02".to_owned()),
             access: ClientAccessUpsert::ApiAccess(
                 [("projects".to_owned(), AccessLevel::Read)]
                     .into_iter()
@@ -756,7 +760,7 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=write".to_owned()],
     })?;
@@ -765,7 +769,7 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
     assert_client_metadata_matches(&config, "partner", existing_token);
     assert_eq!(
         string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
-        "2031-02-03T04:05:06Z"
+        "2031-02-03T00:00:00Z"
     );
     assert_eq!(
         string_at(&config, &["clients", "partner", "api_access", "projects"]),
@@ -793,7 +797,7 @@ fn encrypted_config_rotate_client_secret_preserves_password_workflow()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })?;
@@ -816,7 +820,7 @@ fn encrypted_config_rotate_client_secret_preserves_password_workflow()
     })?;
     let config = shown.parse::<Value>()?;
 
-    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T04:05:06Z");
+    assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T00:00:00Z");
     assert_client_metadata_matches(&config, "partner", &outcome.generated_bearer_token);
     assert_no_plain_bearer_token_persisted(&config, &outcome.generated_bearer_token);
     assert_eq!(
@@ -1191,7 +1195,7 @@ fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec![
             "projects=read,billing=write".to_owned(),
@@ -1243,7 +1247,7 @@ fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned(), "projects=write".to_owned()],
     })
@@ -1283,7 +1287,7 @@ fn config_add_client_rejects_invalid_api_access_level_with_clear_message()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=admin".to_owned()],
     })
@@ -1323,7 +1327,7 @@ fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec![",projects=read".to_owned()],
     })
@@ -1363,7 +1367,7 @@ fn config_add_client_rejects_trailing_comma_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=read,".to_owned()],
     })
@@ -1403,7 +1407,7 @@ fn config_add_client_rejects_doubled_comma_in_api_access_arg()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=read,,billing=write".to_owned()],
     })
@@ -1443,7 +1447,7 @@ fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec!["projects=read,billing".to_owned()],
     })
@@ -1493,7 +1497,7 @@ fn config_add_client_writes_group_reference_without_inline_api_access()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: Some("partner-readonly".to_owned()),
         api_access: vec![],
     })?;
@@ -1554,7 +1558,7 @@ fn config_add_client_uses_prompted_name_and_existing_group()
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
                 name: None,
-                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                bearer_token_expires_at: Some("2030-01-02".to_owned()),
                 group: None,
                 api_access: vec![],
                 command: None,
@@ -1570,6 +1574,77 @@ fn config_add_client_uses_prompted_name_and_existing_group()
         Some("partner-readonly")
     );
     assert!(client.get("api_access").is_none());
+    assert_client_has_bearer_metadata(&config, "partner");
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_creates_prompted_new_group_with_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    set_test_prompt_inputs(&[
+        "partner",
+        "group",
+        "add new group",
+        "partner-readonly",
+        "projects=read,reports=write",
+    ])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Client(gate_agent::cli::ConfigClientArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: None,
+                bearer_token_expires_at: Some("2030-01-02".to_owned()),
+                group: None,
+                api_access: vec![],
+                command: None,
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+    let client = table_at(&config, &["clients", "partner"]);
+
+    assert_eq!(
+        client.get("group").and_then(Value::as_str),
+        Some("partner-readonly")
+    );
+    assert!(client.get("api_access").is_none());
+    assert_eq!(
+        string_at(
+            &config,
+            &["groups", "partner-readonly", "api_access", "projects"]
+        ),
+        "read"
+    );
+    assert_eq!(
+        string_at(
+            &config,
+            &["groups", "partner-readonly", "api_access", "reports"]
+        ),
+        "write"
+    );
     assert_client_has_bearer_metadata(&config, "partner");
 
     Ok(())
@@ -1605,7 +1680,7 @@ fn config_add_client_falls_back_to_prompted_inline_api_access_when_group_is_blan
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
                 name: None,
-                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                bearer_token_expires_at: Some("2030-01-02".to_owned()),
                 group: None,
                 api_access: vec![],
                 command: None,
@@ -3459,7 +3534,7 @@ fn config_add_client_invalid_mutation_does_not_create_missing_config()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "partner".to_owned(),
         delete: false,
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec![],
     })
@@ -3488,7 +3563,7 @@ fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2030-02-31T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2030-02-31".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })
@@ -3597,7 +3672,7 @@ fn encrypted_config_add_client_preserves_password_workflow()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })?;
@@ -3643,7 +3718,7 @@ fn encrypted_config_add_client_removes_stale_keyring_password_after_failed_decry
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })
@@ -3687,7 +3762,7 @@ fn encrypted_config_add_client_backfills_keyring_after_flag_password_decrypt()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner".to_owned(),
-        bearer_token_expires_at: Some("2031-02-03T04:05:06Z".to_owned()),
+        bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
         api_access: vec!["projects=read".to_owned()],
     })?;
@@ -3960,7 +4035,7 @@ fn encrypted_config_add_client_group_prompt_backfills_keyring_after_flag_passwor
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
                 name: None,
-                bearer_token_expires_at: Some("2030-01-02T03:04:05Z".to_owned()),
+                bearer_token_expires_at: Some("2030-01-02".to_owned()),
                 group: None,
                 api_access: vec![],
                 command: None,
@@ -4285,7 +4360,7 @@ fn config_add_client_bootstraps_encrypted_config_when_password_is_supplied()
             "--name",
             "partner",
             "--bearer-token-expires-at",
-            "2031-02-03T04:05:06Z",
+            "2031-02-03",
             "--api-access",
             "projects=read",
         ])

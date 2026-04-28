@@ -321,11 +321,13 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
 fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs, CommandError> {
     let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let detail = config::format_existing_name_hint(config::ResourceKind::Api, &names, args.delete);
-    let name = resolve_name(
+    let name = resolve_resource_name(
         args.name,
+        config::ResourceKind::Api,
+        &names,
+        args.delete,
+        None,
         "API name",
-        detail.as_deref(),
         "config api requires --name in non-interactive sessions",
     )?;
 
@@ -563,12 +565,13 @@ fn resolve_config_group_args(
 ) -> Result<config::ConfigGroupArgs, CommandError> {
     let names = config::list_group_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let detail =
-        config::format_existing_name_hint(config::ResourceKind::Group, &names, args.delete);
-    let name = resolve_name(
+    let name = resolve_resource_name(
         args.name,
+        config::ResourceKind::Group,
+        &names,
+        args.delete,
+        None,
         "Group name",
-        detail.as_deref(),
         "config group requires --name in non-interactive sessions",
     )?;
 
@@ -615,12 +618,13 @@ fn resolve_config_client_args(
 ) -> Result<config::ConfigClientArgs, CommandError> {
     let names = config::list_client_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let detail =
-        config::format_existing_name_hint(config::ResourceKind::Client, &names, args.delete);
-    let name = resolve_name(
+    let name = resolve_resource_name(
         args.name,
+        config::ResourceKind::Client,
+        &names,
+        args.delete,
+        None,
         "Client name",
-        detail.as_deref(),
         "config client requires --name in non-interactive sessions",
     )?;
 
@@ -645,11 +649,18 @@ fn resolve_config_client_args(
     let bearer_token_expires_at = if args.bearer_token_expires_at.is_some() {
         args.bearer_token_expires_at
     } else if interactive_questionnaire_available() {
+        let default_expiration = match existing.as_ref() {
+            Some(state) => state
+                .bearer_token_expires_at
+                .split_once('T')
+                .map(|(date, _)| date.to_owned())
+                .unwrap_or_else(|| state.bearer_token_expires_at.clone()),
+            None => config::default_bearer_token_expiration_date()
+                .map_err(|error| CommandError::new(error.to_string()))?,
+        };
         Some(prompt_required(
-            "Bearer token expires at",
-            existing
-                .as_ref()
-                .map(|state| state.bearer_token_expires_at.as_str()),
+            "Bearer token expiration",
+            Some(&default_expiration),
             None,
             "config client requires --bearer-token-expires-at in non-interactive sessions",
         )?)
@@ -700,24 +711,32 @@ fn resolve_config_client_args(
                 let groups =
                     config::list_group_slugs(args.config.as_deref(), args.password.clone())
                         .map_err(|error| CommandError::new(error.to_string()))?;
-                let detail = if groups.is_empty() {
-                    None
-                } else {
-                    Some(format!("existing groups: {}", groups.join(", ")))
-                };
-                let group = config::prompt_required_text(
-                    &config::prompt_message(
-                        "Group name",
-                        detail.as_deref(),
-                        existing.as_ref().and_then(|state| state.group.as_deref()),
-                        None,
-                        None,
-                        None,
-                    ),
+                let group = resolve_resource_name(
+                    None,
+                    config::ResourceKind::Group,
+                    &groups,
+                    false,
                     existing.as_ref().and_then(|state| state.group.as_deref()),
+                    "Group name",
                     "config client requires --group or --api-access in non-interactive sessions",
-                )
-                .map_err(|error| CommandError::new(error.to_string()))?;
+                )?;
+                if !groups.iter().any(|existing| existing == &group) {
+                    let api_access = prompt_required(
+                        "Inline api_access entry",
+                        None,
+                        Some("projects=read,reports=write"),
+                        "config group requires --api-access in non-interactive sessions",
+                    )?;
+                    config::apply_group(config::ConfigGroupArgs {
+                        config: args.config.clone(),
+                        password: args.password.clone(),
+                        log_level: args.log_level.clone(),
+                        delete: false,
+                        name: group.clone(),
+                        api_access: vec![api_access],
+                    })
+                    .map_err(|error| CommandError::new(error.to_string()))?;
+                }
                 (Some(group), vec![])
             }
             "inline" => (
@@ -768,11 +787,13 @@ fn resolve_rotate_secret_args(
 ) -> Result<config::ConfigRotateSecretArgs, CommandError> {
     let names = config::list_client_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let detail = config::format_existing_name_hint(config::ResourceKind::Client, &names, false);
-    let name = resolve_name(
+    let name = resolve_resource_name(
         Some(args.name),
+        config::ResourceKind::Client,
+        &names,
+        true,
+        None,
         "Client name",
-        detail.as_deref(),
         "config client rotate-secret requires --name in non-interactive sessions",
     )?;
 
@@ -782,11 +803,19 @@ fn resolve_rotate_secret_args(
     let bearer_token_expires_at = if args.bearer_token_expires_at.is_some() {
         args.bearer_token_expires_at
     } else if interactive_questionnaire_available() {
+        let default_expiration = existing
+            .as_ref()
+            .map(|state| {
+                state
+                    .bearer_token_expires_at
+                    .split_once('T')
+                    .map(|(date, _)| date.to_owned())
+                    .unwrap_or_else(|| state.bearer_token_expires_at.clone())
+            })
+            .unwrap_or_default();
         Some(prompt_required(
-            "Bearer token expires at",
-            existing
-                .as_ref()
-                .map(|state| state.bearer_token_expires_at.as_str()),
+            "Bearer token expiration",
+            Some(&default_expiration),
             None,
             "config client rotate-secret requires --bearer-token-expires-at in non-interactive sessions",
         )?)
@@ -803,22 +832,61 @@ fn resolve_rotate_secret_args(
     })
 }
 
-fn resolve_name(
+fn resolve_resource_name(
     value: Option<String>,
+    resource_kind: config::ResourceKind,
+    names: &[String],
+    existing_only: bool,
+    default: Option<&str>,
     label: &str,
-    detail: Option<&str>,
     non_interactive_message: &str,
 ) -> Result<String, CommandError> {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         return Ok(value);
     }
 
-    config::prompt_required_text(
-        &config::prompt_message(label, detail, None, None, None, None),
-        None,
+    if !interactive_questionnaire_available() {
+        return Err(CommandError::new(non_interactive_message));
+    }
+
+    let mut names = names.to_vec();
+    names.sort();
+    let mut items = names
+        .iter()
+        .map(|name| format!("{name} (edit)"))
+        .collect::<Vec<_>>();
+
+    if !existing_only {
+        items.push(resource_kind.add_new_label().to_owned());
+    }
+
+    let default_label = default
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("{value} (edit)"));
+
+    let selected = config::prompt_select(
+        &config::prompt_message(label, None, None, None, None, None),
+        &items,
+        default_label
+            .as_deref()
+            .or_else(|| items.first().map(String::as_str)),
         non_interactive_message,
     )
-    .map_err(|error| CommandError::new(error.to_string()))
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    if selected == resource_kind.add_new_label() {
+        return config::prompt_required_text(
+            &config::prompt_message(label, None, None, None, None, None),
+            None,
+            non_interactive_message,
+        )
+        .map_err(|error| CommandError::new(error.to_string()));
+    }
+
+    Ok(selected
+        .strip_suffix(" (edit)")
+        .unwrap_or(selected.as_str())
+        .to_owned())
 }
 
 fn prompt_required(
