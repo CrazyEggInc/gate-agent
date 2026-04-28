@@ -178,6 +178,7 @@ Method access rules during local testing:
 
 - `GET`, `HEAD`, `OPTIONS` require `read`
 - `POST`, `PUT`, `PATCH`, `DELETE` require `write`
+- `TRACE` is rejected before forwarding regardless of access level
 - any other HTTP method also requires `write`
 
 ## Config validation workflow

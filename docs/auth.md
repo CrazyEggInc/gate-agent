@@ -103,6 +103,7 @@ Authorization fails closed. A configured API slug alone does not allow any reque
 - after bearer-token validation, the selected route `{api}` must be allowed by the matched client's effective `api_access`
 - after `/proxy/{api}` suffix extraction, the inbound HTTP method and upstream suffix path must match one configured route rule for that API
 - method `*` matches any inbound HTTP method
+- `TRACE` is rejected before forwarding regardless of route-rule matches
 - path `*` matches any upstream suffix path
 - exact paths and glob-style path patterns are matched against the path only; query strings are not considered
 - missing API access or missing route-rule match fails with `403 forbidden_api`

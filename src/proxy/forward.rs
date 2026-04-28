@@ -48,6 +48,12 @@ fn authorize_forward_request(
     request: &ForwardRequest,
     authorized: &AuthorizedRequest,
 ) -> Result<(), AppError> {
+    if request.method == http::Method::TRACE {
+        return Err(AppError::BadRequest(
+            "TRACE requests are not supported".to_owned(),
+        ));
+    }
+
     if api_access_allows(
         authorized,
         &request.api_slug,

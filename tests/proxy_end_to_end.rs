@@ -951,6 +951,35 @@ async fn proxy_route_rejects_unmatched_whitelist_path() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_trace_requests_even_with_matching_rule()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("default", "datadog", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("TRACE")
+                .uri("/proxy/datadog/api/v2/series")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "bad_request");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_allows_any_datadog_method_and_path_with_wildcard_rule()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sender, rx) = capture_channel();

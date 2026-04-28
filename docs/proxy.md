@@ -56,6 +56,7 @@ Route authorization rules:
 
 - each API access entry is an allowlist of `{ method, path }` route rules
 - `method = "*"` matches any inbound HTTP method
+- `TRACE` is rejected before forwarding regardless of route-rule matches
 - `path = "*"` matches any extracted upstream suffix path
 - exact paths and glob-style path rules are matched against the suffix path after `/proxy/{api}`
 - query strings are ignored during route-rule matching
