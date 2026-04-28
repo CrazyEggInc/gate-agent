@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::{Request, StatusCode},
     response::Response,
-    routing::any,
+    routing::{any, get},
 };
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -44,6 +44,7 @@ struct ProxyResponseError {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health_handler))
         .route("/mcp", axum::routing::post(mcp_handler))
         .route("/proxy/{api}", any(proxy_handler))
         .route("/proxy/{api}/", any(proxy_handler))
@@ -174,6 +175,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(PropagateRequestIdLayer::x_request_id())
         .with_state(state)
+}
+
+async fn health_handler() -> &'static str {
+    "OK"
 }
 
 async fn proxy_handler(
