@@ -183,6 +183,7 @@ fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
     for (name, value) in headers {
         if name == header::AUTHORIZATION
             || name == header::HOST
+            || name == header::CONTENT_LENGTH
             || is_client_forwarding_header(name)
             || is_hop_by_hop_header(name, &connection_bound_names)
         {

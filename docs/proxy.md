@@ -89,6 +89,7 @@ The outbound request must strip:
 
 - client `Authorization`
 - `Host`
+- `Content-Length`
 - hop-by-hop headers
 - headers named by the incoming `Connection` header
 - client forwarding headers:

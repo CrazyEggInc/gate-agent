@@ -182,6 +182,7 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
         .header("x-custom", "preserved")
         .header("x-remove-me", "remove this too")
         .header("content-type", "application/json")
+        .header("content-length", "999")
         .body(Body::from(r#"{"name":"New task"}"#))?;
 
     let outbound = map_request(request, "billing", api)?;
@@ -206,6 +207,7 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
     assert!(outbound.headers().get("te").is_none());
     assert!(outbound.headers().get("x-remove-me").is_none());
     assert!(outbound.headers().get("host").is_none());
+    assert!(outbound.headers().get("content-length").is_none());
     assert_eq!(
         outbound.body().and_then(reqwest::Body::as_bytes),
         None,
@@ -241,6 +243,10 @@ async fn request_mapping_builds_upstream_request_filters_headers_and_keeps_strea
     assert!(captured.headers.get("connection").is_none());
     assert!(captured.headers.get("te").is_none());
     assert!(captured.headers.get("x-remove-me").is_none());
+    assert_ne!(
+        captured.headers.get("content-length"),
+        Some(&HeaderValue::from_static("999"))
+    );
     assert_eq!(
         captured.body,
         bytes::Bytes::from_static(br#"{"name":"New task"}"#)
