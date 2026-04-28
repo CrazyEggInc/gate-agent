@@ -493,6 +493,44 @@ async fn proxy_route_rejects_selected_api_not_present_in_token()
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_missing_authorization_header() -> Result<(), Box<dyn std::error::Error>>
+{
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("www-authenticate").unwrap(),
+        "Bearer"
+    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "invalid_token");
+    assert_eq!(payload["error"]["message"], "authentication failed");
+    assert_eq!(payload["error"]["request_id"], request_id);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_rejects_unknown_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
