@@ -328,7 +328,8 @@ Behavior:
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
-- when required operator input is missing in an interactive session, prompts for it instead of failing immediately in a single-line format with minimal wording
+- when required operator input is missing in an interactive session, prompts for it instead of failing immediately; resource-name prompts use an up/down selector with existing names shown as `<name> (edit)` and an `add new api` entry
+- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
 - API delete is blocked when any group references that API in `groups.*.api_access` or any inline-access client references it in `clients.*.api_access`
 - API delete never cascades; operators must remove those references first
 
@@ -354,7 +355,7 @@ Accepted flags:
 
 Behavior:
 
-- validates slug and timestamp inputs
+- validates slug inputs and bearer-token expiration dates
 - requires exactly one of `--group` or `--api-access` when creating a client
 - `--group` and `--api-access` are mutually exclusive in one invocation
 - `--api-access` accepts `read` and `write`
@@ -372,9 +373,11 @@ Behavior:
 - when updating interactively, current values become prompt defaults and blank answers keep those defaults
 - when updating non-interactively, omitting both access flags preserves current access mode and current access values
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately
-- the access prompt shows existing group slugs as available options when any exist
-- the operator may enter a group slug directly or leave that prompt blank to fall back to inline `api_access`
-- prompts stay single-line and avoid extra descriptive text when the question itself is already clear
+- `--bearer-token-expires-at` accepts `YYYY-MM-DD` and stores that date as midnight UTC
+- when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future
+- resource-name prompts use an up/down selector with existing names shown as `<name> (edit)` and an `add new client` entry
+- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
+- the group access prompt lists existing group slugs as `<name> (edit)` and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
@@ -395,7 +398,7 @@ Accepted flags:
 
 Behavior:
 
-- validates slug and timestamp inputs before writing
+- validates slug inputs and bearer-token expiration dates before writing
 - requires an existing config file; it does not create one implicitly
 - requires an existing client entry; it does not create one implicitly
 - generates a brand-new bearer token for that client
@@ -410,7 +413,7 @@ Behavior:
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - preserves existing encrypted/plaintext storage mode instead of rewriting config into a different format
-- when required operator input is missing in an interactive session, prompts for client name in same minimal single-line style as other config mutators
+- when required operator input is missing in an interactive session, prompts for client name with an up/down selector of existing clients
 
 The CLI name uses “client secret” for operator ergonomics, but stored config model remains bearer-token metadata.
 
@@ -430,7 +433,7 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one group entry by default
 - `-d` / `--delete` deletes one existing group entry instead of add-or-update
-- prompts for the name and inline `api_access` when that required input is missing in an interactive session, in a single-line format with minimal wording
+- prompts for the name and inline `api_access` when that required input is missing in an interactive session; resource-name prompts use an up/down selector with existing names shown as `<name> (edit)` and an `add new group` entry
 - when updating interactively, current values become prompt defaults and blank answers keep those defaults
 - when updating non-interactively, omitting `--api-access` preserves current access values instead of clearing them
 - preserves encrypted-vs-plaintext format on update

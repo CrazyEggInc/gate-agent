@@ -200,6 +200,14 @@ impl ResourceKind {
             Self::Client => "clients",
         }
     }
+
+    pub fn add_new_label(self) -> &'static str {
+        match self {
+            Self::Api => "add new api",
+            Self::Group => "add new group",
+            Self::Client => "add new client",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -488,11 +496,7 @@ pub fn apply_client(args: ConfigClientArgs) -> Result<ClientMutationOutcome, Con
     let bearer_token_expires_at = args
         .bearer_token_expires_at
         .as_deref()
-        .map(|value| {
-            let value = trimmed_required("bearer_token_expires_at", value)?;
-            validate_timestamp("bearer_token_expires_at", &value)?;
-            Ok::<String, ConfigCommandError>(value)
-        })
+        .map(|value| validate_expiration_date("bearer_token_expires_at", value))
         .transpose()?;
 
     let group = args
@@ -658,11 +662,7 @@ pub fn rotate_client_secret(
     let expires_at_override = args
         .bearer_token_expires_at
         .as_deref()
-        .map(|value| {
-            let value = trimmed_required("bearer_token_expires_at", value)?;
-            validate_timestamp("bearer_token_expires_at", &value)?;
-            Ok::<String, ConfigCommandError>(value)
-        })
+        .map(|value| validate_expiration_date("bearer_token_expires_at", value))
         .transpose()?;
 
     let path = resolve_existing_path(args.config.as_deref())?;
@@ -833,34 +833,19 @@ pub(crate) fn load_existing_client_state(
     load_existing_client_state_from_prepared(&path, &prepared, client_name)
 }
 
-pub(crate) fn format_existing_name_hint(
-    resource_kind: ResourceKind,
-    names: &[String],
-    delete_mode: bool,
-) -> Option<String> {
-    if names.is_empty() {
-        return None;
-    }
+pub(crate) fn default_bearer_token_expiration_date() -> Result<String, ConfigCommandError> {
+    let expires_at = SystemTime::now()
+        .checked_add(Duration::from_secs(180 * 24 * 60 * 60))
+        .ok_or_else(|| ConfigCommandError::new("failed to compute bearer token expiration"))?;
 
-    let mut sorted = names.to_vec();
-    sorted.sort();
-    let extra = sorted.len().saturating_sub(8);
-    sorted.truncate(8);
-    let mut hint = format!(
-        "existing {}: {}",
-        resource_kind.plural_label(),
-        sorted.join(", ")
-    );
+    let unix_seconds = expires_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ConfigCommandError::new(format!("system clock is before unix epoch: {error}"))
+        })?
+        .as_secs();
 
-    if extra > 0 {
-        hint.push_str(&format!(", ... +{extra} more"));
-    }
-
-    if !delete_mode {
-        hint.push_str("; existing name updates record");
-    }
-
-    Some(hint)
+    Ok(format_date(unix_seconds))
 }
 
 fn list_table_keys(
@@ -1474,6 +1459,55 @@ pub(crate) fn prompt_yes_no(
     }
 }
 
+pub(crate) fn prompt_select(
+    prompt: &str,
+    items: &[String],
+    default: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<String, ConfigCommandError> {
+    if let Some(response) = take_test_prompt_input()? {
+        let response = apply_prompt_default(response, default);
+        let trimmed = response.trim();
+
+        if trimmed.is_empty() {
+            return Err(ConfigCommandError::new(format!(
+                "{} cannot be empty",
+                prompt_field_name(prompt)
+            )));
+        }
+
+        return Ok(trimmed.to_owned());
+    }
+
+    if interactive_prompts_disabled()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
+        return Err(ConfigCommandError::new(non_interactive_message));
+    }
+
+    if items.is_empty() {
+        return prompt_required_text(prompt, default, non_interactive_message);
+    }
+
+    let default_index = default
+        .and_then(|value| items.iter().position(|item| item == value))
+        .or_else(|| {
+            items
+                .iter()
+                .position(|item| item.contains("add new") || item.contains("Add new"))
+        })
+        .unwrap_or(0);
+    let selection = dialoguer::Select::new()
+        .items(items)
+        .default(default_index)
+        .interact_on_opt(&dialoguer::console::Term::stderr())
+        .map_err(|error| ConfigCommandError::new(format!("failed to read selection: {error}")))?;
+
+    let index = selection.ok_or_else(|| ConfigCommandError::new("selection cancelled"))?;
+    Ok(items[index].clone())
+}
+
 pub(crate) fn reset_test_prompt_state_if_exhausted() -> Result<(), ConfigCommandError> {
     let Some(raw) = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok() else {
         return Ok(());
@@ -2043,76 +2077,62 @@ fn parse_api_headers(
     Ok(headers)
 }
 
-fn validate_timestamp(field: &str, value: &str) -> Result<(), ConfigCommandError> {
-    parse_rfc3339_utc(value)
-        .map(|_| ())
-        .map_err(|error| ConfigCommandError::new(format!("invalid {field}: {error}")))
+fn validate_expiration_date(field: &str, value: &str) -> Result<String, ConfigCommandError> {
+    let trimmed = trimmed_required(field, value)?;
+    parse_date(&trimmed)
+        .map_err(|error| ConfigCommandError::new(format!("invalid {field}: {error}")))?;
+    Ok(format!("{trimmed}T00:00:00Z"))
 }
 
 fn default_bearer_token_expires_at() -> Result<String, ConfigCommandError> {
-    let expires_at = SystemTime::now()
-        .checked_add(Duration::from_secs(180 * 24 * 60 * 60))
-        .ok_or_else(|| ConfigCommandError::new("failed to compute bearer token expiration"))?;
-
-    let unix_seconds = expires_at
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            ConfigCommandError::new(format!("system clock is before unix epoch: {error}"))
-        })?
-        .as_secs();
-
-    Ok(format_rfc3339(unix_seconds))
+    Ok(format!(
+        "{}T00:00:00Z",
+        default_bearer_token_expiration_date()?
+    ))
 }
 
-fn format_rfc3339(unix_seconds: u64) -> String {
+fn format_date(unix_seconds: u64) -> String {
     let days = unix_seconds / 86_400;
-    let seconds_of_day = unix_seconds % 86_400;
     let (year, month, day) = civil_from_days(days as i64);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
 
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
-fn parse_rfc3339_utc(value: &str) -> Result<SystemTime, &'static str> {
-    if value.len() != 20 {
-        return Err("timestamp must look like 2030-01-02T03:04:05Z");
+fn parse_date(value: &str) -> Result<(), &'static str> {
+    let bytes = value.as_bytes();
+
+    if bytes.len() != 10 {
+        return Err("date must look like 2030-01-02");
     }
 
-    if &value[4..5] != "-"
-        || &value[7..8] != "-"
-        || &value[10..11] != "T"
-        || &value[13..14] != ":"
-        || &value[16..17] != ":"
-        || &value[19..20] != "Z"
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err("date must look like 2030-01-02");
+    }
+
+    if !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..10].iter().all(u8::is_ascii_digit)
     {
-        return Err("timestamp must look like 2030-01-02T03:04:05Z");
+        return Err("date must look like 2030-01-02");
     }
 
-    let year: i32 = value[0..4].parse().map_err(|_| "invalid year")?;
-    let month: u32 = value[5..7].parse().map_err(|_| "invalid month")?;
-    let day: u32 = value[8..10].parse().map_err(|_| "invalid day")?;
-    let hour: u64 = value[11..13].parse().map_err(|_| "invalid hour")?;
-    let minute: u64 = value[14..16].parse().map_err(|_| "invalid minute")?;
-    let second: u64 = value[17..19].parse().map_err(|_| "invalid second")?;
+    let year = parse_ascii_digits_i32(&bytes[..4]);
+    let month = parse_ascii_digits_u32(&bytes[5..7]);
+    let day = parse_ascii_digits_u32(&bytes[8..10]);
 
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return Err("timestamp contains out-of-range values");
-    }
+    days_from_civil(year, month, day).map(|_| ())
+}
 
-    let days = days_from_civil(year, month, day)?;
-    let total_seconds = days
-        .checked_mul(86_400)
-        .and_then(|seconds| seconds.checked_add(hour * 3_600 + minute * 60 + second))
-        .ok_or("timestamp is out of supported range")?;
+fn parse_ascii_digits_i32(bytes: &[u8]) -> i32 {
+    bytes
+        .iter()
+        .fold(0, |value, byte| value * 10 + i32::from(byte - b'0'))
+}
 
-    Ok(UNIX_EPOCH + Duration::from_secs(total_seconds))
+fn parse_ascii_digits_u32(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0, |value, byte| value * 10 + u32::from(byte - b'0'))
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> Result<u64, &'static str> {
