@@ -32,7 +32,7 @@ pub struct ClientApiAccessEntry<'a> {
 impl AppState {
     pub fn from_config(config: &AppConfig) -> Result<Self, AppError> {
         let client = Client::builder()
-            .redirect(redirect::Policy::limited(10))
+            .redirect(redirect::Policy::none())
             .build()
             .map_err(|error| AppError::Internal(format!("failed to build http client: {error}")))?;
 
