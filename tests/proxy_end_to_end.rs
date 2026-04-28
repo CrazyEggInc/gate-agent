@@ -832,6 +832,41 @@ async fn proxy_route_preserves_double_slash_segments() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_dot_segments_before_forwarding()
+-> Result<(), Box<dyn std::error::Error>> {
+    for path in [
+        "/proxy/billing/../admin",
+        "/proxy/billing/v1/./admin",
+        "/proxy/billing/%2e%2e/admin",
+        "/proxy/billing/v1/%2E/admin",
+    ] {
+        let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+        let base_url = spawn_upstream(upstream).await?;
+        let config = load_test_config(&base_url)?;
+        let token = bearer_token("billing", config.secrets())?;
+        let app = build_router(AppState::from_config(&config)?);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+        assert_eq!(payload["error"]["code"], "bad_proxy_path");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_allows_get_matching_whitelist_rule() -> Result<(), Box<dyn std::error::Error>>
 {
     let (sender, rx) = capture_channel();

@@ -79,6 +79,7 @@ Request mapping expectations:
 - the route selector `{api}` is not forwarded upstream
 - query strings are preserved
 - if the request path does not begin with `/proxy/{api}`, mapping fails
+- paths containing raw or percent-encoded `.` or `..` segments fail before forwarding
 - `/proxy/{api}` forwards to the API base path itself
 - `/proxy/{api}/...` forwards only the suffix after the API selector
 
