@@ -10,8 +10,7 @@ use axum::{
 };
 use gate_agent::{
     auth::bearer::{AuthorizedApiAccess, AuthorizedRequest},
-    config::secrets::AccessLevel,
-    config::secrets::SecretsConfig,
+    config::secrets::{ApiAccessMethod, ApiAccessRule, SecretsConfig},
     proxy::{
         forward::prepare_authorized_forward_request,
         request::{ForwardRequest, map_request},
@@ -42,6 +41,59 @@ fn write_secrets_file(
     Ok((temp_dir, secrets_file))
 }
 
+fn any_rule(path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Any,
+        path: path.to_owned(),
+    }
+}
+
+fn exact_rule(method: Method, path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Exact(method),
+        path: path.to_owned(),
+    }
+}
+
+#[test]
+fn forward_request_path_only_strips_query() {
+    let request = ForwardRequest {
+        api_slug: "billing".to_owned(),
+        method: Method::GET,
+        path_and_query: "/api/foo?x=1".to_owned(),
+        headers: HeaderMap::new(),
+        body: Body::empty(),
+    };
+
+    assert_eq!(request.path_only(), "/api/foo");
+}
+
+#[test]
+fn forward_request_path_only_preserves_path_without_query() {
+    let request = ForwardRequest {
+        api_slug: "billing".to_owned(),
+        method: Method::GET,
+        path_and_query: "/api/foo".to_owned(),
+        headers: HeaderMap::new(),
+        body: Body::empty(),
+    };
+
+    assert_eq!(request.path_only(), "/api/foo");
+}
+
+#[test]
+fn forward_request_path_only_normalizes_empty_query_only_path() {
+    let request = ForwardRequest {
+        api_slug: "billing".to_owned(),
+        method: Method::GET,
+        path_and_query: "?x=1".to_owned(),
+        headers: HeaderMap::new(),
+        body: Body::empty(),
+    };
+
+    assert_eq!(request.path_only(), "/");
+}
+
 fn load_test_secrets(base_url: &str) -> Result<SecretsConfig, Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(&format!(
         r#"
@@ -49,7 +101,7 @@ fn load_test_secrets(base_url: &str) -> Result<SecretsConfig, Box<dyn std::error
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ projects = "read", billing = "write" }}
+api_access = {{ projects = [{{ method = "get", path = "*" }}], billing = [{{ method = "*", path = "*" }}] }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -750,7 +802,10 @@ async fn response_mapping_filters_hop_by_hop_headers_and_keeps_body_readable()
 fn generic_prepare_authorizes_method_without_proxy_request_shape()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut api_access = std::collections::BTreeMap::new();
-    api_access.insert("billing".to_owned(), AccessLevel::Write);
+    api_access.insert(
+        "billing".to_owned(),
+        vec![exact_rule(Method::POST, "/v1/projects/*")],
+    );
     let authorized = AuthorizedRequest {
         client_slug: "default".to_owned(),
         access: AuthorizedApiAccess { apis: api_access },
@@ -781,7 +836,10 @@ fn generic_prepare_authorizes_method_without_proxy_request_shape()
 fn generic_prepare_reuses_method_authz_for_non_proxy_requests()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut api_access = std::collections::BTreeMap::new();
-    api_access.insert("billing".to_owned(), AccessLevel::Read);
+    api_access.insert(
+        "billing".to_owned(),
+        vec![exact_rule(Method::GET, "/v1/projects/*")],
+    );
     let authorized = AuthorizedRequest {
         client_slug: "default".to_owned(),
         access: AuthorizedApiAccess { apis: api_access },
@@ -792,6 +850,36 @@ fn generic_prepare_reuses_method_authz_for_non_proxy_requests()
             api_slug: "billing".to_owned(),
             method: Method::POST,
             path_and_query: "/v1/projects/1/tasks".to_owned(),
+            headers: HeaderMap::new(),
+            body: Body::empty(),
+        },
+        &authorized,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        gate_agent::error::AppError::ForbiddenApi { ref api } if api == "billing"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn generic_prepare_rejects_configured_api_without_matching_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut api_access = std::collections::BTreeMap::new();
+    api_access.insert("billing".to_owned(), vec![any_rule("/v1/projects/*")]);
+    let authorized = AuthorizedRequest {
+        client_slug: "default".to_owned(),
+        access: AuthorizedApiAccess { apis: api_access },
+    };
+
+    let error = prepare_authorized_forward_request(
+        ForwardRequest {
+            api_slug: "billing".to_owned(),
+            method: Method::GET,
+            path_and_query: "/v1/tasks/1?expand=1".to_owned(),
             headers: HeaderMap::new(),
             body: Body::empty(),
         },

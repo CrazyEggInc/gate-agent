@@ -1,3 +1,3 @@
 pub mod bearer;
 
-pub use crate::config::secrets::AccessLevel;
+pub use crate::config::secrets::{ApiAccessMethod, ApiAccessRule};

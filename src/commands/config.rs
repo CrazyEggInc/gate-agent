@@ -17,8 +17,7 @@ use crate::config::password::{
     resolve_for_encrypted_create, resolve_for_encrypted_read_with_source,
 };
 use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
-use crate::config::secrets::SecretsConfig;
-use crate::config::secrets::{AccessLevel, is_valid_slug};
+use crate::config::secrets::{ApiAccessMethod, ApiAccessRule, SecretsConfig};
 use crate::config::write::{
     self, ApiBasicAuthUpsert, ApiUpsert, ClientAccessUpsert, ClientUpsert, GroupUpsert,
     WriteConfigError,
@@ -266,14 +265,14 @@ pub struct ExistingApiState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExistingGroupState {
-    pub api_access: BTreeMap<String, AccessLevel>,
+    pub api_access: BTreeMap<String, Vec<ApiAccessRule>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExistingClientPromptState {
     pub bearer_token_expires_at: String,
     pub group: Option<String>,
-    pub api_access: BTreeMap<String, AccessLevel>,
+    pub api_access: BTreeMap<String, Vec<ApiAccessRule>>,
 }
 
 struct PreparedConfigAccess {
@@ -1129,7 +1128,7 @@ fn load_existing_client_state_from_prepared(
 fn parse_inline_api_access_table(
     table: &Table,
     field_label: &str,
-) -> Result<BTreeMap<String, AccessLevel>, ConfigCommandError> {
+) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigCommandError> {
     let Some(item) = table.get("api_access") else {
         return Ok(BTreeMap::new());
     };
@@ -1137,49 +1136,122 @@ fn parse_inline_api_access_table(
     let mut api_access = BTreeMap::new();
     if let Some(api_access_table) = item.as_table() {
         for (api, value) in api_access_table.iter() {
-            let level = match value.as_str() {
-                Some("read") => AccessLevel::Read,
-                Some("write") => AccessLevel::Write,
-                Some(other) => {
-                    return Err(ConfigCommandError::new(format!(
-                        "{field_label}.{api} has invalid level '{other}'"
-                    )));
-                }
-                None => {
-                    return Err(ConfigCommandError::new(format!(
-                        "{field_label}.{api} must be a string"
-                    )));
-                }
-            };
-            api_access.insert(api.to_owned(), level);
+            api_access.insert(
+                api.to_owned(),
+                parse_api_access_rule_array(&format!("{field_label}.{api}"), value)?,
+            );
         }
 
         return Ok(api_access);
     }
 
+    if let Some(api_access_array) = item.as_array() {
+        return parse_api_access_entry_array(field_label, api_access_array.iter());
+    }
+
     let Some(api_access_table) = item.as_value().and_then(toml_edit::Value::as_inline_table) else {
-        return Ok(BTreeMap::new());
+        return Err(ConfigCommandError::new(format!(
+            "{field_label} must be a table, inline table, or array of inline tables"
+        )));
     };
 
     for (api, value) in api_access_table.iter() {
-        let level = match value.as_str() {
-            Some("read") => AccessLevel::Read,
-            Some("write") => AccessLevel::Write,
-            Some(other) => {
-                return Err(ConfigCommandError::new(format!(
-                    "{field_label}.{api} has invalid level '{other}'"
-                )));
-            }
-            None => {
-                return Err(ConfigCommandError::new(format!(
-                    "{field_label}.{api} must be a string"
-                )));
-            }
-        };
-        api_access.insert(api.to_owned(), level);
+        api_access.insert(
+            api.to_owned(),
+            parse_api_access_rule_array_value(&format!("{field_label}.{api}"), value)?,
+        );
     }
 
     Ok(api_access)
+}
+
+fn parse_api_access_entry_array<'a>(
+    field_label: &str,
+    values: impl Iterator<Item = &'a toml_edit::Value>,
+) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigCommandError> {
+    let mut api_access = BTreeMap::new();
+
+    for (index, value) in values.enumerate() {
+        let entry_label = format!("{field_label}[{index}]");
+        let Some(entry_table) = value.as_inline_table() else {
+            return Err(ConfigCommandError::new(format!(
+                "{entry_label} must be an inline table"
+            )));
+        };
+
+        for (api, rules) in entry_table.iter() {
+            if api_access
+                .insert(
+                    api.to_owned(),
+                    parse_api_access_rule_array_value(&format!("{entry_label}.{api}"), rules)?,
+                )
+                .is_some()
+            {
+                return Err(ConfigCommandError::new(format!(
+                    "{field_label} contains duplicate api '{api}'"
+                )));
+            }
+        }
+    }
+
+    Ok(api_access)
+}
+
+fn parse_api_access_rule_array(
+    field_label: &str,
+    item: &Item,
+) -> Result<Vec<ApiAccessRule>, ConfigCommandError> {
+    let Some(array) = item.as_array() else {
+        return Err(ConfigCommandError::new(format!(
+            "{field_label} must be an array of route rules"
+        )));
+    };
+
+    parse_api_access_rule_values(field_label, array.iter())
+}
+
+fn parse_api_access_rule_array_value(
+    field_label: &str,
+    value: &toml_edit::Value,
+) -> Result<Vec<ApiAccessRule>, ConfigCommandError> {
+    let Some(array) = value.as_array() else {
+        return Err(ConfigCommandError::new(format!(
+            "{field_label} must be an array of route rules"
+        )));
+    };
+
+    parse_api_access_rule_values(field_label, array.iter())
+}
+
+fn parse_api_access_rule_values<'a>(
+    field_label: &str,
+    values: impl Iterator<Item = &'a toml_edit::Value>,
+) -> Result<Vec<ApiAccessRule>, ConfigCommandError> {
+    let mut rules = Vec::new();
+
+    for (index, value) in values.enumerate() {
+        let rule_label = format!("{field_label}[{index}]");
+        let Some(rule_table) = value.as_inline_table() else {
+            return Err(ConfigCommandError::new(format!(
+                "{rule_label} must be an inline table"
+            )));
+        };
+        let method = rule_table
+            .get("method")
+            .and_then(toml_edit::Value::as_str)
+            .ok_or_else(|| ConfigCommandError::new(format!("{rule_label}.method is required")))?;
+        let path = rule_table
+            .get("path")
+            .and_then(toml_edit::Value::as_str)
+            .ok_or_else(|| ConfigCommandError::new(format!("{rule_label}.path is required")))?;
+
+        rules.push(ApiAccessRule {
+            method: parse_api_access_method(&format!("{rule_label}.method"), method)?,
+            path: parse_api_access_path(&format!("{rule_label}.path"), path)?,
+        });
+    }
+
+    Ok(rules)
 }
 
 fn parse_string_inline_table(
@@ -1958,66 +2030,85 @@ fn ensure_slug(kind: &str, value: &str) -> Result<(), ConfigCommandError> {
 
 fn parse_api_access_args(
     api_access_args: &[String],
-) -> Result<BTreeMap<String, AccessLevel>, ConfigCommandError> {
-    let mut api_access = BTreeMap::new();
+) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigCommandError> {
+    let mut api_access: BTreeMap<String, Vec<ApiAccessRule>> = BTreeMap::new();
 
     for raw_arg in api_access_args {
-        for raw_pair in raw_arg.split(',') {
-            let raw_pair = raw_pair.trim();
-            if raw_pair.is_empty() {
+        for raw_spec in raw_arg.split(',') {
+            let raw_spec = raw_spec.trim();
+            if raw_spec.is_empty() {
                 return Err(ConfigCommandError::new(
                     "api_access entries cannot contain empty comma-separated segments".to_owned(),
                 ));
             }
 
-            let (api, level) = raw_pair.split_once('=').ok_or_else(|| {
-                ConfigCommandError::new(format!(
-                    "invalid api_access entry '{raw_pair}'; expected api=level"
-                ))
-            })?;
+            let mut parts = raw_spec.splitn(3, ':');
+            let api = parts.next().unwrap_or_default().trim();
+            let method = parts.next().unwrap_or_default().trim();
+            let path = parts.next().unwrap_or_default().trim();
 
-            let api = api.trim();
-            let level = level.trim();
-
-            if api.is_empty() {
-                return Err(ConfigCommandError::new(
-                    "api_access api slug cannot be empty".to_owned(),
-                ));
-            }
-
-            if level.is_empty() {
+            if api.is_empty() || method.is_empty() || path.is_empty() {
                 return Err(ConfigCommandError::new(format!(
-                    "api_access level cannot be empty for api '{api}'"
+                    "invalid api_access entry '{raw_spec}'; expected api:method:path"
                 )));
             }
 
-            if !is_valid_slug(api) {
-                return Err(ConfigCommandError::new(format!(
-                    "api_access api slug '{api}' must contain only lowercase letters, digits, or hyphen"
-                )));
-            }
-
-            let level = match level {
-                "read" => AccessLevel::Read,
-                "write" => AccessLevel::Write,
-                _ => {
-                    return Err(ConfigCommandError::new(format!(
-                        "api_access level '{level}' must be one of: read, write"
-                    )));
-                }
+            ensure_slug("api_access api", api)?;
+            let rule = ApiAccessRule {
+                method: parse_api_access_method("api_access method", method)?,
+                path: parse_api_access_path("api_access path", path)?,
             };
-
-            if let Some(existing) = api_access.insert(api.to_owned(), level) {
-                if existing != level {
-                    return Err(ConfigCommandError::new(format!(
-                        "conflicting api_access entries for api '{api}'"
-                    )));
-                }
+            let rules = api_access.entry(api.to_owned()).or_default();
+            if rules.contains(&rule) {
+                return Err(ConfigCommandError::new(format!(
+                    "duplicate api_access entry for api '{api}'"
+                )));
             }
+            rules.push(rule);
         }
     }
 
     Ok(api_access)
+}
+
+fn parse_api_access_method(
+    field: &str,
+    value: &str,
+) -> Result<ApiAccessMethod, ConfigCommandError> {
+    let method = trimmed_required(field, value)?;
+
+    if method == "*" {
+        return Ok(ApiAccessMethod::Any);
+    }
+
+    let method = method.to_ascii_uppercase();
+    http::Method::from_bytes(method.as_bytes())
+        .map(ApiAccessMethod::Exact)
+        .map_err(|error| ConfigCommandError::new(format!("{field} is invalid: {error}")))
+}
+
+fn parse_api_access_path(field: &str, value: &str) -> Result<String, ConfigCommandError> {
+    let path = trimmed_required(field, value)?;
+
+    if path != "*" && !path.starts_with('/') {
+        return Err(ConfigCommandError::new(format!(
+            "{field} must be '*' or start with '/'"
+        )));
+    }
+
+    if path.contains('?') {
+        return Err(ConfigCommandError::new(format!(
+            "{field} must not contain query strings"
+        )));
+    }
+
+    if path.contains('#') {
+        return Err(ConfigCommandError::new(format!(
+            "{field} must not contain fragments"
+        )));
+    }
+
+    Ok(path)
 }
 
 fn validate_base_url(base_url: &str, slug: &str) -> Result<(), ConfigCommandError> {

@@ -23,9 +23,9 @@ The workflow must be:
 3. The validated token resolves to one configured client.
 4. The server derives the client's effective `api_access` from config.
 5. The server authorizes the requested operation from that effective `api_access`:
-   - `/proxy` requests authorize the selected API slug and required method access
+   - `/proxy` requests authorize the selected API slug and route rule
    - `/mcp` discovery only exposes APIs allowed by that client
-   - `/mcp` calls only execute APIs allowed by that client at sufficient access
+   - `/mcp` calls only execute APIs with a matching method/path route rule
 6. The server forwards the authorized upstream request using configured upstream authentication.
 
 The bearer token is not a scope container. It is only a credential that identifies an allowed client session.
@@ -89,17 +89,23 @@ Expected classes of failures:
 
 The authenticated route determines how API authorization is applied.
 
+Effective `api_access` is a per-API route whitelist. Each API may map to zero or more route rules with:
+
+- `method`: exact HTTP method or `*`
+- `path`: exact upstream path, glob-style path pattern containing `*`, or `*`
+
+Authorization fails closed. A configured API slug alone does not allow any request unless at least one route rule matches. Query strings are ignored for route matching.
+
 - route family:
   - `/proxy/{api}`
   - `/proxy/{api}/`
   - `/proxy/{api}/{*path}`
 - after bearer-token validation, the selected route `{api}` must be allowed by the matched client's effective `api_access`
-- the required access level is derived from the inbound HTTP method:
-  - `GET`, `HEAD`, `OPTIONS` require `read`
-  - `POST`, `PUT`, `PATCH`, `DELETE` require `write`
-  - every other method requires `write` and therefore fails closed unless the client has `write`
-- configured `write` access satisfies `read`
-- otherwise the request fails with `403 forbidden_api`
+- after `/proxy/{api}` suffix extraction, the inbound HTTP method and upstream suffix path must match one configured route rule for that API
+- method `*` matches any inbound HTTP method
+- path `*` matches any upstream suffix path
+- exact paths and glob-style path patterns are matched against the path only; query strings are not considered
+- missing API access or missing route-rule match fails with `403 forbidden_api`
 - when the request includes `x-request-id`, it is copied to the response
 - when it does not, the router stack generates one and propagates it
 
@@ -110,7 +116,7 @@ The authenticated route determines how API authorization is applied.
 - `/mcp` uses the same direct bearer-token validation model as `/proxy`
 - MCP discovery must be limited to APIs allowed by the matched client's effective `api_access`
 - MCP calls must authorize the targeted API against that same effective `api_access`
-- if the client lacks access to the targeted API or required access level, the request fails with `403 forbidden_api`
+- if the client lacks access to the targeted API or no method/path route rule matches, the request fails with `403 forbidden_api`
 
 ## Local testing workflow
 

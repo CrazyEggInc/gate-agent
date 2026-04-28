@@ -13,7 +13,7 @@ use axum::{
 use gate_agent::config::{
     ConfigSource,
     app_config::AppConfig,
-    secrets::{AccessLevel, BearerTokenHash, SecretsConfig},
+    secrets::{ApiAccessMethod, ApiAccessRule, BearerTokenHash, SecretsConfig},
 };
 use http_body_util::BodyExt;
 use tokio::{
@@ -83,13 +83,13 @@ pub fn load_test_config_with_billing_basic_auth(
 bearer_token_id = "default-billing-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [clients.read-billing]
 bearer_token_id = "read-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-04T03:04:05Z"
-api_access = {{ billing = "read" }}
+api_access = {{ billing = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [apis.billing]
 base_url = "{base_url}/api"
@@ -117,31 +117,31 @@ pub fn load_multi_api_test_config(base_url: &str) -> Result<AppConfig, Box<dyn s
 bearer_token_id = "default-billing-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ projects = "write", billing = "write" }}
+api_access = {{ projects = [{{ method = "get", path = "/api/v1/projects/*" }}, {{ method = "post", path = "/api/users/*" }}], billing = [{{ method = "*", path = "*" }}], datadog = [{{ method = "*", path = "*" }}] }}
 
 [clients.partner]
 bearer_token_id = "partner-projects-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-03T03:04:05Z"
-api_access = {{ projects = "write" }}
+api_access = {{ projects = [{{ method = "*", path = "*" }}] }}
 
 [clients.read-billing]
 bearer_token_id = "read-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-04T03:04:05Z"
-api_access = {{ billing = "read" }}
+api_access = {{ billing = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [clients.read-projects]
 bearer_token_id = "read-projects"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-05T03:04:05Z"
-api_access = {{ projects = "read" }}
+api_access = {{ projects = [{{ method = "get", path = "/api/v1/projects/*" }}, {{ method = "head", path = "/api/v1/projects/*" }}, {{ method = "options", path = "/api/v1/projects/*" }}] }}
 
 [clients.expired-billing]
 bearer_token_id = "expired-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2020-01-01T00:00:00Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -155,6 +155,12 @@ base_url = "{base_url}/api"
 description = "Billing API"
 docs_url = "https://docs.internal.example/billing"
 headers = {{ authorization = "Bearer billing-secret-token" }}
+timeout_ms = 5000
+
+[apis.datadog]
+base_url = "{base_url}"
+description = "Datadog-style API"
+docs_url = "https://docs.internal.example/datadog"
 timeout_ms = 5000
 "#,
         BearerTokenHash::from_token("default-billing-write.default-billing-write-secret").as_str(),
@@ -182,31 +188,31 @@ pub fn load_multi_api_test_config_without_projects_auth_header(
 bearer_token_id = "default-billing-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ projects = "write", billing = "write" }}
+api_access = {{ projects = [{{ method = "*", path = "*" }}], billing = [{{ method = "*", path = "*" }}] }}
 
 [clients.partner]
 bearer_token_id = "partner-projects-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-03T03:04:05Z"
-api_access = {{ projects = "write" }}
+api_access = {{ projects = [{{ method = "*", path = "*" }}] }}
 
 [clients.read-billing]
 bearer_token_id = "read-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-04T03:04:05Z"
-api_access = {{ billing = "read" }}
+api_access = {{ billing = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [clients.read-projects]
 bearer_token_id = "read-projects"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-05T03:04:05Z"
-api_access = {{ projects = "read" }}
+api_access = {{ projects = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [clients.expired-billing]
 bearer_token_id = "expired-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2020-01-01T00:00:00Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -243,31 +249,31 @@ pub fn load_test_config_with_billing_timeout(
 bearer_token_id = "default-billing-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [clients.partner]
 bearer_token_id = "partner-projects-write"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-03T03:04:05Z"
-api_access = {{ projects = "write" }}
+api_access = {{ projects = [{{ method = "*", path = "*" }}] }}
 
 [clients.read-billing]
 bearer_token_id = "read-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-04T03:04:05Z"
-api_access = {{ billing = "read" }}
+api_access = {{ billing = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [clients.read-projects]
 bearer_token_id = "read-projects"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2030-01-05T03:04:05Z"
-api_access = {{ projects = "read" }}
+api_access = {{ projects = [{{ method = "get", path = "*" }}, {{ method = "head", path = "*" }}, {{ method = "options", path = "*" }}] }}
 
 [clients.expired-billing]
 bearer_token_id = "expired-billing"
 bearer_token_hash = "{}"
 bearer_token_expires_at = "2020-01-01T00:00:00Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [apis.projects]
 base_url = "{base_url}"
@@ -303,19 +309,7 @@ pub fn bearer_token(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    bearer_token_with_access(api, AccessLevel::Write, secrets)
-}
-
-pub fn bearer_token_with_access(
-    api: &str,
-    access: AccessLevel,
-    secrets: &SecretsConfig,
-) -> Result<String, Box<dyn std::error::Error>> {
-    if access == AccessLevel::Write {
-        bearer_token_for_client(write_client_for_api(api, secrets)?, api, secrets)
-    } else {
-        Ok(read_only_bearer_token(api))
-    }
+    bearer_token_for_client(write_capable_client_for_api(api, secrets)?, api, secrets)
 }
 
 pub fn bearer_token_for_client(
@@ -327,21 +321,16 @@ pub fn bearer_token_for_client(
         .clients
         .get(client_slug)
         .ok_or_else(|| format!("missing test client '{client_slug}'"))?;
-    let access = client
+    client
         .api_access
         .get(api)
-        .copied()
         .ok_or_else(|| format!("client '{client_slug}' missing api '{api}' access"))?;
-
-    if access != AccessLevel::Write {
-        return Err(
-            format!("client '{client_slug}' does not have write access for '{api}'").into(),
-        );
-    }
 
     Ok(match client_slug {
         "default" => "default-billing-write.default-billing-write-secret".to_owned(),
         "partner" => "partner-projects-write.partner-projects-write-secret".to_owned(),
+        "read-billing" => "read-billing.read-billing-secret".to_owned(),
+        "read-projects" => "read-projects.read-projects-secret".to_owned(),
         _ => {
             return Err(format!("unsupported test client '{client_slug}'").into());
         }
@@ -455,7 +444,7 @@ fn write_secrets_file(
     Ok((temp_dir, secrets_file))
 }
 
-fn write_client_for_api(
+fn write_capable_client_for_api(
     api: &str,
     secrets: &SecretsConfig,
 ) -> Result<&'static str, Box<dyn std::error::Error>> {
@@ -464,8 +453,7 @@ fn write_client_for_api(
             .clients
             .get(client_slug)
             .and_then(|client| client.api_access.get(api))
-            .copied()
-            == Some(AccessLevel::Write)
+            .is_some_and(|rules| rules.iter().any(is_write_capable_rule))
         {
             return Ok(client_slug);
         }
@@ -474,12 +462,8 @@ fn write_client_for_api(
     Err(format!("no write client configured for api '{api}'").into())
 }
 
-fn read_only_bearer_token(api: &str) -> String {
-    match api {
-        "billing" => "read-billing.read-billing-secret".to_owned(),
-        "projects" => "read-projects.read-projects-secret".to_owned(),
-        other => format!("read-{other}.read-{other}-secret"),
-    }
+fn is_write_capable_rule(rule: &ApiAccessRule) -> bool {
+    matches!(rule.method, ApiAccessMethod::Any) && rule.path == "*"
 }
 
 async fn read_http_request(

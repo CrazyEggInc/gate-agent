@@ -21,6 +21,17 @@ pub struct ForwardRequest {
     pub body: Body,
 }
 
+impl ForwardRequest {
+    pub fn path_only(&self) -> &str {
+        let path = self
+            .path_and_query
+            .split_once('?')
+            .map_or(self.path_and_query.as_str(), |(path, _)| path);
+
+        if path.is_empty() { "/" } else { path }
+    }
+}
+
 pub fn map_request(
     request: Request<Body>,
     api_slug: &str,

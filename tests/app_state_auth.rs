@@ -5,7 +5,7 @@ use gate_agent::{
     config::{
         ConfigSource,
         app_config::AppConfig,
-        secrets::{AccessLevel, SecretsConfig},
+        secrets::{ApiAccessMethod, ApiAccessRule, SecretsConfig},
     },
     error::AppError,
 };
@@ -33,18 +33,32 @@ fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
     Ok(AppState::from_config(&config)?)
 }
 
+fn any_rule(path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Any,
+        path: path.to_owned(),
+    }
+}
+
+fn exact_rule(method: http::Method, path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Exact(method),
+        path: path.to_owned(),
+    }
+}
+
 const VALID_SECRETS: &str = r#"
 [clients.default]
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "write", billing = "write" }
+api_access = { projects = [{ method = "*", path = "*" }], billing = [{ method = "*", path = "*" }] }
 
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
 bearer_token_expires_at = "2026-10-09T12:00:00Z"
-api_access = { projects = "write" }
+api_access = { projects = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -80,10 +94,7 @@ fn app_state_resolves_client_by_bearer_token() -> Result<(), Box<dyn std::error:
     let client = state.client_for_bearer_token("partner.s3cr3t")?;
     let projects_access = state.client_api_access(client, "projects")?;
 
-    assert_eq!(
-        projects_access,
-        gate_agent::config::secrets::AccessLevel::Write
-    );
+    assert_eq!(projects_access, [any_rule("*")]);
 
     Ok(())
 }
@@ -99,7 +110,7 @@ bearer_token_expires_at = "2026-10-09T12:00:00Z"
 group = "shared-read"
 
 [groups.shared-read]
-api_access = { projects = "read", billing = "write" }
+api_access = { projects = [{ method = "get", path = "*" }], billing = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -121,12 +132,9 @@ timeout_ms = 5000
 
     assert_eq!(
         state.client_api_access(client, "projects")?,
-        gate_agent::config::secrets::AccessLevel::Read
+        [exact_rule(http::Method::GET, "*")]
     );
-    assert_eq!(
-        state.client_api_access(client, "billing")?,
-        gate_agent::config::secrets::AccessLevel::Write
-    );
+    assert_eq!(state.client_api_access(client, "billing")?, [any_rule("*")]);
 
     Ok(())
 }
@@ -139,7 +147,7 @@ fn app_state_exposes_runtime_api_metadata_for_effective_client_access()
     let client = state.client_for_bearer_token("partner.s3cr3t")?;
     let access = state.client_api_access_entry(client, "projects")?;
 
-    assert_eq!(access.access_level, AccessLevel::Write);
+    assert_eq!(access.rules, [any_rule("*")]);
     assert_eq!(access.api_config.slug, "projects");
     assert_eq!(
         access.api_config.description.as_deref(),
@@ -169,7 +177,7 @@ bearer_token_expires_at = "2026-10-09T12:00:00Z"
 group = "shared-read"
 
 [groups.shared-read]
-api_access = { projects = "read", billing = "write" }
+api_access = { projects = [{ method = "get", path = "*" }], billing = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -192,7 +200,7 @@ timeout_ms = 5000
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].api_config.slug, "billing");
-    assert_eq!(entries[0].access_level, AccessLevel::Write);
+    assert_eq!(entries[0].rules, [any_rule("*")]);
     assert_eq!(
         entries[0].api_config.description.as_deref(),
         Some("Billing API")
@@ -206,7 +214,7 @@ timeout_ms = 5000
         Some("https://docs.internal.example/billing")
     );
     assert_eq!(entries[1].api_config.slug, "projects");
-    assert_eq!(entries[1].access_level, AccessLevel::Read);
+    assert_eq!(entries[1].rules, [exact_rule(http::Method::GET, "*")]);
     assert_eq!(
         entries[1].api_config.description.as_deref(),
         Some("Project API")
@@ -279,7 +287,7 @@ fn app_state_rejects_expired_bearer_token() -> Result<(), Box<dyn std::error::Er
 bearer_token_id = "expired"
 bearer_token_hash = "ebb3c39e47bd8ebff3c889fcb0acdde61ef2d7913af92cdf821bb821ee90d048"
 bearer_token_expires_at = "2020-10-08T12:00:00Z"
-api_access = { projects = "write" }
+api_access = { projects = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"

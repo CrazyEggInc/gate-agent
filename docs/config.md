@@ -105,7 +105,7 @@ Required fields:
 - `bearer_token_expires_at: RFC3339 UTC timestamp`
 - exactly one of:
   - `group: String`
-  - `api_access: { <api-slug> = "read" | "write", ... }`
+  - `api_access: { <api-slug> = [{ method = "<method>|*", path = "<path>|*" }, ...], ... }`, `api_access = []`, or `api_access = [{ <api-slug> = [...] }]`
 
 Validation expectations:
 
@@ -116,7 +116,11 @@ Validation expectations:
 - clients must declare exactly one of `group` or `api_access`
 - `group` must reference an existing `[groups.<slug>]`
 - `api_access` keys must be lowercase valid API slugs
-- `api_access` values must be `read` or `write`
+- `api_access` may be empty; empty arrays grant no routes
+- each route rule must contain `method` and `path`
+- route rule `method` must be a valid HTTP method or `*`
+- route rule `path` must be `*` or start with `/`
+- route rule `path` must not contain query strings or fragments
 - every referenced API must exist in `[apis.*]`
 - duplicate `bearer_token_id` values across clients are rejected
 
@@ -132,14 +136,20 @@ Each group defines a reusable API access map.
 
 Required fields:
 
-- `api_access: { <api-slug> = "read" | "write", ... }`
+- `api_access: { <api-slug> = [{ method = "<method>|*", path = "<path>|*" }, ...], ... }`, `api_access = []`, or `api_access = [{ <api-slug> = [...] }]`
+
+Each `api_access` value is a route whitelist for that API. Empty maps, empty top-level arrays, and empty per-API route arrays are valid and grant no routes.
 
 Validation expectations:
 
 - group slug must be lowercase and contain only lowercase letters, digits, or hyphen
 - unknown fields are rejected
 - `api_access` keys must be lowercase valid API slugs
-- `api_access` values must be `read` or `write`
+- `api_access` may be empty; empty arrays grant no routes
+- each route rule must contain `method` and `path`
+- route rule `method` must be a valid HTTP method or `*`
+- route rule `path` must be `*` or start with `/`
+- route rule `path` must not contain query strings or fragments
 - every referenced API must exist in `[apis.*]`
 
 ### `[apis.<slug>]`
@@ -175,6 +185,7 @@ Validation expectations:
 - at least one client is required
 - `clients.default` is the conventional local/dev client
 - generated configs may start with empty group access maps and empty `[apis]`
+- route authorization defaults to block; adding an API to `[apis]` does not allow any client until a matching route rule is added to that client's inline `api_access` or referenced group
 
 ## Sample config
 
@@ -182,7 +193,7 @@ Validation expectations:
 
 ```toml
 [groups.local-default]
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.default]
 bearer_token_id = "default"
@@ -216,7 +227,7 @@ timeout_ms = 5000
 
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
 
-This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes `projects = "read"` together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.local-default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and access rules.
+This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.local-default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
 
 ## CLI-assisted config management
 
@@ -245,7 +256,7 @@ Behavior:
   - `Server port (default: 8787)`
 - when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
 
-Fresh init keeps `groups.local-default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting `projects = "read"` there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample access.
+Fresh init keeps `groups.local-default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions
@@ -350,7 +361,7 @@ Accepted flags:
 - `--name`
 - `--bearer-token-expires-at`
 - `--group <slug>`
-- repeated `--api-access <api=level[,api=level...]>`
+- repeated `--api-access <api:method:path[,api:method:path...]>`
 - `-d` / `--delete`
 
 Behavior:
@@ -358,7 +369,9 @@ Behavior:
 - validates slug inputs and bearer-token expiration dates
 - requires exactly one of `--group` or `--api-access` when creating a client
 - `--group` and `--api-access` are mutually exclusive in one invocation
-- `--api-access` accepts `read` and `write`
+- `--api-access` accepts route specs in `api:method:path` form
+- `method` accepts any valid HTTP method or `*`
+- `path` accepts `*` or a path beginning with `/`, without query strings or fragments
 - repeated `--api-access` flags are merged
 - creates config if it does not exist yet
 - adds or updates one client entry by default
@@ -424,12 +437,12 @@ This command manages `[groups.<slug>]` entries directly.
 Accepted flags:
 
 - `--name`
-- repeated `--api-access <api=level[,api=level...]>`
+- repeated `--api-access <api:method:path[,api:method:path...]>`
 - `-d` / `--delete`
 
 Behavior:
 
-- accepts a group name plus repeated `--api-access <api=level[,api=level...]>`
+- accepts a group name plus repeated `--api-access <api:method:path[,api:method:path...]>`
 - creates config if it does not exist yet
 - adds or updates one group entry by default
 - `-d` / `--delete` deletes one existing group entry instead of add-or-update
@@ -464,6 +477,9 @@ Runtime loading is stricter than ad-hoc file editing:
 - unknown fields are rejected
 - clients must declare exactly one of `group` or `api_access`
 - client and group `api_access` entries must refer to known `[apis.*]`
+- client and group `api_access` entries must contain non-empty route-rule arrays for each API key
+- route-rule methods must be valid HTTP methods or `*`
+- route-rule paths must be `*` or begin with `/`, with no query string or fragment
 - malformed timestamps and invalid slugs are rejected during parse/load
 
 ## `config validate`

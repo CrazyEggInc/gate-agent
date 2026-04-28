@@ -28,7 +28,7 @@ const VALID_CONFIG: &str = r#"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "/api/*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -41,7 +41,7 @@ const INVALID_CONFIG: &str = r#"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "/api/*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -95,7 +95,7 @@ fn client_args(config: PathBuf, name: &str) -> ConfigClientArgs {
         name: Some(name.to_owned()),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=read,reports=write".to_owned()],
+        api_access: vec!["projects:get:/api/*,reports:*:*".to_owned()],
         command: None,
     }
 }
@@ -160,7 +160,7 @@ encryption = "age"
 bearer_token_id = "mobile-app"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-    api_access = { projects = "read" }
+    api_access = { projects = [{ method = "get", path = "/api/*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -191,6 +191,24 @@ fn encrypt_test_config(
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn assert_api_access_rule(
+    api_access: Option<&Value>,
+    api: &str,
+    index: usize,
+    method: &str,
+    path: &str,
+) {
+    let rule = api_access
+        .and_then(|value| value.get(api))
+        .and_then(Value::as_array)
+        .and_then(|rules| rules.get(index))
+        .and_then(Value::as_table)
+        .expect("api access rule");
+
+    assert_eq!(rule.get("method").and_then(Value::as_str), Some(method));
+    assert_eq!(rule.get("path").and_then(Value::as_str), Some(path));
 }
 
 struct TtyCommandOutput {
@@ -1061,7 +1079,7 @@ fn config_command_dispatch_interactive_basic_auth_strips_default_authorization_h
 bearer_token_id = "default"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example/api"
@@ -1138,7 +1156,7 @@ fn config_command_dispatch_basic_auth_flag_strips_default_authorization_header()
 bearer_token_id = "default"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example/api"
@@ -1215,7 +1233,7 @@ fn config_command_dispatch_interactive_basic_auth_blank_password_clears_existing
 bearer_token_id = "default"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example/api"
@@ -1291,7 +1309,7 @@ fn config_command_dispatch_interactive_api_none_clears_existing_basic_auth()
 bearer_token_id = "default"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example/api"
@@ -1362,7 +1380,7 @@ fn config_command_dispatch_interactive_api_header_input_clears_existing_basic_au
 bearer_token_id = "default"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example/api"
@@ -1463,20 +1481,8 @@ fn config_command_dispatch_runs_client_subcommand() -> Result<(), Box<dyn std::e
             .and_then(Value::as_str),
         Some("2030-01-02T00:00:00Z")
     );
-    assert_eq!(
-        client
-            .get("api_access")
-            .and_then(|value| value.get("projects"))
-            .and_then(Value::as_str),
-        Some("read")
-    );
-    assert_eq!(
-        client
-            .get("api_access")
-            .and_then(|value| value.get("reports"))
-            .and_then(Value::as_str),
-        Some("write")
-    );
+    assert_api_access_rule(client.get("api_access"), "projects", 0, "get", "/api/*");
+    assert_api_access_rule(client.get("api_access"), "reports", 0, "*", "*");
 
     Ok(())
 }
@@ -1717,7 +1723,7 @@ fn config_command_dispatch_client_rotate_secret_rejects_parent_api_access_flag()
             config_path,
             false,
             None,
-            &["projects=write"],
+            &["projects:*:*"],
         )),
     }))
     .expect_err("rotate-secret should reject parent --api-access");
@@ -1753,7 +1759,7 @@ fn config_command_dispatch_client_rotate_secret_rejects_multiple_parent_client_f
             config_path,
             true,
             Some("ops"),
-            &["projects=write"],
+            &["projects:*:*"],
         )),
     }))
     .expect_err("rotate-secret should reject all forbidden parent client flags");
@@ -1956,20 +1962,8 @@ fn config_command_dispatch_resolves_client_rotate_secret_name_interactively()
             .and_then(Value::as_str),
         Some("2030-01-02T00:00:00Z")
     );
-    assert_eq!(
-        client
-            .get("api_access")
-            .and_then(|value| value.get("projects"))
-            .and_then(Value::as_str),
-        Some("read")
-    );
-    assert_eq!(
-        client
-            .get("api_access")
-            .and_then(|value| value.get("reports"))
-            .and_then(Value::as_str),
-        Some("write")
-    );
+    assert_api_access_rule(client.get("api_access"), "projects", 0, "get", "/api/*");
+    assert_api_access_rule(client.get("api_access"), "reports", 0, "*", "*");
 
     Ok(())
 }
@@ -2060,7 +2054,7 @@ fn cli_rejects_bearer_token_flag_for_config_client() {
         "--bearer-token-expires-at",
         "2030-01-02",
         "--api-access",
-        "projects=read",
+        "projects:get:/api/*",
     ]);
 
     assert_eq!(
@@ -2083,7 +2077,7 @@ fn cli_rejects_removed_api_key_flags_for_config_client() {
             "--api-key",
             "partner-secret",
             "--api-access",
-            "projects=read",
+            "projects:get:/api/*",
         ])
         .expect_err("api-key flag should be removed")
         .kind(),
@@ -2218,7 +2212,7 @@ fn config_command_dispatch_client_prints_generated_bearer_token_once()
             "--bearer-token-expires-at",
             "2030-01-02",
             "--api-access",
-            "projects=read,reports=write",
+            "projects:get:/api/*,reports:*:*",
         ])
         .output()?;
 
@@ -2357,7 +2351,7 @@ fn config_command_dispatch_runs_group_subcommand() -> Result<(), Box<dyn std::er
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
             name: Some("readonly".to_owned()),
-            api_access: vec!["projects=read,reports=write".to_owned()],
+            api_access: vec!["projects:get:/api/*,reports:*:*".to_owned()],
         }),
     }))?;
 
@@ -2368,20 +2362,8 @@ fn config_command_dispatch_runs_group_subcommand() -> Result<(), Box<dyn std::er
         .and_then(Value::as_table)
         .expect("readonly group config");
 
-    assert_eq!(
-        group
-            .get("api_access")
-            .and_then(|value| value.get("projects"))
-            .and_then(Value::as_str),
-        Some("read")
-    );
-    assert_eq!(
-        group
-            .get("api_access")
-            .and_then(|value| value.get("reports"))
-            .and_then(Value::as_str),
-        Some("write")
-    );
+    assert_api_access_rule(group.get("api_access"), "projects", 0, "get", "/api/*");
+    assert_api_access_rule(group.get("api_access"), "reports", 0, "*", "*");
 
     Ok(())
 }

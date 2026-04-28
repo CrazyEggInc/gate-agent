@@ -254,7 +254,7 @@ pub struct ConfigClientArgs {
 
     #[arg(
         long = "api-access",
-        help = "Inline API access entries as api=level pairs; levels: read, write. Repeat the flag or comma-separate pairs"
+        help = "API route rule as api:method:path; method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
     )]
     pub api_access: Vec<String>,
 
@@ -379,7 +379,7 @@ pub struct ConfigGroupArgs {
 
     #[arg(
         long = "api-access",
-        help = "Inline API access entries as api=level pairs; levels: read, write. Repeat the flag or comma-separate pairs"
+        help = "API route rule as api:method:path; method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
     )]
     pub api_access: Vec<String>,
 }

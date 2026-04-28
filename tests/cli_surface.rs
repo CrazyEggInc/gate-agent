@@ -176,6 +176,10 @@ fn config_group_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--api-access"));
+    assert!(stdout.contains("API route rule as api:method:path"));
+    assert!(stdout.contains("method is HTTP verb or *"));
+    assert!(stdout.contains("path supports * wildcards"));
+    assert!(stdout.contains("Repeat flag or comma-separate rules"));
     assert!(stdout.contains("--delete"));
     assert!(!stdout.contains("--api-key"));
     assert!(!stdout.contains("--api-key-expires-at"));
@@ -323,8 +327,10 @@ fn config_client_help_lists_expected_flags() -> Result<(), Box<dyn std::error::E
     assert!(stdout.contains("--api-access"));
     assert!(stdout.contains("rotate-secret"));
     assert!(stdout.contains("--delete"));
-    assert!(stdout.contains("levels: read, write"));
-    assert!(stdout.contains("Repeat the flag or comma-separate pairs"));
+    assert!(stdout.contains("API route rule as api:method:path"));
+    assert!(stdout.contains("method is HTTP verb or *"));
+    assert!(stdout.contains("path supports * wildcards"));
+    assert!(stdout.contains("Repeat flag or comma-separate rules"));
     assert!(!stdout.contains("--api-key"));
     assert!(!stdout.contains("--api-key-expires-at"));
 
@@ -415,9 +421,9 @@ fn config_client_accepts_repeated_api_access_flags() {
         "--name",
         "partner",
         "--api-access",
-        "projects=read,billing=write",
+        "projects:get:*,billing:*:*",
         "--api-access",
-        "events=read",
+        "events:get:*",
     ]);
 
     assert!(parsed.is_ok());
@@ -452,9 +458,9 @@ fn config_group_accepts_repeated_api_access_flags() {
         "--name",
         "readonly",
         "--api-access",
-        "projects=read,billing=write",
+        "projects:get:*,billing:*:*",
         "--api-access",
-        "events=read",
+        "events:get:*",
     ]);
 
     assert!(parsed.is_ok());
@@ -493,7 +499,7 @@ fn config_client_rejects_group_and_api_access_together() {
         "--group",
         "partner-readonly",
         "--api-access",
-        "projects=read",
+        "projects:get:*",
     ]);
 
     assert!(parsed.is_err());

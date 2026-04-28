@@ -452,7 +452,7 @@ mod tests {
 bearer_token_id = "0011223344556677"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [groups]
 

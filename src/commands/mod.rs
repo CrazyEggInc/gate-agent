@@ -10,7 +10,9 @@ use crate::cli::{
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
 use crate::config::app_config::DEFAULT_LOG_LEVEL;
-use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
+use crate::config::secrets::{
+    ApiAccessMethod, ApiAccessRule, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT,
+};
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
@@ -596,7 +598,7 @@ fn resolve_config_group_args(
         vec![prompt_required(
             "Inline api_access entry",
             existing.as_ref().map(render_api_access_map).as_deref(),
-            Some("projects=read,reports=write"),
+            Some("projects:get:/api/*,reports:*:*"),
             "config group requires --api-access in non-interactive sessions",
         )?]
     } else {
@@ -747,7 +749,7 @@ fn resolve_config_client_args(
                         .as_ref()
                         .map(render_client_api_access_map)
                         .as_deref(),
-                    Some("projects=read,reports=write"),
+                    Some("projects:get:/api/*,reports:*:*"),
                     "config client requires --group or --api-access in non-interactive sessions",
                 )?],
             ),
@@ -944,19 +946,25 @@ fn render_headers_map(map: &std::collections::BTreeMap<String, String>) -> Strin
         .join(",")
 }
 
-fn render_access_map(map: &std::collections::BTreeMap<String, AccessLevel>) -> String {
+fn render_access_map(map: &std::collections::BTreeMap<String, Vec<ApiAccessRule>>) -> String {
     map.iter()
-        .map(|(api, level)| {
-            format!(
-                "{api}={}",
-                match level {
-                    AccessLevel::Read => "read",
-                    AccessLevel::Write => "write",
-                }
-            )
-        })
+        .flat_map(|(api, rules)| render_api_access_rules(api, rules))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn render_api_access_rules(api: &str, rules: &[ApiAccessRule]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| {
+            let method = match &rule.method {
+                ApiAccessMethod::Any => "*".to_owned(),
+                ApiAccessMethod::Exact(method) => method.as_str().to_ascii_lowercase(),
+            };
+
+            format!("{api}:{method}:{}", rule.path)
+        })
+        .collect()
 }
 
 fn split_optional_header_segments(value: &str) -> Vec<String> {

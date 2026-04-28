@@ -36,8 +36,8 @@ For proxy routes, the expected flow is:
 2. Reject missing, repeated, or malformed authorization headers.
 3. Validate the presented bearer token as an opaque credential.
 4. Extract the route `{api}` slug.
-5. Derive required access from the inbound HTTP method.
-6. Require that `{api}` is allowed by the matched client's configured `api_access` at sufficient access.
+5. Extract the upstream suffix path after `/proxy/{api}`.
+6. Require that `{api}` is present in the matched client's configured `api_access` and that at least one route rule matches the inbound method and extracted suffix path.
 7. Resolve the upstream API config.
 8. Map the inbound request to an outbound upstream request.
 9. Execute the upstream request with the configured per-API timeout.
@@ -50,15 +50,16 @@ Bearer validation expectations:
 - validation is server-side lookup and hash verification, not token self-inspection
 - expired, unknown, malformed, or mismatched bearer credentials fail authentication
 - a validated bearer token resolves to one configured client
-- that client's configured `api_access` is the only authorization scope model
+- that client's configured `api_access` route whitelist is the only authorization scope model
 
-Method authorization rules:
+Route authorization rules:
 
-- `GET`, `HEAD`, `OPTIONS` require `read`
-- `POST`, `PUT`, `PATCH`, `DELETE` require `write`
-- every other method also requires `write`
-- `write` satisfies `read`
-- non-listed methods fail closed unless the token grants `write`
+- each API access entry is an allowlist of `{ method, path }` route rules
+- `method = "*"` matches any inbound HTTP method
+- `path = "*"` matches any extracted upstream suffix path
+- exact paths and glob-style path rules are matched against the suffix path after `/proxy/{api}`
+- query strings are ignored during route-rule matching
+- missing API access or missing route-rule match fails closed with `403 forbidden_api`
 
 Expected error classes:
 

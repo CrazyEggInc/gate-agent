@@ -9,7 +9,9 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
+use crate::config::secrets::{
+    ApiAccessMethod, ApiAccessRule, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT,
+};
 
 use super::ConfigError;
 use super::crypto::{
@@ -50,7 +52,7 @@ pub struct ApiUpsert {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientAccessUpsert {
     Group(String),
-    ApiAccess(std::collections::BTreeMap<String, AccessLevel>),
+    ApiAccess(BTreeMap<String, Vec<ApiAccessRule>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +73,7 @@ struct BearerTokenMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupUpsert {
     pub name: String,
-    pub api_access: std::collections::BTreeMap<String, AccessLevel>,
+    pub api_access: BTreeMap<String, Vec<ApiAccessRule>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,19 +489,32 @@ fn set_integer(table: &mut Table, key: &str, value_int: u64) -> Result<(), Write
 fn set_api_access_inline_table(
     table: &mut Table,
     key: &str,
-    values: &std::collections::BTreeMap<String, AccessLevel>,
+    values: &BTreeMap<String, Vec<ApiAccessRule>>,
 ) {
     let mut inline = toml_edit::InlineTable::new();
-    for (api, level) in values {
-        inline.insert(
-            api,
-            toml_edit::Value::from(match level {
-                AccessLevel::Read => "read",
-                AccessLevel::Write => "write",
-            }),
-        );
+    for (api, rules) in values {
+        let mut array = toml_edit::Array::new();
+
+        for rule in rules {
+            let mut rule_inline = toml_edit::InlineTable::new();
+            rule_inline.insert(
+                "method",
+                toml_edit::Value::from(api_access_method_label(rule)),
+            );
+            rule_inline.insert("path", toml_edit::Value::from(rule.path.as_str()));
+            array.push(toml_edit::Value::InlineTable(rule_inline));
+        }
+
+        inline.insert(api, toml_edit::Value::Array(array));
     }
     table[key] = Item::Value(toml_edit::Value::InlineTable(inline));
+}
+
+fn api_access_method_label(rule: &ApiAccessRule) -> String {
+    match &rule.method {
+        ApiAccessMethod::Any => "*".to_owned(),
+        ApiAccessMethod::Exact(method) => method.as_str().to_ascii_lowercase(),
+    }
 }
 
 fn set_string_inline_table(table: &mut Table, key: &str, values: &BTreeMap<String, String>) {

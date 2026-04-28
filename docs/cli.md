@@ -239,7 +239,7 @@ Must accept:
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 - `--name`
-- repeated `--api-access <api=level[,api=level...]>`
+- repeated `--api-access <api:method:path[,api:method:path...]>`
 - `-d` / `--delete`
 
 Behavior:
@@ -272,17 +272,17 @@ Accepted flags:
 - `--name`
 - `--bearer-token-expires-at`
 - `--group <slug>`
-- repeated `--api-access <api=level[,api=level...]>`
+- repeated `--api-access <api:method:path[,api:method:path...]>`
 - `-d` / `--delete`
 
 Rules and behavior:
 
 - exactly one of `--group` or `--api-access` is required when creating a client
 - `--group` and `--api-access` are mutually exclusive
-- `--api-access` accepts `read` and `write`
+- `--api-access` accepts route specs in `api:method:path` form, where `method` is an HTTP verb or `*` and `path` is `*` or a path starting with `/`
 - repeated `--api-access` flags are merged
 - if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
-- one flag may contain comma-separated pairs such as `--api-access projects=read,billing=write`
+- one flag may contain comma-separated route specs such as `--api-access projects:get:*,billing:*:*`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
 - interactive name prompts list existing client names as `<name> (edit)` for up/down selection and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name

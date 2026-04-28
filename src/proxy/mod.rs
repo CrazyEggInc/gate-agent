@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use http::{HeaderMap, HeaderName, Method, header};
+use http::{HeaderMap, HeaderName, header};
 
 pub mod forward;
 pub mod request;
@@ -34,13 +34,4 @@ pub(crate) fn is_hop_by_hop_header(
         || name == header::TRANSFER_ENCODING
         || name == header::UPGRADE
         || name.as_str().eq_ignore_ascii_case("proxy-connection")
-}
-
-pub(crate) fn required_access_for_method(method: &Method) -> crate::config::secrets::AccessLevel {
-    match method {
-        &Method::GET | &Method::HEAD | &Method::OPTIONS => {
-            crate::config::secrets::AccessLevel::Read
-        }
-        _ => crate::config::secrets::AccessLevel::Write,
-    }
 }

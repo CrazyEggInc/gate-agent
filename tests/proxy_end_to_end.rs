@@ -16,21 +16,15 @@ use gate_agent::{
     commands::config::{
         ConfigApiArgs, ConfigApiAuthSelection, ConfigGroupArgs, apply_api, apply_group,
     },
-    config::{
-        ConfigSource,
-        app_config::AppConfig,
-        secrets::{AccessLevel, SecretsConfig},
-        write,
-    },
+    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig, write},
     proxy::router::build_router,
 };
 use http_body_util::BodyExt;
 use support::{
-    bearer_token, bearer_token_for_client, bearer_token_with_access, capture_channel,
-    capture_request, expired_bearer_token, load_multi_api_test_config,
-    load_multi_api_test_config_without_projects_auth_header, load_test_config,
-    load_test_config_with_billing_basic_auth, load_test_config_with_billing_timeout,
-    spawn_chunked_upstream, spawn_upstream,
+    bearer_token, bearer_token_for_client, capture_channel, capture_request, expired_bearer_token,
+    load_multi_api_test_config, load_multi_api_test_config_without_projects_auth_header,
+    load_test_config, load_test_config_with_billing_basic_auth,
+    load_test_config_with_billing_timeout, spawn_chunked_upstream, spawn_upstream,
 };
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -279,7 +273,7 @@ async fn proxy_route_forwards_basic_auth_written_by_config_api()
         log_level: "debug".to_owned(),
         name: "local-default".to_owned(),
         delete: false,
-        api_access: vec!["billing=write".to_owned()],
+        api_access: vec!["billing:*:*".to_owned()],
     })?;
 
     let config = AppConfig::new(
@@ -378,7 +372,7 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/proxy/projects/path?expand=1")
+                .uri("/proxy/projects/api/v1/projects/path?expand=1")
                 .header("authorization", format!("Bearer {token}"))
                 .header("x-api-key", "client-collision-value")
                 .header("x-custom", "preserved")
@@ -389,7 +383,10 @@ async fn proxy_route_uses_api_segment_for_projects_multi_api_token()
     assert_eq!(projects_response.status(), StatusCode::OK);
 
     let projects_request = rx.await?;
-    assert_eq!(projects_request.path_and_query, "/path?expand=1");
+    assert_eq!(
+        projects_request.path_and_query,
+        "/api/v1/projects/path?expand=1"
+    );
     assert_eq!(
         projects_request.headers.get("x-api-key").unwrap(),
         "projects-secret-value"
@@ -831,21 +828,22 @@ async fn proxy_route_preserves_double_slash_segments() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
-async fn proxy_route_allows_get_with_read_token() -> Result<(), Box<dyn std::error::Error>> {
+async fn proxy_route_allows_get_matching_whitelist_rule() -> Result<(), Box<dyn std::error::Error>>
+{
     let (sender, rx) = capture_channel();
     let upstream = Router::new()
-        .route("/api/{*path}", any(capture_request))
+        .route("/{*path}", any(capture_request))
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
-    let config = load_test_config(&base_url)?;
-    let token = bearer_token_with_access("billing", AccessLevel::Read, config.secrets())?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("read-projects", "projects", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/proxy/billing/v1/projects/1/tasks")
+                .uri("/proxy/projects/api/v1/projects/1/tasks")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
@@ -861,18 +859,19 @@ async fn proxy_route_allows_get_with_read_token() -> Result<(), Box<dyn std::err
 }
 
 #[tokio::test]
-async fn proxy_route_rejects_post_with_read_token() -> Result<(), Box<dyn std::error::Error>> {
+async fn proxy_route_rejects_post_when_only_get_rule_matches()
+-> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
-    let config = load_test_config(&base_url)?;
-    let token = bearer_token_with_access("billing", AccessLevel::Read, config.secrets())?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("read-projects", "projects", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/proxy/billing/v1/projects/1/tasks")
+                .uri("/proxy/projects/api/v1/projects/1/tasks")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
@@ -889,21 +888,22 @@ async fn proxy_route_rejects_post_with_read_token() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn proxy_route_allows_delete_with_write_token() -> Result<(), Box<dyn std::error::Error>> {
+async fn proxy_route_allows_post_matching_narrower_users_rule()
+-> Result<(), Box<dyn std::error::Error>> {
     let (sender, rx) = capture_channel();
     let upstream = Router::new()
-        .route("/api/{*path}", any(capture_request))
+        .route("/{*path}", any(capture_request))
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
-    let config = load_test_config(&base_url)?;
-    let token = bearer_token("billing", config.secrets())?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("default", "projects", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
         .oneshot(
             Request::builder()
-                .method("DELETE")
-                .uri("/proxy/billing/v1/projects/1/tasks")
+                .method("POST")
+                .uri("/proxy/projects/api/users/42")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
@@ -912,26 +912,25 @@ async fn proxy_route_allows_delete_with_write_token() -> Result<(), Box<dyn std:
     assert_eq!(response.status(), StatusCode::OK);
 
     let captured = rx.await?;
-    assert_eq!(captured.method, "DELETE");
-    assert_eq!(captured.path_and_query, "/api/v1/projects/1/tasks");
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path_and_query, "/api/users/42");
 
     Ok(())
 }
 
 #[tokio::test]
-async fn proxy_route_rejects_custom_method_with_read_token()
--> Result<(), Box<dyn std::error::Error>> {
+async fn proxy_route_rejects_unmatched_whitelist_path() -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
-    let config = load_test_config(&base_url)?;
-    let token = bearer_token_with_access("billing", AccessLevel::Read, config.secrets())?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("default", "projects", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
     let response = app
         .oneshot(
             Request::builder()
-                .method("TRACE")
-                .uri("/proxy/billing/v1/projects/1/tasks")
+                .method("GET")
+                .uri("/proxy/projects/api/v1/tasks/1")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
@@ -948,7 +947,7 @@ async fn proxy_route_rejects_custom_method_with_read_token()
 }
 
 #[tokio::test]
-async fn proxy_route_authorizes_multi_api_token_by_route_api_and_method_required_access()
+async fn proxy_route_allows_any_datadog_method_and_path_with_wildcard_rule()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sender, rx) = capture_channel();
     let upstream = Router::new()
@@ -956,42 +955,24 @@ async fn proxy_route_authorizes_multi_api_token_by_route_api_and_method_required
         .with_state(sender);
     let base_url = spawn_upstream(upstream).await?;
     let config = load_multi_api_test_config(&base_url)?;
-    let token = bearer_token_with_access("projects", AccessLevel::Read, config.secrets())?;
+    let token = bearer_token_for_client("default", "datadog", config.secrets())?;
     let app = build_router(AppState::from_config(&config)?);
 
-    let get_response = app
-        .clone()
+    let response = app
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri("/proxy/projects/path?expand=1")
+                .method("PATCH")
+                .uri("/proxy/datadog/api/v2/series?from=1")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
         .await?;
 
-    assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let projects_request = rx.await?;
-    assert_eq!(projects_request.path_and_query, "/path?expand=1");
-    assert_eq!(projects_request.method, "GET");
-
-    let denied_response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/proxy/projects/path")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())?,
-        )
-        .await?;
-
-    assert_eq!(denied_response.status(), StatusCode::FORBIDDEN);
-
-    let payload: serde_json::Value =
-        serde_json::from_slice(&denied_response.into_body().collect().await?.to_bytes())?;
-
-    assert_eq!(payload["error"]["code"], "forbidden_api");
+    let captured = rx.await?;
+    assert_eq!(captured.method, "PATCH");
+    assert_eq!(captured.path_and_query, "/api/v2/series?from=1");
 
     Ok(())
 }

@@ -228,13 +228,13 @@ fn load_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error::Err
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ billing = "write" }}
+api_access = {{ billing = [{{ method = "*", path = "*" }}] }}
 
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
 bearer_token_expires_at = "2030-01-03T03:04:05Z"
-api_access = {{ projects = "write" }}
+api_access = {{ projects = [{{ method = "*", path = "*" }}] }}
 
 [apis.projects]
 base_url = "{base_url}"
