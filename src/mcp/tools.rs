@@ -562,12 +562,31 @@ fn serialize_headers(
 }
 
 fn include_response_header(name: &str, response_headers: ResponseHeadersMode) -> bool {
+    if is_sensitive_response_header(name) {
+        return false;
+    }
+
     match response_headers {
         ResponseHeadersMode::All => true,
         ResponseHeadersMode::Essential => {
             name.eq_ignore_ascii_case("content-type") || name.eq_ignore_ascii_case("date")
         }
     }
+}
+
+fn is_sensitive_response_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+
+    matches!(
+        name.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "set-cookie"
+            | "www-authenticate"
+    ) || name.contains("token")
+        || name.contains("secret")
+        || name.contains("api-key")
 }
 
 fn is_json_content_type(content_type: &str) -> bool {

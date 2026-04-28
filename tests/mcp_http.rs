@@ -814,6 +814,16 @@ async fn mcp_route_call_api_can_return_all_response_headers()
                 .headers_mut()
                 .insert("x-upstream", HeaderValue::from_static("present"));
             response
+                .headers_mut()
+                .insert("set-cookie", HeaderValue::from_static("session=secret"));
+            response.headers_mut().insert(
+                "www-authenticate",
+                HeaderValue::from_static("Bearer secret"),
+            );
+            response
+                .headers_mut()
+                .insert("x-api-key", HeaderValue::from_static("upstream-secret"));
+            response
         }),
     );
     let base_url = spawn_upstream(upstream).await?;
@@ -849,6 +859,9 @@ async fn mcp_route_call_api_can_return_all_response_headers()
         content["headers"]["x-upstream"],
         serde_json::json!(["present"])
     );
+    assert!(content["headers"].get("set-cookie").is_none());
+    assert!(content["headers"].get("www-authenticate").is_none());
+    assert!(content["headers"].get("x-api-key").is_none());
 
     Ok(())
 }
