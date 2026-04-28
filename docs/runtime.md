@@ -25,6 +25,7 @@ The runtime router must expose both product entrypoints:
 
 - `/proxy/...` for direct HTTP proxy traffic
 - `/mcp` for MCP JSON-RPC traffic over HTTP
+- `/health` for unauthenticated local health checks; successful responses return HTTP `200 OK` with body `OK`
 
 `version` is a metadata-only command. It prints build version information and exits before config loading, runtime state construction, and listener startup.
 

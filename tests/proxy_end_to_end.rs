@@ -35,6 +35,22 @@ use support::{
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn health_route_returns_ok_without_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_test_config("http://127.0.0.1:1")?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(Request::builder().uri("/health").body(Body::empty())?)
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(body, bytes::Bytes::from_static(b"OK"));
+
+    Ok(())
+}
+
 async fn assert_upstream_redirect_is_followed(
     redirect_status: StatusCode,
 ) -> Result<(), Box<dyn std::error::Error>> {
