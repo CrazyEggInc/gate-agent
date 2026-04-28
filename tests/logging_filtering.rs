@@ -341,10 +341,12 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
             .await?;
 
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(
-            response.headers().get("x-request-id").unwrap(),
-            "req-success"
-        );
+        let response_request_id = response
+            .headers()
+            .get("x-request-id")
+            .expect("generated request id")
+            .to_str()?;
+        assert_ne!(response_request_id, "req-success");
         assert_eq!(
             response.into_body().collect().await?.to_bytes(),
             "upstream ok"
@@ -375,10 +377,9 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         find_string(completion, &["client"]).as_deref(),
         Some("default")
     );
-    assert_eq!(
-        find_string(completion, &["request_id"]).as_deref(),
-        Some("req-success")
-    );
+    let logged_request_id = find_string(completion, &["request_id"])
+        .expect("completion log should include generated request id");
+    assert_ne!(logged_request_id, "req-success");
     assert_eq!(find_string(completion, &["method"]).as_deref(), Some("GET"));
     assert_eq!(
         find_string(completion, &["uri"]).as_deref(),
@@ -490,10 +491,9 @@ async fn completion_logs_add_error_code_only_for_application_errors()
         find_string(completion, &["client"]).as_deref(),
         Some("default")
     );
-    assert_eq!(
-        find_string(completion, &["request_id"]).as_deref(),
-        Some("req-forbidden")
-    );
+    let logged_request_id = find_string(completion, &["request_id"])
+        .expect("completion log should include generated request id");
+    assert_ne!(logged_request_id, "req-forbidden");
     assert_eq!(find_string(completion, &["method"]).as_deref(), Some("GET"));
     assert_eq!(
         find_string(completion, &["uri"]).as_deref(),

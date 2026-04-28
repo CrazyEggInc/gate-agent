@@ -571,10 +571,13 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id_for_
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-test-123"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-test-123");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -585,7 +588,7 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id_for_
             "error": {
                 "code": "invalid_token",
                 "message": "authentication failed",
-                "request_id": "req-test-123"
+                "request_id": request_id
             }
         })
     );
@@ -621,16 +624,19 @@ async fn proxy_route_rejects_duplicate_authorization_headers()
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-duplicate-auth"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-duplicate-auth");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
     assert_eq!(payload["error"]["code"], "invalid_token");
-    assert_eq!(payload["error"]["request_id"], "req-duplicate-auth");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
@@ -662,6 +668,14 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
 
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
 
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-timeout");
+
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
@@ -671,7 +685,7 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
             "error": {
                 "code": "upstream_timeout",
                 "message": "upstream request timed out",
-                "request_id": "req-timeout"
+                "request_id": request_id
             }
         })
     );

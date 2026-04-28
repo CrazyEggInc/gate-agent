@@ -66,6 +66,10 @@ pub fn sanitize_url_for_logs(raw_url: &str) -> String {
         .to_owned()
 }
 
+pub(crate) fn generate_internal_request_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
 pub fn init_tracing(log_filter: &str) -> Result<(), AppError> {
     init_tracing_with_state(&TRACING_INIT_RESULT, log_filter)
 }

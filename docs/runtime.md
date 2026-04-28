@@ -110,9 +110,9 @@ This keeps auth behavior consistent and reduces duplicated time logic.
 
 ## Telemetry
 
-The runtime must carry a configurable log level and attach request IDs so logs and error responses can be correlated with incoming requests.
+The runtime must carry a configurable log level and attach generated request IDs so logs and error responses can be correlated with handled requests.
 
-This request-ID behavior applies to both `/proxy/...` and `/mcp`. Callers may supply `x-request-id`; otherwise the router generates one and propagates it on responses.
+This request-ID behavior applies to both `/proxy/...` and `/mcp`. The router always generates its own internal request ID and propagates that generated value on responses. Caller-supplied `x-request-id` values are not trusted for logs or response payloads.
 
 Authentication expectations also apply consistently across both route families. `/mcp` is not an anonymous control plane endpoint: callers must present exactly one valid `Authorization: Bearer <token>` header before any MCP request is parsed or dispatched.
 

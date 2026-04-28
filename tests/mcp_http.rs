@@ -107,10 +107,13 @@ async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-invalid"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-invalid");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -121,7 +124,7 @@ async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
             "error": {
                 "code": "invalid_token",
                 "message": "authentication failed",
-                "request_id": "req-mcp-invalid"
+                "request_id": request_id
             }
         })
     );
@@ -164,15 +167,19 @@ async fn mcp_route_rejects_duplicate_authorization_headers()
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-duplicate-auth"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-duplicate-auth");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
     assert_eq!(payload["error"]["code"], "invalid_token");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
@@ -205,10 +212,12 @@ async fn mcp_route_accepts_valid_bearer_token_for_initialize()
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("www-authenticate").is_none());
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-init"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?;
+    assert_ne!(request_id, "req-mcp-init");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -254,16 +263,19 @@ async fn mcp_route_rejects_oversized_request_body_before_json_rpc_dispatch()
         .await?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-too-large"
-    );
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-too-large");
 
     let payload = json_body(response).await?;
 
     assert_eq!(payload["error"]["code"], "bad_request");
     assert_eq!(payload["error"]["message"], "request is invalid");
-    assert_eq!(payload["error"]["request_id"], "req-mcp-too-large");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
