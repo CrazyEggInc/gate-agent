@@ -52,7 +52,9 @@ fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {
     let mut filtered_headers = HeaderMap::new();
 
     for (name, value) in headers {
-        if is_hop_by_hop_header(name, &connection_bound_names) {
+        if is_hop_by_hop_header(name, &connection_bound_names)
+            || is_sensitive_response_header(name.as_str())
+        {
             continue;
         }
 
@@ -60,4 +62,19 @@ fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {
     }
 
     filtered_headers
+}
+
+fn is_sensitive_response_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+
+    matches!(
+        name.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "set-cookie"
+            | "www-authenticate"
+    ) || name.contains("token")
+        || name.contains("secret")
+        || name.contains("api-key")
 }

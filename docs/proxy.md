@@ -137,7 +137,8 @@ Response expectations:
 - preserve upstream status code
 - stream upstream response bodies back to the caller
 - strip hop-by-hop headers from upstream responses
-- preserve non-hop-by-hop headers
+- strip sensitive upstream response headers such as cookies, auth challenges, authorization values, tokens, secrets, and API keys
+- preserve non-hop-by-hop, non-sensitive headers
 
 ## Proxy telemetry
 

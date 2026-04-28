@@ -1067,6 +1067,9 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
         &[
             ("content-type", "application/json"),
             ("x-upstream", "streamed"),
+            ("set-cookie", "session=secret"),
+            ("www-authenticate", "Bearer secret"),
+            ("x-api-key", "upstream-secret"),
         ],
         &[br#"{"items":["# as &[u8], br#""alpha","#, br#""beta"]}"#],
     )
@@ -1090,6 +1093,9 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
         "application/json"
     );
     assert_eq!(response.headers().get("x-upstream").unwrap(), "streamed");
+    assert!(response.headers().get("set-cookie").is_none());
+    assert!(response.headers().get("www-authenticate").is_none());
+    assert!(response.headers().get("x-api-key").is_none());
     let request_id = response
         .headers()
         .get("x-request-id")
