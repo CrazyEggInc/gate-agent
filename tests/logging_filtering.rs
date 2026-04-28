@@ -26,6 +26,8 @@ use tower::ServiceExt;
 use tracing_subscriber::fmt::MakeWriter;
 
 const DEFAULT_TOKEN: &str = "default.s3cr3t";
+const DEFAULT_TOKEN_HASH: &str = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d";
+const PARTNER_TOKEN_HASH: &str = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77";
 
 #[derive(Clone, Default)]
 struct SharedBuffer {
@@ -334,7 +336,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
             .oneshot(
                 Request::builder()
                     .uri("/proxy/billing/v1/projects/1/tasks?expand=1&jwt=query-secret")
-                    .header("x-request-id", "req-success")
+                    .header("x-request-id", "caller-secret-request-id")
                     .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
                     .body(Body::empty())?,
             )
@@ -346,7 +348,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
             .get("x-request-id")
             .expect("generated request id")
             .to_str()?;
-        assert_ne!(response_request_id, "req-success");
+        assert_ne!(response_request_id, "caller-secret-request-id");
         assert_eq!(
             response.into_body().collect().await?.to_bytes(),
             "upstream ok"
@@ -379,7 +381,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     );
     let logged_request_id = find_string(completion, &["request_id"])
         .expect("completion log should include generated request id");
-    assert_ne!(logged_request_id, "req-success");
+    assert_ne!(logged_request_id, "caller-secret-request-id");
     assert_eq!(find_string(completion, &["method"]).as_deref(), Some("GET"));
     assert_eq!(
         find_string(completion, &["uri"]).as_deref(),
@@ -425,12 +427,32 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
     );
     assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
     assert!(
+        !logs.raw.contains(DEFAULT_TOKEN_HASH),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !logs.raw.contains(PARTNER_TOKEN_HASH),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
         !logs.raw.contains(&format!("Bearer {DEFAULT_TOKEN}")),
         "logs were: {}",
         logs.raw
     );
     assert!(
         !logs.raw.contains("billing-secret-token"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !logs.raw.contains("projects-secret-value"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !logs.raw.contains("caller-secret-request-id"),
         "logs were: {}",
         logs.raw
     );
@@ -462,7 +484,7 @@ async fn completion_logs_add_error_code_only_for_application_errors()
             .oneshot(
                 Request::builder()
                     .uri("/proxy/projects/v1/projects/1/tasks")
-                    .header("x-request-id", "req-forbidden")
+                    .header("x-request-id", "caller-forbidden-secret-id")
                     .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
                     .body(Body::empty())?,
             )
@@ -493,7 +515,7 @@ async fn completion_logs_add_error_code_only_for_application_errors()
     );
     let logged_request_id = find_string(completion, &["request_id"])
         .expect("completion log should include generated request id");
-    assert_ne!(logged_request_id, "req-forbidden");
+    assert_ne!(logged_request_id, "caller-forbidden-secret-id");
     assert_eq!(find_string(completion, &["method"]).as_deref(), Some("GET"));
     assert_eq!(
         find_string(completion, &["uri"]).as_deref(),
@@ -514,7 +536,17 @@ async fn completion_logs_add_error_code_only_for_application_errors()
     );
     assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
     assert!(
+        !logs.raw.contains(DEFAULT_TOKEN_HASH),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
         !logs.raw.contains(&format!("Bearer {DEFAULT_TOKEN}")),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !logs.raw.contains("caller-forbidden-secret-id"),
         "logs were: {}",
         logs.raw
     );
