@@ -14,44 +14,16 @@
 Install the latest published release:
 
 ```sh
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) TARGET=linux-x64 ;;
-  Darwin-arm64) TARGET=macos-arm64 ;;
-  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-esac
-
-ARCHIVE="gate-agent-latest-${TARGET}.tar.gz"
-CHECKSUMS="gate-agent-latest-sha256sums.txt"
-BASE_URL="https://github.com/CrazyEggInc/gate-agent/releases/latest/download"
-
-curl -fsSLO "${BASE_URL}/${CHECKSUMS}"
-curl -fsSLO "${BASE_URL}/${ARCHIVE}"
-
-if command -v shasum >/dev/null 2>&1; then
-  grep " ${ARCHIVE}\$" "${CHECKSUMS}" | shasum -a 256 -c -
-else
-  grep " ${ARCHIVE}\$" "${CHECKSUMS}" | sha256sum --check -
-fi
-
-tar -xzf "${ARCHIVE}"
-install gate-agent /usr/local/bin/gate-agent
+curl -fsSL https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/heads/master/install.sh | sh
 ```
 
-Install a pinned release by setting `VERSION` and using versioned assets:
+Install a pinned release or custom install directory by setting environment variables:
 
 ```sh
-VERSION=1.2.3
-TARGET=linux-x64
-ARCHIVE="gate-agent-v${VERSION}-${TARGET}.tar.gz"
-CHECKSUMS="gate-agent-v${VERSION}-sha256sums.txt"
-BASE_URL="https://github.com/CrazyEggInc/gate-agent/releases/download/v${VERSION}"
-
-curl -fsSLO "${BASE_URL}/${CHECKSUMS}"
-curl -fsSLO "${BASE_URL}/${ARCHIVE}"
-grep " ${ARCHIVE}\$" "${CHECKSUMS}" | sha256sum --check -
-tar -xzf "${ARCHIVE}"
-install gate-agent /usr/local/bin/gate-agent
+curl -fsSL https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/heads/master/install.sh | VERSION=1.2.3 GATE_AGENT_INSTALL_DIR="$HOME/.local/bin" sh
 ```
+
+The installer defaults to `~/.local/bin` and adds it to your shell `PATH` when needed.
 
 ## Quickstart
 
