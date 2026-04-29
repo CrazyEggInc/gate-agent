@@ -209,8 +209,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts list existing API names as `<name> (edit)` for up/down selection and include an `add new api` entry; selecting an existing API updates it, selecting `add new api` asks for the new name
-- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Apis`, list existing API names as `<name> (edit)` for up/down selection, and include an `add new api` entry; selecting an existing API updates it, selecting `add new api` asks for the new name
+- selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for them in a single-line format with minimal wording
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
@@ -239,7 +239,7 @@ Must accept:
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 - `--name`
-- repeated `--api-access <api:method:path[,api:method:path...]>`
+- repeated `--api-access <api:method:path[,method:path...]>`
 - `-d` / `--delete`
 
 Behavior:
@@ -253,8 +253,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts list existing group names as `<name> (edit)` for up/down selection and include an `add new group` entry; selecting an existing group updates it, selecting `add new group` asks for the new name
-- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Groups`, list existing group names as `<name> (edit)` for up/down selection, and include an `add new group` entry; selecting an existing group updates it, selecting `add new group` asks for the new name
+- selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
@@ -272,23 +272,23 @@ Accepted flags:
 - `--name`
 - `--bearer-token-expires-at`
 - `--group <slug>`
-- repeated `--api-access <api:method:path[,api:method:path...]>`
+- repeated `--api-access <api:method:path[,method:path...]>`
 - `-d` / `--delete`
 
 Rules and behavior:
 
 - exactly one of `--group` or `--api-access` is required when creating a client
 - `--group` and `--api-access` are mutually exclusive
-- `--api-access` accepts route specs in `api:method:path` form, where `method` is an HTTP verb or `*` and `path` is `*` or a path starting with `/`
-- repeated `--api-access` flags are merged
+- `--api-access` accepts one API slug followed by one or more `method:path` route rules, where `method` is an HTTP verb or `*` and `path` is `*` or a path starting with `/`
+- repeated `--api-access` flags are merged across API slugs
 - if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
-- one flag may contain comma-separated route specs such as `--api-access projects:get:*,billing:*:*`
+- one flag may contain comma-separated route rules for one API, such as `--api-access projects:get:*,post:/projects`; use another flag for another API, such as `--api-access billing:*:*`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
-- interactive name prompts list existing client names as `<name> (edit)` for up/down selection and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name
-- resource selectors do not print the resource-name question above the option list; selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Clients`, list existing client names as `<name> (edit)` for up/down selection, and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name
+- selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
-- when required fields are omitted in an interactive create flow, the command prompts for them
+- when required fields are omitted in an interactive create flow, the command prompts for them; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
 - in the interactive client flow, the CLI asks for `Access mode` before prompting for `Group name`
 - when groups already exist, the `Group name` prompt lists those slugs as `<name> (edit)` for up/down selection and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - `Group name` is required when `Access mode` is `group`; a blank response fails instead of falling back to inline `api_access`

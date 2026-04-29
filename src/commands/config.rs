@@ -207,6 +207,14 @@ impl ResourceKind {
             Self::Client => "add new client",
         }
     }
+
+    pub fn selector_label(self) -> &'static str {
+        match self {
+            Self::Api => "Existing Apis",
+            Self::Group => "Existing Groups",
+            Self::Client => "Existing Clients",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -622,12 +630,6 @@ pub fn apply_group(args: ConfigGroupArgs) -> Result<ResourceMutationOutcome, Con
         parse_api_access_args(&args.api_access)?
     };
 
-    if api_access.is_empty() {
-        return Err(ConfigCommandError::new(
-            "api_access entries are required for groups",
-        ));
-    }
-
     let generated_default_bearer_token = ensure_config_exists(&path, args.password.as_deref())?;
     let prepared = prepare_existing_config_access(&path, args.password.clone())?;
 
@@ -756,12 +758,12 @@ fn load_existing_client_rotation_state_from_toml(
             client_table,
             &format!("clients.{client_name}.api_access"),
         )?;
-        if api_access.is_empty() {
+        let Some(api_access) = api_access else {
             return Err(ConfigCommandError::new(format!(
                 "client '{}' must declare existing group or api_access before rotation",
                 client_name
             )));
-        }
+        };
 
         ClientAccessUpsert::ApiAccess(api_access)
     };
@@ -1091,7 +1093,8 @@ fn load_existing_group_state_from_prepared(
         api_access: parse_inline_api_access_table(
             group_table,
             &format!("groups.{group_name}.api_access"),
-        )?,
+        )?
+        .unwrap_or_default(),
     }))
 }
 
@@ -1116,6 +1119,7 @@ fn load_existing_client_state_from_prepared(
         BTreeMap::new()
     } else {
         parse_inline_api_access_table(client_table, &format!("clients.{client_name}.api_access"))?
+            .unwrap_or_default()
     };
 
     Ok(Some(ExistingClientPromptState {
@@ -1128,9 +1132,9 @@ fn load_existing_client_state_from_prepared(
 fn parse_inline_api_access_table(
     table: &Table,
     field_label: &str,
-) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigCommandError> {
+) -> Result<Option<BTreeMap<String, Vec<ApiAccessRule>>>, ConfigCommandError> {
     let Some(item) = table.get("api_access") else {
-        return Ok(BTreeMap::new());
+        return Ok(None);
     };
 
     let mut api_access = BTreeMap::new();
@@ -1142,11 +1146,11 @@ fn parse_inline_api_access_table(
             );
         }
 
-        return Ok(api_access);
+        return Ok(Some(api_access));
     }
 
     if let Some(api_access_array) = item.as_array() {
-        return parse_api_access_entry_array(field_label, api_access_array.iter());
+        return parse_api_access_entry_array(field_label, api_access_array.iter()).map(Some);
     }
 
     let Some(api_access_table) = item.as_value().and_then(toml_edit::Value::as_inline_table) else {
@@ -1162,7 +1166,7 @@ fn parse_inline_api_access_table(
         );
     }
 
-    Ok(api_access)
+    Ok(Some(api_access))
 }
 
 fn parse_api_access_entry_array<'a>(
@@ -1537,6 +1541,25 @@ pub(crate) fn prompt_select(
     default: Option<&str>,
     non_interactive_message: &str,
 ) -> Result<String, ConfigCommandError> {
+    prompt_select_internal(prompt, items, default, non_interactive_message, false)
+}
+
+pub(crate) fn prompt_select_with_prompt(
+    prompt: &str,
+    items: &[String],
+    default: Option<&str>,
+    non_interactive_message: &str,
+) -> Result<String, ConfigCommandError> {
+    prompt_select_internal(prompt, items, default, non_interactive_message, true)
+}
+
+fn prompt_select_internal(
+    prompt: &str,
+    items: &[String],
+    default: Option<&str>,
+    non_interactive_message: &str,
+    show_prompt: bool,
+) -> Result<String, ConfigCommandError> {
     if let Some(response) = take_test_prompt_input()? {
         let response = apply_prompt_default(response, default);
         let trimmed = response.trim();
@@ -1570,9 +1593,14 @@ pub(crate) fn prompt_select(
                 .position(|item| item.contains("add new") || item.contains("Add new"))
         })
         .unwrap_or(0);
-    let selection = dialoguer::Select::new()
-        .items(items)
-        .default(default_index)
+    let select = dialoguer::Select::new().items(items).default(default_index);
+    let select = if show_prompt {
+        select.with_prompt(prompt)
+    } else {
+        select
+    };
+
+    let selection = select
         .interact_on_opt(&dialoguer::console::Term::stderr())
         .map_err(|error| ConfigCommandError::new(format!("failed to read selection: {error}")))?;
 
@@ -2033,35 +2061,47 @@ fn parse_api_access_args(
 ) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigCommandError> {
     let mut api_access: BTreeMap<String, Vec<ApiAccessRule>> = BTreeMap::new();
 
-    for raw_arg in api_access_args {
-        for raw_spec in raw_arg.split(',') {
-            let raw_spec = raw_spec.trim();
-            if raw_spec.is_empty() {
+    for raw_group in api_access_args {
+        let raw_group = raw_group.trim();
+        if raw_group.is_empty() {
+            continue;
+        }
+
+        let (api, raw_rules) = raw_group.split_once(':').ok_or_else(|| {
+            ConfigCommandError::new(format!(
+                "invalid api_access entry '{raw_group}'; expected api:method:path[,method:path...]"
+            ))
+        })?;
+        let api = api.trim();
+        ensure_slug("api_access api", api)?;
+
+        let rules = api_access.entry(api.to_owned()).or_default();
+        let raw_rules = raw_rules.trim();
+        if raw_rules.is_empty() {
+            continue;
+        }
+
+        for raw_rule in raw_rules.split(',') {
+            let raw_rule = raw_rule.trim();
+            if raw_rule.is_empty() {
                 return Err(ConfigCommandError::new(
-                    "api_access entries cannot contain empty comma-separated segments".to_owned(),
+                    "api_access rule lists cannot contain empty comma-separated segments"
+                        .to_owned(),
                 ));
             }
 
-            let mut parts = raw_spec.splitn(3, ':');
-            let api = parts.next().unwrap_or_default().trim();
-            let method = parts.next().unwrap_or_default().trim();
-            let path = parts.next().unwrap_or_default().trim();
-
-            if api.is_empty() || method.is_empty() || path.is_empty() {
-                return Err(ConfigCommandError::new(format!(
-                    "invalid api_access entry '{raw_spec}'; expected api:method:path"
-                )));
-            }
-
-            ensure_slug("api_access api", api)?;
+            let (method, path) = raw_rule.split_once(':').ok_or_else(|| {
+                ConfigCommandError::new(format!(
+                    "invalid api_access rule '{raw_rule}'; expected method:path"
+                ))
+            })?;
             let rule = ApiAccessRule {
                 method: parse_api_access_method("api_access method", method)?,
                 path: parse_api_access_path("api_access path", path)?,
             };
-            let rules = api_access.entry(api.to_owned()).or_default();
             if rules.contains(&rule) {
                 return Err(ConfigCommandError::new(format!(
-                    "duplicate api_access entry for api '{api}'"
+                    "duplicate api_access rule for api '{api}'"
                 )));
             }
             rules.push(rule);

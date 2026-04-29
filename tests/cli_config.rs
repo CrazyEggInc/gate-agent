@@ -398,6 +398,22 @@ fn get_rule(path: &str) -> Vec<ApiAccessRule> {
     }]
 }
 
+fn apply_test_api(config_path: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.to_path_buf()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: name.to_owned(),
+        delete: false,
+        base_url: Some(format!("https://{name}.internal.example/api")),
+        headers: Some(vec![]),
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(5_000),
+    })?;
+
+    Ok(())
+}
+
 fn assert_api_access_rule(config: &Value, path: &[&str], method: &str, rule_path: &str) {
     let rule = config
         .get(path[0])
@@ -697,6 +713,49 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
         &["clients", "partner", "api_access", "projects"],
         "get",
         "*",
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_preserves_explicit_empty_inline_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.partner]\n",
+            "bearer_token_id = \"partner\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = {}\n\n",
+        ),
+    )?;
+
+    let outcome = rotate_client_secret(ConfigRotateSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })?;
+
+    let after = load_toml(&config_path)?;
+    assert_client_metadata_matches(&after, "partner", &outcome.generated_bearer_token);
+    assert_eq!(
+        string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
+        "2030-01-02T03:04:05Z"
+    );
+    assert!(
+        after
+            .get("clients")
+            .and_then(|value| value.get("partner"))
+            .and_then(|value| value.get("api_access"))
+            .and_then(Value::as_table)
+            .is_some_and(toml::map::Map::is_empty)
     );
 
     Ok(())
@@ -1228,7 +1287,8 @@ fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec![
-            "projects:get:*,billing:*:*".to_owned(),
+            "projects:get:*,post:/projects".to_owned(),
+            "billing:*:*".to_owned(),
             "reports:get:*".to_owned(),
         ],
     })?;
@@ -1291,8 +1351,52 @@ fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
 
     assert_eq!(
         error.to_string(),
-        "duplicate api_access entry for api 'projects'"
+        "duplicate api_access rule for api 'projects'"
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_accepts_empty_per_api_access_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_client(ConfigClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects:".to_owned()],
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let projects = config
+        .get("clients")
+        .and_then(|value| value.get("partner"))
+        .and_then(|value| value.get("api_access"))
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_array)
+        .expect("projects access array");
+
+    assert!(projects.is_empty());
 
     Ok(())
 }
@@ -1417,7 +1521,7 @@ fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access api slug ',projects' must contain only lowercase letters, digits, or hyphen"
     );
 
     Ok(())
@@ -1457,7 +1561,7 @@ fn config_add_client_rejects_trailing_comma_in_api_access_arg()
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access rule lists cannot contain empty comma-separated segments"
     );
 
     Ok(())
@@ -1497,7 +1601,7 @@ fn config_add_client_rejects_doubled_comma_in_api_access_arg()
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access rule lists cannot contain empty comma-separated segments"
     );
 
     Ok(())
@@ -1537,7 +1641,7 @@ fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg
 
     assert_eq!(
         error.to_string(),
-        "invalid api_access entry 'billing'; expected api:method:path"
+        "invalid api_access rule 'billing'; expected method:path"
     );
 
     Ok(())
@@ -1735,7 +1839,7 @@ fn config_add_client_rejects_old_api_access_level_format() -> Result<(), Box<dyn
 
     assert_eq!(
         error.to_string(),
-        "invalid api_access entry 'projects=read'; expected api:method:path"
+        "invalid api_access entry 'projects=read'; expected api:method:path[,method:path...]"
     );
 
     Ok(())
@@ -1878,13 +1982,25 @@ fn config_add_client_creates_prompted_new_group_with_api_access()
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
     set_test_prompt_inputs(&[
         "partner",
         "group",
         "add new group",
         "partner-readonly",
-        "projects:get:*,reports:*:*",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
     ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
@@ -1947,8 +2063,24 @@ fn config_add_client_falls_back_to_prompted_inline_api_access_when_group_is_blan
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
-    set_test_prompt_inputs(&["partner", "", "projects:get:*,reports:*:*"])?;
+    set_test_prompt_inputs(&[
+        "partner",
+        "",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
+    ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -2006,8 +2138,23 @@ fn config_add_group_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn 
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
-    set_test_prompt_inputs(&["readonly", "projects:get:*,reports:*:*"])?;
+    set_test_prompt_inputs(&[
+        "readonly",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
+    ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -2041,7 +2188,7 @@ fn config_add_group_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn config_add_group_rejects_empty_api_access_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn config_add_group_accepts_empty_api_access_entries() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2059,19 +2206,22 @@ fn config_add_group_rejects_empty_api_access_entries() -> Result<(), Box<dyn std
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = apply_group(ConfigGroupArgs {
-        config: Some(config_path),
+    apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "readonly".to_owned(),
         api_access: vec![],
-    })
-    .expect_err("empty group api_access should fail");
+    })?;
 
-    assert_eq!(
-        error.to_string(),
-        "api_access entries are required for groups"
+    let config = load_toml(&config_path)?;
+    let group = table_at(&config, &["groups", "readonly"]);
+    assert!(
+        group
+            .get("api_access")
+            .and_then(Value::as_table)
+            .is_some_and(toml::map::Map::is_empty)
     );
 
     Ok(())
@@ -3795,13 +3945,13 @@ fn config_add_group_invalid_mutation_does_not_create_missing_config()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "readonly".to_owned(),
         delete: false,
-        api_access: vec![],
+        api_access: vec!["projects:get:api/v1".to_owned()],
     })
     .expect_err("invalid group mutation should fail");
 
     assert_eq!(
         error.to_string(),
-        "api_access entries are required for groups"
+        "api_access path must be '*' or start with '/'"
     );
     assert!(!config_path.exists());
 

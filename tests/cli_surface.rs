@@ -421,9 +421,9 @@ fn config_client_accepts_repeated_api_access_flags() {
         "--name",
         "partner",
         "--api-access",
-        "projects:get:*,billing:*:*",
+        "projects:get:*,post:/projects",
         "--api-access",
-        "events:get:*",
+        "billing:*:*",
     ]);
 
     assert!(parsed.is_ok());
@@ -458,9 +458,9 @@ fn config_group_accepts_repeated_api_access_flags() {
         "--name",
         "readonly",
         "--api-access",
-        "projects:get:*,billing:*:*",
+        "projects:get:*,post:/projects",
         "--api-access",
-        "events:get:*",
+        "billing:*:*",
     ]);
 
     assert!(parsed.is_ok());

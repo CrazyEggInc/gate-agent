@@ -95,7 +95,7 @@ fn client_args(config: PathBuf, name: &str) -> ConfigClientArgs {
         name: Some(name.to_owned()),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects:get:/api/*,reports:*:*".to_owned()],
+        api_access: vec!["projects:get:/api/*".to_owned(), "reports:*:*".to_owned()],
         command: None,
     }
 }
@@ -2212,7 +2212,9 @@ fn config_command_dispatch_client_prints_generated_bearer_token_once()
             "--bearer-token-expires-at",
             "2030-01-02",
             "--api-access",
-            "projects:get:/api/*,reports:*:*",
+            "projects:get:/api/*",
+            "--api-access",
+            "reports:*:*",
         ])
         .output()?;
 
@@ -2351,7 +2353,7 @@ fn config_command_dispatch_runs_group_subcommand() -> Result<(), Box<dyn std::er
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
             name: Some("readonly".to_owned()),
-            api_access: vec!["projects:get:/api/*,reports:*:*".to_owned()],
+            api_access: vec!["projects:get:/api/*".to_owned(), "reports:*:*".to_owned()],
         }),
     }))?;
 
