@@ -56,6 +56,27 @@ normalize_version() {
   esac
 }
 
+detect_linux_libc() {
+  if command -v getconf >/dev/null 2>&1; then
+    if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+      printf '%s\n' glibc
+      return 0
+    fi
+  fi
+
+  if command -v ldd >/dev/null 2>&1; then
+    ldd_output="$(ldd --version 2>&1 || true)"
+    case "$ldd_output" in
+      *musl*)
+        printf '%s\n' musl
+        return 0
+        ;;
+    esac
+  fi
+
+  printf '%s\n' unknown
+}
+
 detect_platform() {
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
@@ -63,6 +84,16 @@ detect_platform() {
   case "$os-$arch" in
     linux-x86_64|linux-amd64)
       TARGET="linux-x64"
+      linux_libc="$(detect_linux_libc)"
+      case "$linux_libc" in
+        musl)
+          if [ "$linux_libc" = "musl" ]; then
+            TARGET="linux-x64-musl"
+          fi
+          ;;
+        glibc|unknown)
+          ;;
+      esac
       ;;
     darwin-arm64|darwin-aarch64)
       TARGET="macos-arm64"

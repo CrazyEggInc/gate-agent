@@ -11,6 +11,7 @@ Releases must be reproducible from a clean checkout at one git tag. Automation m
 Each published release must include these versioned archives:
 
 - `gate-agent-vX.Y.Z-linux-x64.tar.gz`
+- `gate-agent-vX.Y.Z-linux-x64-musl.tar.gz`
 - `gate-agent-vX.Y.Z-macos-arm64.tar.gz`
 - `gate-agent-vX.Y.Z-sha256sums.txt`
 
@@ -19,6 +20,7 @@ Prerelease versions use the same shape with the prerelease suffix, for example `
 Each published stable release must also include stable latest aliases:
 
 - `gate-agent-latest-linux-x64.tar.gz`
+- `gate-agent-latest-linux-x64-musl.tar.gz`
 - `gate-agent-latest-macos-arm64.tar.gz`
 - `gate-agent-latest-sha256sums.txt`
 
@@ -31,7 +33,9 @@ The repository root includes `install.sh` for public hosting through GitHub raw 
 The installer must:
 
 - run under POSIX `sh`
-- support Linux x64 and macOS ARM64, matching release assets
+- support Linux x64 glibc, Linux x64 musl, and macOS ARM64, matching release assets
+- select `linux-x64-musl` on Linux x64 only when musl libc is positively detected
+- preserve `linux-x64` on Linux x64 glibc or unknown libc environments
 - download the archive and checksum manifest for the selected release
 - verify the selected archive before installing
 - install to `~/.local/bin/gate-agent` by default
@@ -49,6 +53,7 @@ Example:
 
 ```text
 <sha256>  gate-agent-v1.2.3-linux-x64.tar.gz
+<sha256>  gate-agent-v1.2.3-linux-x64-musl.tar.gz
 <sha256>  gate-agent-v1.2.3-macos-arm64.tar.gz
 ```
 
@@ -58,6 +63,7 @@ Example:
 
 ```text
 <sha256>  gate-agent-latest-linux-x64.tar.gz
+<sha256>  gate-agent-latest-linux-x64-musl.tar.gz
 <sha256>  gate-agent-latest-macos-arm64.tar.gz
 ```
 
@@ -93,7 +99,7 @@ For a real tag release, the workflow:
 1. checks out the tagged commit
 2. verifies tag format and `Cargo.toml` version
 3. runs formatting, clippy, and tests
-4. builds optimized Linux x64 and macOS ARM64 binaries
+4. builds optimized Linux x64 glibc, Linux x64 musl, and macOS ARM64 binaries
 5. creates versioned archives and stable latest alias archives
 6. creates versioned and latest checksum manifests
 7. creates or reuses the GitHub release for the tag, marking tags with a prerelease suffix as GitHub prereleases without updating the latest release pointer

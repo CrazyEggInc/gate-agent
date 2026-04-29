@@ -29,6 +29,30 @@ fn release_workflow_enforces_tag_and_cargo_version_match() {
 }
 
 #[test]
+fn release_workflow_builds_gnu_linux_musl_linux_and_macos_assets() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    assert!(workflow.contains("target: x86_64-unknown-linux-gnu"));
+    assert!(workflow.contains("asset_name: linux-x64"));
+    assert!(workflow.contains("target: x86_64-unknown-linux-musl"));
+    assert!(workflow.contains("asset_name: linux-x64-musl"));
+    assert!(workflow.contains("target: aarch64-apple-darwin"));
+    assert!(workflow.contains("asset_name: macos-arm64"));
+}
+
+#[test]
+fn release_workflow_installs_musl_dependencies_only_for_musl_target() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    assert!(workflow.contains("Install Linux musl build dependencies"));
+    assert!(workflow.contains("if: matrix.target == 'x86_64-unknown-linux-musl'"));
+    assert!(workflow.contains("sudo apt-get update"));
+    assert!(workflow.contains("sudo apt-get install -y musl-tools"));
+}
+
+#[test]
 fn release_workflow_uploads_versioned_assets_and_stable_latest_aliases() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
@@ -36,8 +60,10 @@ fn release_workflow_uploads_versioned_assets_and_stable_latest_aliases() {
     assert!(workflow.contains("gate-agent-${RELEASE_TAG}-${{ matrix.asset_name }}.tar.gz"));
     assert!(workflow.contains("gate-agent-latest-${{ matrix.asset_name }}.tar.gz"));
     assert!(workflow.contains("gate-agent-${RELEASE_TAG}-linux-x64.tar.gz"));
+    assert!(workflow.contains("gate-agent-${RELEASE_TAG}-linux-x64-musl.tar.gz"));
     assert!(workflow.contains("gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz"));
     assert!(workflow.contains("gate-agent-latest-linux-x64.tar.gz"));
+    assert!(workflow.contains("gate-agent-latest-linux-x64-musl.tar.gz"));
     assert!(workflow.contains("gate-agent-latest-macos-arm64.tar.gz"));
     assert!(workflow.contains("if [[ \"${RELEASE_TAG}\" != *-* ]]; then"));
     assert!(workflow.contains("--clobber"));
