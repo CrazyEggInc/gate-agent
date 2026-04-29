@@ -42,6 +42,20 @@ fn release_workflow_builds_gnu_linux_musl_linux_and_macos_assets() {
 }
 
 #[test]
+fn release_workflow_installs_matrix_rust_targets() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    assert!(workflow.contains("uses: dtolnay/rust-toolchain@stable"));
+    assert!(workflow.contains("targets: ${{ matrix.target }}"));
+    assert!(
+        workflow.contains(
+            "cargo build --release --locked --bin gate-agent --target ${{ matrix.target }}"
+        )
+    );
+}
+
+#[test]
 fn release_workflow_installs_musl_dependencies_only_for_musl_target() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
