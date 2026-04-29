@@ -23,7 +23,7 @@ These routes continue to define the direct HTTP proxy behavior. They are not rep
 The router also applies:
 
 - request timeout layer with 60 second outer timeout
-- request ID generation and propagation through `x-request-id`
+- internal request ID generation and response propagation through `x-gate-agent-request-id`
 - request completion logging with `client_id` on every request
 
 The per-request outer timeout is separate from the per-upstream timeout configured on each API entry.
@@ -56,6 +56,7 @@ Route authorization rules:
 
 - each API access entry is an allowlist of `{ method, path }` route rules
 - `method = "*"` matches any inbound HTTP method
+- `TRACE` is rejected before forwarding regardless of route-rule matches
 - `path = "*"` matches any extracted upstream suffix path
 - exact paths and glob-style path rules are matched against the suffix path after `/proxy/{api}`
 - query strings are ignored during route-rule matching
@@ -78,6 +79,7 @@ Request mapping expectations:
 - the route selector `{api}` is not forwarded upstream
 - query strings are preserved
 - if the request path does not begin with `/proxy/{api}`, mapping fails
+- paths containing raw or percent-encoded `.` or `..` segments fail before forwarding
 - `/proxy/{api}` forwards to the API base path itself
 - `/proxy/{api}/...` forwards only the suffix after the API selector
 
@@ -87,6 +89,7 @@ The outbound request must strip:
 
 - client `Authorization`
 - `Host`
+- `Content-Length`
 - hop-by-hop headers
 - headers named by the incoming `Connection` header
 - client forwarding headers:
@@ -125,8 +128,8 @@ Behavior:
 
 - outbound requests run under the configured upstream timeout
 - upstream timeouts surface distinctly from other upstream failures
-- upstream redirects are followed by the shared outbound HTTP client
-- redirect loops or excessive redirects surface as upstream request failures
+- upstream redirects are not followed automatically
+- redirect responses are returned to the caller as upstream responses
 
 ## Response mapping
 
@@ -135,7 +138,8 @@ Response expectations:
 - preserve upstream status code
 - stream upstream response bodies back to the caller
 - strip hop-by-hop headers from upstream responses
-- preserve non-hop-by-hop headers
+- strip sensitive upstream response headers such as cookies, auth challenges, authorization values, tokens, secrets, and API keys
+- preserve non-hop-by-hop, non-sensitive headers
 
 ## Proxy telemetry
 

@@ -70,7 +70,7 @@ Runtime rules:
 
 ## HTTP client behavior
 
-Upstream redirects are followed by the shared outbound HTTP client. Timeouts remain explicit and owned by the proxy.
+Upstream redirects are not followed by the shared outbound HTTP client; redirect responses are returned as upstream responses. Timeouts remain explicit and owned by the proxy.
 
 ## Error model
 
@@ -110,9 +110,9 @@ This keeps auth behavior consistent and reduces duplicated time logic.
 
 ## Telemetry
 
-The runtime must carry a configurable log level and attach request IDs so logs and error responses can be correlated with incoming requests.
+The runtime must carry a configurable log level and attach generated request IDs so logs and error responses can be correlated with handled requests.
 
-This request-ID behavior applies to both `/proxy/...` and `/mcp`. Callers may supply `x-request-id`; otherwise the router generates one and propagates it on responses.
+This request-ID behavior applies to both `/proxy/...` and `/mcp`. The router always generates its own internal request ID and propagates that generated value as `x-gate-agent-request-id` on responses. Caller-supplied `x-request-id` values are left for clients and upstreams to use, but are not trusted for gate-agent logs or error response payloads.
 
 Authentication expectations also apply consistently across both route families. `/mcp` is not an anonymous control plane endpoint: callers must present exactly one valid `Authorization: Bearer <token>` header before any MCP request is parsed or dispatched.
 

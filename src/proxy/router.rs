@@ -8,11 +8,7 @@ use axum::{
     response::Response,
     routing::{any, get},
 };
-use tower_http::{
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::{Level, info};
 
 use crate::app::AppState;
@@ -20,7 +16,8 @@ use crate::auth::bearer::{extract_authorization_header, validate_bearer_authoriz
 use crate::error::{AppError, LoggedErrorCode};
 use crate::mcp::router::mcp_handler;
 use crate::telemetry::{
-    LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs, sanitize_url_for_logs,
+    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext, generate_internal_request_id,
+    sanitize_request_uri_for_logs, sanitize_url_for_logs,
 };
 
 use super::forward::forward_proxy_request;
@@ -59,121 +56,124 @@ pub fn build_router(state: AppState) -> Router {
                     tracing::span!(
                         Level::INFO,
                         "http_request",
-                        request_id = %request_id_from_request(request).unwrap_or_else(|| "-".to_owned()),
+                        request_id = "-",
                         method = %request.method(),
                         uri = %sanitize_request_uri_for_logs(request.uri()),
                     )
                 })
-                .on_response(|response: &Response, latency: Duration, span: &tracing::Span| {
-                    let _enter = span.enter();
-                    let request_context = response.extensions().get::<LoggedRequestContext>();
-                    let error_code = response
-                        .extensions()
-                        .get::<LoggedErrorCode>()
-                        .map(|value| value.0);
-                    let client = response.extensions().get::<LoggedClient>().map(|value| &value.0);
-                    let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
+                .on_response(
+                    |response: &Response, latency: Duration, span: &tracing::Span| {
+                        let _enter = span.enter();
+                        let request_context = response.extensions().get::<LoggedRequestContext>();
+                        let error_code = response
+                            .extensions()
+                            .get::<LoggedErrorCode>()
+                            .map(|value| value.0);
+                        let client = response
+                            .extensions()
+                            .get::<LoggedClient>()
+                            .map(|value| &value.0);
+                        let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
 
-                    let request_id = request_context
-                        .map(|value| value.request_id.as_str())
-                        .unwrap_or("-");
-                    let method = request_context
-                        .map(|value| value.method.as_str())
-                        .unwrap_or("-");
-                    let uri = request_context
-                        .map(|value| value.uri.as_str())
-                        .unwrap_or("-");
+                        let request_id = request_context
+                            .map(|value| value.request_id.as_str())
+                            .unwrap_or("-");
+                        let method = request_context
+                            .map(|value| value.method.as_str())
+                            .unwrap_or("-");
+                        let uri = request_context
+                            .map(|value| value.uri.as_str())
+                            .unwrap_or("-");
 
-                    match (error_code, client, upstream_request) {
-                        (Some(error_code), Some(client), Some(upstream_request)) => info!(
-                            client = %client,
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            error_code,
-                            api = %upstream_request.api,
-                            upstream_method = %upstream_request.upstream_method,
-                            upstream_url = %upstream_request.upstream_url,
-                            upstream_status = %upstream_request.upstream_status,
-                            timeout_ms = upstream_request.timeout_ms,
-                        ),
-                        (Some(error_code), Some(client), None) => info!(
-                            client = %client,
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            error_code,
-                        ),
-                        (None, Some(client), Some(upstream_request)) => info!(
-                            client = %client,
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            api = %upstream_request.api,
-                            upstream_method = %upstream_request.upstream_method,
-                            upstream_url = %upstream_request.upstream_url,
-                            upstream_status = %upstream_request.upstream_status,
-                            timeout_ms = upstream_request.timeout_ms,
-                        ),
-                        (None, Some(client), None) => info!(
-                            client = %client,
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                        ),
-                        (Some(error_code), None, Some(upstream_request)) => info!(
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            error_code,
-                            api = %upstream_request.api,
-                            upstream_method = %upstream_request.upstream_method,
-                            upstream_url = %upstream_request.upstream_url,
-                            upstream_status = %upstream_request.upstream_status,
-                            timeout_ms = upstream_request.timeout_ms,
-                        ),
-                        (Some(error_code), None, None) => info!(
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            error_code,
-                        ),
-                        (None, None, Some(upstream_request)) => info!(
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                            api = %upstream_request.api,
-                            upstream_method = %upstream_request.upstream_method,
-                            upstream_url = %upstream_request.upstream_url,
-                            upstream_status = %upstream_request.upstream_status,
-                            timeout_ms = upstream_request.timeout_ms,
-                        ),
-                        (None, None, None) => info!(
-                            request_id = %request_id,
-                            method = %method,
-                            uri = %uri,
-                            status = %response.status(),
-                            latency_ms = latency.as_millis(),
-                        ),
-                    }
-                })
+                        match (error_code, client, upstream_request) {
+                            (Some(error_code), Some(client), Some(upstream_request)) => info!(
+                                client = %client,
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                error_code,
+                                api = %upstream_request.api,
+                                upstream_method = %upstream_request.upstream_method,
+                                upstream_url = %upstream_request.upstream_url,
+                                upstream_status = %upstream_request.upstream_status,
+                                timeout_ms = upstream_request.timeout_ms,
+                            ),
+                            (Some(error_code), Some(client), None) => info!(
+                                client = %client,
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                error_code,
+                            ),
+                            (None, Some(client), Some(upstream_request)) => info!(
+                                client = %client,
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                api = %upstream_request.api,
+                                upstream_method = %upstream_request.upstream_method,
+                                upstream_url = %upstream_request.upstream_url,
+                                upstream_status = %upstream_request.upstream_status,
+                                timeout_ms = upstream_request.timeout_ms,
+                            ),
+                            (None, Some(client), None) => info!(
+                                client = %client,
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                            ),
+                            (Some(error_code), None, Some(upstream_request)) => info!(
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                error_code,
+                                api = %upstream_request.api,
+                                upstream_method = %upstream_request.upstream_method,
+                                upstream_url = %upstream_request.upstream_url,
+                                upstream_status = %upstream_request.upstream_status,
+                                timeout_ms = upstream_request.timeout_ms,
+                            ),
+                            (Some(error_code), None, None) => info!(
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                error_code,
+                            ),
+                            (None, None, Some(upstream_request)) => info!(
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                                api = %upstream_request.api,
+                                upstream_method = %upstream_request.upstream_method,
+                                upstream_url = %upstream_request.upstream_url,
+                                upstream_status = %upstream_request.upstream_status,
+                                timeout_ms = upstream_request.timeout_ms,
+                            ),
+                            (None, None, None) => info!(
+                                request_id = %request_id,
+                                method = %method,
+                                uri = %uri,
+                                status = %response.status(),
+                                latency_ms = latency.as_millis(),
+                            ),
+                        }
+                    },
+                ),
         )
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(PropagateRequestIdLayer::x_request_id())
         .with_state(state)
 }
 
@@ -197,10 +197,15 @@ async fn proxy_handler_with_path(
     proxy_response(state, api_slug, request).await
 }
 
-async fn proxy_response(state: AppState, api_slug: String, request: Request<Body>) -> Response {
-    let request_id = request_id_from_request(&request);
+async fn proxy_response(state: AppState, api_slug: String, mut request: Request<Body>) -> Response {
+    let request_id = generate_internal_request_id();
+    request.headers_mut().insert(
+        GATE_AGENT_REQUEST_ID_HEADER,
+        http::HeaderValue::from_str(&request_id)
+            .expect("request id should always be a valid header value"),
+    );
     let request_context = LoggedRequestContext {
-        request_id: request_id.clone().unwrap_or_else(|| "-".to_owned()),
+        request_id: request_id.clone(),
         method: request.method().to_string(),
         uri: sanitize_request_uri_for_logs(request.uri()),
     };
@@ -208,7 +213,7 @@ async fn proxy_response(state: AppState, api_slug: String, request: Request<Body
     let mut response = match handle_proxy_request(state, api_slug, request).await {
         Ok(response) => response,
         Err(proxy_error) => {
-            let mut response = proxy_error.error.response(request_id.as_deref());
+            let mut response = proxy_error.error.response(Some(&request_id));
             if let Some(client) = proxy_error.client {
                 response.extensions_mut().insert(LoggedClient(client));
             }
@@ -216,13 +221,11 @@ async fn proxy_response(state: AppState, api_slug: String, request: Request<Body
         }
     };
 
-    if let Some(request_id) = request_id {
-        response.headers_mut().insert(
-            "x-request-id",
-            http::HeaderValue::from_str(&request_id)
-                .expect("request id should always be a valid header value"),
-        );
-    }
+    response.headers_mut().insert(
+        GATE_AGENT_REQUEST_ID_HEADER,
+        http::HeaderValue::from_str(&request_id)
+            .expect("request id should always be a valid header value"),
+    );
 
     response.extensions_mut().insert(request_context);
 
@@ -268,12 +271,4 @@ fn proxy_error_with_client(error: AppError, client: String) -> ProxyResponseErro
         error,
         client: Some(client),
     }
-}
-
-fn request_id_from_request(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }

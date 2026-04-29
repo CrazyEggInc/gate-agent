@@ -7,6 +7,8 @@ use tracing_subscriber::{EnvFilter, fmt::MakeWriter, prelude::*};
 
 use crate::error::AppError;
 
+pub(crate) const GATE_AGENT_REQUEST_ID_HEADER: &str = "x-gate-agent-request-id";
+
 static TRACING_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,10 @@ pub fn sanitize_url_for_logs(raw_url: &str) -> String {
         .next()
         .unwrap_or(raw_url)
         .to_owned()
+}
+
+pub(crate) fn generate_internal_request_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
 }
 
 pub fn init_tracing(log_filter: &str) -> Result<(), AppError> {

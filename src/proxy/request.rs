@@ -109,6 +109,8 @@ fn build_upstream_url(base_url: &Url, raw_suffix: &str) -> Result<Url, AppError>
         None => (raw_suffix, None),
     };
 
+    reject_dot_segments(raw_path)?;
+
     let base_path = base_url.path().trim_end_matches('/');
     let joined_path = match raw_path {
         "" => base_path.to_owned(),
@@ -125,6 +127,59 @@ fn build_upstream_url(base_url: &Url, raw_suffix: &str) -> Result<Url, AppError>
         .map_err(|error| AppError::UpstreamBuild(format!("failed to build upstream url: {error}")))
 }
 
+fn reject_dot_segments(raw_path: &str) -> Result<(), AppError> {
+    if has_dot_segment(raw_path) {
+        return Err(AppError::BadProxyPath(
+            "request path must not contain dot segments".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(is_dot_segment)
+}
+
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = decode_percent_encoded_dots(segment);
+
+    matches!(decoded.as_str(), "." | "..")
+}
+
+fn decode_percent_encoded_dots(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut decoded = String::with_capacity(segment.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            && (high << 4) | low == b'.'
+        {
+            decoded.push('.');
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index] as char);
+        index += 1;
+    }
+
+    decoded
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
     let connection_bound_names = connection_bound_header_names(headers);
     let mut filtered_headers = HeaderMap::new();
@@ -132,6 +187,7 @@ fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
     for (name, value) in headers {
         if name == header::AUTHORIZATION
             || name == header::HOST
+            || name == header::CONTENT_LENGTH
             || is_client_forwarding_header(name)
             || is_hop_by_hop_header(name, &connection_bound_names)
         {

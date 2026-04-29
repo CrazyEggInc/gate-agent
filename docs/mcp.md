@@ -143,7 +143,8 @@ Response expectations:
 - that JSON object should include the upstream HTTP status code
 - that JSON object should include response headers in a structured form
 - by default, that headers object should include only `content-type` and `date` when present
-- when `response_headers = "all"`, that headers object should include all upstream response headers that can be represented safely as strings
+- when `response_headers = "all"`, that headers object should include non-sensitive upstream response headers that can be represented safely as strings
+- sensitive upstream response headers such as cookies, auth challenges, authorization values, tokens, secrets, and API keys must not be included in MCP tool output
 - that JSON object should include the upstream content type when known
 - that JSON object should include a parsed JSON body when the upstream response is JSON
 - that JSON object should include a text body when the upstream response is text

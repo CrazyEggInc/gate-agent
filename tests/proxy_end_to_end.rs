@@ -45,7 +45,7 @@ async fn health_route_returns_ok_without_auth() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-async fn assert_upstream_redirect_is_followed(
+async fn assert_upstream_redirect_is_not_followed(
     redirect_status: StatusCode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let redirect_target_hits = Arc::new(AtomicUsize::new(0));
@@ -90,12 +90,15 @@ async fn assert_upstream_redirect_is_followed(
         )
         .await?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("location").is_none());
-    assert_eq!(response.headers().get("x-final").unwrap(), "yes");
+    assert_eq!(response.status(), redirect_status);
+    assert_eq!(
+        response.headers().get("location").unwrap(),
+        "/api/redirect-target"
+    );
+    assert!(response.headers().get("x-final").is_none());
     let body = response.into_body().collect().await?.to_bytes();
-    assert_eq!(body, bytes::Bytes::from_static(b"final response"));
-    assert_eq!(redirect_target_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(body, bytes::Bytes::from_static(b"redirect response"));
+    assert_eq!(redirect_target_hits.load(Ordering::SeqCst), 0);
 
     Ok(())
 }
@@ -131,6 +134,7 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
             Request::builder()
                 .method("POST")
                 .uri("/proxy/billing/v1/projects/1/tasks?expand=1")
+                .header("x-request-id", "client-request-id")
                 .header("authorization", format!("Bearer {token}"))
                 .header("x-custom", "preserved")
                 .header("content-type", "application/json")
@@ -142,10 +146,11 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
     assert_eq!(response.headers().get("x-upstream").unwrap(), "present");
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("response request id")
         .to_str()?
         .to_owned();
+    assert!(response.headers().get("x-request-id").is_none());
     let body = response.into_body().collect().await?.to_bytes();
     assert_eq!(body, bytes::Bytes::from_static(b"upstream ok"));
 
@@ -162,8 +167,12 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
         "application/json"
     );
     assert_eq!(
-        captured.headers.get("x-request-id").unwrap(),
+        captured.headers.get("x-gate-agent-request-id").unwrap(),
         request_id.as_str()
+    );
+    assert_eq!(
+        captured.headers.get("x-request-id").unwrap(),
+        "client-request-id"
     );
     assert_eq!(
         captured.body,
@@ -490,6 +499,45 @@ async fn proxy_route_rejects_selected_api_not_present_in_token()
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_missing_authorization_header() -> Result<(), Box<dyn std::error::Error>>
+{
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/proxy/billing/v1/projects/1/tasks")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("www-authenticate").unwrap(),
+        "Bearer"
+    );
+    assert!(response.headers().get("x-request-id").is_none());
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "invalid_token");
+    assert_eq!(payload["error"]["message"], "authentication failed");
+    assert_eq!(payload["error"]["request_id"], request_id);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_rejects_unknown_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
     let base_url = spawn_upstream(upstream).await?;
@@ -568,10 +616,14 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id_for_
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-test-123"
-    );
+    assert!(response.headers().get("x-request-id").is_none());
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-test-123");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -582,7 +634,7 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id_for_
             "error": {
                 "code": "invalid_token",
                 "message": "authentication failed",
-                "request_id": "req-test-123"
+                "request_id": request_id
             }
         })
     );
@@ -618,16 +670,19 @@ async fn proxy_route_rejects_duplicate_authorization_headers()
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-duplicate-auth"
-    );
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-duplicate-auth");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
     assert_eq!(payload["error"]["code"], "invalid_token");
-    assert_eq!(payload["error"]["request_id"], "req-duplicate-auth");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
@@ -658,6 +713,15 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
         .await?;
 
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(response.headers().get("x-request-id").is_none());
+
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-timeout");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -668,7 +732,7 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
             "error": {
                 "code": "upstream_timeout",
                 "message": "upstream request timed out",
-                "request_id": "req-timeout"
+                "request_id": request_id
             }
         })
     );
@@ -677,9 +741,10 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
 }
 
 #[tokio::test]
-async fn proxy_route_follows_upstream_redirects() -> Result<(), Box<dyn std::error::Error>> {
-    assert_upstream_redirect_is_followed(StatusCode::FOUND).await?;
-    assert_upstream_redirect_is_followed(StatusCode::TEMPORARY_REDIRECT).await?;
+async fn proxy_route_does_not_follow_upstream_redirects() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_upstream_redirect_is_not_followed(StatusCode::FOUND).await?;
+    assert_upstream_redirect_is_not_followed(StatusCode::TEMPORARY_REDIRECT).await?;
 
     Ok(())
 }
@@ -828,6 +893,41 @@ async fn proxy_route_preserves_double_slash_segments() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_dot_segments_before_forwarding()
+-> Result<(), Box<dyn std::error::Error>> {
+    for path in [
+        "/proxy/billing/../admin",
+        "/proxy/billing/v1/./admin",
+        "/proxy/billing/%2e%2e/admin",
+        "/proxy/billing/v1/%2E/admin",
+    ] {
+        let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+        let base_url = spawn_upstream(upstream).await?;
+        let config = load_test_config(&base_url)?;
+        let token = bearer_token("billing", config.secrets())?;
+        let app = build_router(AppState::from_config(&config)?);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+        assert_eq!(payload["error"]["code"], "bad_proxy_path");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_allows_get_matching_whitelist_rule() -> Result<(), Box<dyn std::error::Error>>
 {
     let (sender, rx) = capture_channel();
@@ -947,6 +1047,35 @@ async fn proxy_route_rejects_unmatched_whitelist_path() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+async fn proxy_route_rejects_trace_requests_even_with_matching_rule()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_multi_api_test_config(&base_url)?;
+    let token = bearer_token_for_client("default", "datadog", config.secrets())?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("TRACE")
+                .uri("/proxy/datadog/api/v2/series")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+
+    assert_eq!(payload["error"]["code"], "bad_request");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_route_allows_any_datadog_method_and_path_with_wildcard_rule()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sender, rx) = capture_channel();
@@ -985,6 +1114,9 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
         &[
             ("content-type", "application/json"),
             ("x-upstream", "streamed"),
+            ("set-cookie", "session=secret"),
+            ("www-authenticate", "Bearer secret"),
+            ("x-api-key", "upstream-secret"),
         ],
         &[br#"{"items":["# as &[u8], br#""alpha","#, br#""beta"]}"#],
     )
@@ -1008,9 +1140,12 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
         "application/json"
     );
     assert_eq!(response.headers().get("x-upstream").unwrap(), "streamed");
+    assert!(response.headers().get("set-cookie").is_none());
+    assert!(response.headers().get("www-authenticate").is_none());
+    assert!(response.headers().get("x-api-key").is_none());
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("response request id")
         .to_str()?
         .to_owned();
@@ -1026,7 +1161,7 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
 
     assert!(captured_request.starts_with("get /api/stream?expand=1 http/1.1\r\n"));
     assert!(captured_request.contains("authorization: bearer billing-secret-token\r\n"));
-    assert!(captured_request.contains(&format!("x-request-id: {request_id}\r\n")));
+    assert!(captured_request.contains(&format!("x-gate-agent-request-id: {request_id}\r\n")));
 
     Ok(())
 }

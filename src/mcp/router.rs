@@ -12,7 +12,10 @@ use crate::{
         AuthorizedRequest, extract_authorization_header, validate_bearer_authorized_request,
     },
     error::AppError,
-    telemetry::{LoggedClient, LoggedRequestContext, sanitize_request_uri_for_logs},
+    telemetry::{
+        GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext,
+        generate_internal_request_id, sanitize_request_uri_for_logs,
+    },
 };
 
 use super::{
@@ -25,14 +28,14 @@ use super::{
 const MCP_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 pub async fn mcp_handler(State(state): State<AppState>, request: Request<Body>) -> Response {
-    let request_id = request_id_from_request(&request);
+    let request_id = generate_internal_request_id();
     let request_context = LoggedRequestContext {
-        request_id: request_id.clone().unwrap_or_else(|| "-".to_owned()),
+        request_id: request_id.clone(),
         method: request.method().to_string(),
         uri: sanitize_request_uri_for_logs(request.uri()),
     };
 
-    let mut response = match handle_mcp_request(state, request).await {
+    let mut response = match handle_mcp_request(state, request, &request_id).await {
         Ok((client_slug, response)) => {
             let mut response = response;
             response.extensions_mut().insert(LoggedClient(client_slug));
@@ -47,13 +50,11 @@ pub async fn mcp_handler(State(state): State<AppState>, request: Request<Body>) 
         }
     };
 
-    if let Some(request_id) = request_id {
-        response.headers_mut().insert(
-            "x-request-id",
-            http::HeaderValue::from_str(&request_id)
-                .expect("request id should always be a valid header value"),
-        );
-    }
+    response.headers_mut().insert(
+        GATE_AGENT_REQUEST_ID_HEADER,
+        http::HeaderValue::from_str(&request_id)
+            .expect("request id should always be a valid header value"),
+    );
 
     response.extensions_mut().insert(request_context);
 
@@ -63,12 +64,12 @@ pub async fn mcp_handler(State(state): State<AppState>, request: Request<Body>) 
 async fn handle_mcp_request(
     state: AppState,
     request: Request<Body>,
+    request_id: &str,
 ) -> Result<(String, Response), (Option<String>, Response)> {
-    let request_id = request_id_from_request(&request);
     let authorization_header = extract_authorization_header(request.headers())
-        .map_err(|error| (None, error.response(request_id.as_deref())))?;
+        .map_err(|error| (None, error.response(Some(request_id))))?;
     let authorized = validate_bearer_authorized_request(authorization_header, state.secrets())
-        .map_err(|error| (None, error.response(request_id.as_deref())))?;
+        .map_err(|error| (None, error.response(Some(request_id))))?;
     let client_slug = authorized.client_slug.clone();
 
     let (_parts, body) = request.into_parts();
@@ -76,7 +77,7 @@ async fn handle_mcp_request(
         (
             Some(client_slug.clone()),
             AppError::BadRequest(format!("failed to read request body: {error}"))
-                .response(request_id.as_deref()),
+                .response(Some(request_id)),
         )
     })?;
     let raw_request: Value = serde_json::from_slice(&body).map_err(|_| {
@@ -156,12 +157,4 @@ async fn handle_tools_call(
     };
 
     JsonRpcResponse::success(id, result).into_response()
-}
-
-fn request_id_from_request(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }

@@ -103,14 +103,18 @@ async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
         .await?;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("x-request-id").is_none());
     assert_eq!(
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-invalid"
-    );
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-invalid");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -121,7 +125,7 @@ async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
             "error": {
                 "code": "invalid_token",
                 "message": "authentication failed",
-                "request_id": "req-mcp-invalid"
+                "request_id": request_id
             }
         })
     );
@@ -160,19 +164,24 @@ async fn mcp_route_rejects_duplicate_authorization_headers()
     let response = app.oneshot(request).await?;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("x-request-id").is_none());
     assert_eq!(
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-duplicate-auth"
-    );
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-duplicate-auth");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
 
     assert_eq!(payload["error"]["code"], "invalid_token");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
@@ -205,10 +214,13 @@ async fn mcp_route_accepts_valid_bearer_token_for_initialize()
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("www-authenticate").is_none());
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-init"
-    );
+    assert!(response.headers().get("x-request-id").is_none());
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?;
+    assert_ne!(request_id, "req-mcp-init");
 
     let payload: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
@@ -254,16 +266,19 @@ async fn mcp_route_rejects_oversized_request_body_before_json_rpc_dispatch()
         .await?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.headers().get("x-request-id").unwrap(),
-        "req-mcp-too-large"
-    );
+    let request_id = response
+        .headers()
+        .get("x-gate-agent-request-id")
+        .expect("generated request id")
+        .to_str()?
+        .to_owned();
+    assert_ne!(request_id, "req-mcp-too-large");
 
     let payload = json_body(response).await?;
 
     assert_eq!(payload["error"]["code"], "bad_request");
     assert_eq!(payload["error"]["message"], "request is invalid");
-    assert_eq!(payload["error"]["request_id"], "req-mcp-too-large");
+    assert_eq!(payload["error"]["request_id"], request_id);
 
     Ok(())
 }
@@ -802,6 +817,16 @@ async fn mcp_route_call_api_can_return_all_response_headers()
                 .headers_mut()
                 .insert("x-upstream", HeaderValue::from_static("present"));
             response
+                .headers_mut()
+                .insert("set-cookie", HeaderValue::from_static("session=secret"));
+            response.headers_mut().insert(
+                "www-authenticate",
+                HeaderValue::from_static("Bearer secret"),
+            );
+            response
+                .headers_mut()
+                .insert("x-api-key", HeaderValue::from_static("upstream-secret"));
+            response
         }),
     );
     let base_url = spawn_upstream(upstream).await?;
@@ -837,6 +862,9 @@ async fn mcp_route_call_api_can_return_all_response_headers()
         content["headers"]["x-upstream"],
         serde_json::json!(["present"])
     );
+    assert!(content["headers"].get("set-cookie").is_none());
+    assert!(content["headers"].get("www-authenticate").is_none());
+    assert!(content["headers"].get("x-api-key").is_none());
 
     Ok(())
 }
