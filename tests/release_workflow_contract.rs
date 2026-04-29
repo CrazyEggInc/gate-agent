@@ -42,6 +42,51 @@ fn release_workflow_builds_gnu_linux_musl_linux_and_macos_assets() {
 }
 
 #[test]
+fn release_workflow_installs_matrix_rust_targets() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    let build_start = workflow
+        .find("  build:")
+        .expect("workflow should define build job");
+    let build_remainder = &workflow[build_start..];
+    let build_end = build_remainder
+        .find("\n  publish:")
+        .expect("workflow should define publish job after build job");
+    let build_workflow = &build_remainder[..build_end];
+
+    assert!(build_workflow.contains("uses: dtolnay/rust-toolchain@stable"));
+    assert!(build_workflow.contains("targets: ${{ matrix.target }}"));
+    assert!(build_workflow.contains("rustup target add ${{ matrix.target }}"));
+    assert!(
+        build_workflow
+            .contains("rustup target list --installed | grep -Fx \"${{ matrix.target }}\"")
+    );
+    assert!(
+        build_workflow.contains(
+            "cargo build --release --locked --bin gate-agent --target ${{ matrix.target }}"
+        )
+    );
+
+    let toolchain_setup = build_workflow
+        .find("- name: Install Rust toolchain")
+        .expect("workflow should install Rust toolchain before adding targets");
+    let explicit_target_install = build_workflow
+        .find("rustup target add ${{ matrix.target }}")
+        .expect("workflow should explicitly add matrix target");
+    let target_verification = build_workflow
+        .find("rustup target list --installed | grep -Fx \"${{ matrix.target }}\"")
+        .expect("workflow should verify matrix target is installed");
+    let release_build = build_workflow
+        .find("cargo build --release --locked --bin gate-agent --target ${{ matrix.target }}")
+        .expect("workflow should build release binary for matrix target");
+
+    assert!(toolchain_setup < explicit_target_install);
+    assert!(explicit_target_install < target_verification);
+    assert!(target_verification < release_build);
+}
+
+#[test]
 fn release_workflow_installs_musl_dependencies_only_for_musl_target() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
