@@ -11,7 +11,7 @@ use url::form_urlencoded;
 use crate::{
     app::AppState,
     auth::bearer::AuthorizedRequest,
-    config::secrets::AccessLevel,
+    config::secrets::{ApiAccessMethod, ApiAccessRule},
     error::AppError,
     proxy::{
         forward::{forward_prepared_request, prepare_authorized_forward_request},
@@ -69,13 +69,19 @@ struct ListApisPayload {
 #[derive(Debug, Serialize)]
 struct ApiDescriptor {
     slug: String,
-    access_level: AccessLevel,
+    rules: Vec<ApiRuleDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     docs_url: Option<String>,
     usage_hint: &'static str,
     example_arguments: CallApiExampleArguments,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiRuleDescriptor {
+    method: String,
+    path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,11 +126,15 @@ pub async fn call_tool(
 fn list_apis(state: &AppState, authorized: &AuthorizedRequest) -> Result<ToolResult, AppError> {
     let mut apis = Vec::new();
 
-    for (slug, access_level) in &authorized.access.apis {
+    for (slug, rules) in &authorized.access.apis {
+        if rules.is_empty() {
+            continue;
+        }
+
         let api_config = state.api_config(slug)?;
         apis.push(ApiDescriptor {
             slug: slug.clone(),
-            access_level: *access_level,
+            rules: rules.iter().map(api_rule_descriptor).collect(),
             description: api_config.description.clone(),
             docs_url: api_config.docs_url.as_ref().map(|url| url.to_string()),
             usage_hint: LIST_APIS_USAGE_HINT,
@@ -146,6 +156,18 @@ fn list_apis(state: &AppState, authorized: &AuthorizedRequest) -> Result<ToolRes
     })?;
 
     Ok(ToolResult::success(content_json))
+}
+
+fn api_rule_descriptor(rule: &ApiAccessRule) -> ApiRuleDescriptor {
+    let method = match &rule.method {
+        ApiAccessMethod::Any => "*".to_owned(),
+        ApiAccessMethod::Exact(method) => method.as_str().to_ascii_lowercase(),
+    };
+
+    ApiRuleDescriptor {
+        method,
+        path: rule.path.clone(),
+    }
 }
 
 async fn call_api(

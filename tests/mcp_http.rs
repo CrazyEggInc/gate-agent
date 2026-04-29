@@ -6,7 +6,15 @@ use axum::{
     http::{Request, Response, StatusCode, header::HeaderValue},
     routing::any,
 };
-use gate_agent::{app::AppState, proxy::router::build_router};
+use gate_agent::{
+    app::AppState,
+    config::{
+        ConfigSource,
+        app_config::AppConfig,
+        secrets::{BearerTokenHash, SecretsConfig},
+    },
+    proxy::router::build_router,
+};
 use http_body_util::BodyExt;
 use support::{
     bearer_token, bearer_token_for_client, capture_channel, capture_request,
@@ -36,6 +44,37 @@ fn assert_structured_content_matches_content(payload: &serde_json::Value) {
         payload["result"]["structuredContent"],
         tool_content_json(payload)
     );
+}
+
+fn route_rule_test_config(base_url: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let secrets = SecretsConfig::parse(
+        &format!(
+            r#"
+[clients.default]
+bearer_token_id = "default-billing-write"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = {{ billing = [{{ method = "get", path = "/allowed/*" }}] }}
+
+[apis.billing]
+base_url = "{base_url}/api"
+description = "Billing API"
+docs_url = "https://docs.internal.example/billing"
+headers = {{ authorization = "Bearer billing-secret-token" }}
+timeout_ms = 5000
+"#,
+            BearerTokenHash::from_token("default-billing-write.default-billing-write-secret")
+                .as_str(),
+        ),
+        "mcp route-rule test config",
+    )?;
+
+    Ok(AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Stdin,
+        secrets,
+    ))
 }
 
 #[tokio::test]
@@ -515,7 +554,12 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
             "apis": [
                 {
                     "slug": "billing",
-                    "access_level": "write",
+                    "rules": [
+                        {
+                            "method": "*",
+                            "path": "*"
+                        }
+                    ],
                     "description": "Billing API",
                     "docs_url": "https://docs.internal.example/billing",
                     "usage_hint": "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.",
@@ -529,8 +573,37 @@ async fn mcp_route_list_apis_returns_sorted_effective_api_access_with_metadata()
                     }
                 },
                 {
+                    "slug": "datadog",
+                    "rules": [
+                        {
+                            "method": "*",
+                            "path": "*"
+                        }
+                    ],
+                    "description": "Datadog-style API",
+                    "docs_url": "https://docs.internal.example/datadog",
+                    "usage_hint": "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.",
+                    "example_arguments": {
+                        "api": "datadog",
+                        "method": "GET",
+                        "path": "/<endpoint>",
+                        "query": {
+                            "example": "value"
+                        }
+                    }
+                },
+                {
                     "slug": "projects",
-                    "access_level": "write",
+                    "rules": [
+                        {
+                            "method": "get",
+                            "path": "/api/v1/projects/*"
+                        },
+                        {
+                            "method": "post",
+                            "path": "/api/users/*"
+                        }
+                    ],
                     "description": "Projects API",
                     "docs_url": "https://docs.internal.example/projects",
                     "usage_hint": "Call this API with the call_api tool. Put query parameters in call_api.query and keep call_api.path path-only.",
@@ -630,6 +703,87 @@ async fn mcp_route_call_api_uses_shared_forwarding_logic_for_json_requests()
         captured.body,
         bytes::Bytes::from_static(br#"{"name":"New task"}"#)
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_route_call_api_enforces_route_rules_for_method_and_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = axum::Router::new().route(
+        "/api/{*path}",
+        axum::routing::any(|| async {
+            let mut response = Response::new(Body::from(r#"{"ok":true}"#));
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            response
+        }),
+    );
+    let base_url = spawn_upstream(upstream).await?;
+    let config = route_rule_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+    let token = "default-billing-write.default-billing-write-secret";
+
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/allowed/task"}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let payload = json_body(allowed).await?;
+    assert_eq!(payload["result"]["isError"], false);
+    assert_eq!(tool_content_json(&payload)["status"], 200);
+
+    let denied_method = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"POST","path":"/allowed/task"}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(denied_method.status(), StatusCode::OK);
+    let payload = json_body(denied_method).await?;
+    assert_eq!(payload["result"]["isError"], true);
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "forbidden_api");
+    assert_eq!(content["message"], "api access is forbidden");
+
+    let denied_path = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/blocked/task"}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(denied_path.status(), StatusCode::OK);
+    let payload = json_body(denied_path).await?;
+    assert_eq!(payload["result"]["isError"], true);
+    let content = tool_content_json(&payload);
+    assert_eq!(content["code"], "forbidden_api");
+    assert_eq!(content["message"], "api access is forbidden");
 
     Ok(())
 }

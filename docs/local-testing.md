@@ -35,13 +35,13 @@ Expected properties:
 
 `.secrets.example` is ready-to-run local sample config.
 
-Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "local-default"`, `groups.local-default` grants `api_access = { projects = "read" }`, and `projects` points at dummy upstream with `headers = { authorization = "Bearer local-upstream-token" }`. If you create fresh config instead, prefer `config init` and save printed token immediately.
+Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "local-default"`, `groups.local-default` grants `api_access = { projects = [{ method = "get", path = "*" }] }`, and `projects` points at dummy upstream with `headers = { authorization = "Bearer local-upstream-token" }`. If you create fresh config instead, prefer `config init` and save printed token immediately.
 
 Expected committed sample defaults:
 
 - a `default` client is available
 - `default` uses `group = "local-default"`
-- `groups.local-default` grants `api_access = { projects = "read" }`
+- `groups.local-default` grants `api_access = { projects = [{ method = "get", path = "*" }] }`
 - `projects` points at dummy upstream
 - `projects` configures `headers = { authorization = "Bearer local-upstream-token" }`
 
@@ -243,7 +243,7 @@ Upsert a group:
 ```sh
 cargo run -- config group --config .secrets \
   --name local-default \
-  --api-access projects=read
+  --api-access projects:get:*
 ```
 
 Add or update client with generated token on create:

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io::IsTerminal;
@@ -10,7 +11,9 @@ use crate::cli::{
 use crate::config::ConfigError;
 use crate::config::app_config::AppConfig;
 use crate::config::app_config::DEFAULT_LOG_LEVEL;
-use crate::config::secrets::{AccessLevel, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT};
+use crate::config::secrets::{
+    ApiAccessMethod, ApiAccessRule, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT,
+};
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
 
@@ -593,12 +596,15 @@ fn resolve_config_group_args(
     let api_access = if !args.api_access.is_empty() {
         args.api_access
     } else if interactive_questionnaire_available() {
-        vec![prompt_required(
-            "Inline api_access entry",
-            existing.as_ref().map(render_api_access_map).as_deref(),
-            Some("projects=read,reports=write"),
-            "config group requires --api-access in non-interactive sessions",
-        )?]
+        let selected = prompt_api_access_rules(
+            args.config.as_deref(),
+            args.password.clone(),
+            existing
+                .as_ref()
+                .map(|state| state.api_access.clone())
+                .unwrap_or_default(),
+        )?;
+        render_access_map(&selected)
     } else {
         vec![]
     };
@@ -721,19 +727,18 @@ fn resolve_config_client_args(
                     "config client requires --group or --api-access in non-interactive sessions",
                 )?;
                 if !groups.iter().any(|existing| existing == &group) {
-                    let api_access = prompt_required(
-                        "Inline api_access entry",
-                        None,
-                        Some("projects=read,reports=write"),
-                        "config group requires --api-access in non-interactive sessions",
-                    )?;
+                    let api_access = render_access_map(&prompt_api_access_rules(
+                        args.config.as_deref(),
+                        args.password.clone(),
+                        BTreeMap::new(),
+                    )?);
                     config::apply_group(config::ConfigGroupArgs {
                         config: args.config.clone(),
                         password: args.password.clone(),
                         log_level: args.log_level.clone(),
                         delete: false,
                         name: group.clone(),
-                        api_access: vec![api_access],
+                        api_access,
                     })
                     .map_err(|error| CommandError::new(error.to_string()))?;
                 }
@@ -741,15 +746,14 @@ fn resolve_config_client_args(
             }
             "inline" => (
                 None,
-                vec![prompt_required(
-                    "Inline api_access entry",
+                render_access_map(&prompt_api_access_rules(
+                    args.config.as_deref(),
+                    args.password.clone(),
                     existing
                         .as_ref()
-                        .map(render_client_api_access_map)
-                        .as_deref(),
-                    Some("projects=read,reports=write"),
-                    "config client requires --group or --api-access in non-interactive sessions",
-                )?],
+                        .map(|state| state.api_access.clone())
+                        .unwrap_or_default(),
+                )?),
             ),
             _ => {
                 return Err(CommandError::new(
@@ -864,8 +868,8 @@ fn resolve_resource_name(
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("{value} (edit)"));
 
-    let selected = config::prompt_select(
-        &config::prompt_message(label, None, None, None, None, None),
+    let selected = config::prompt_select_with_prompt(
+        resource_kind.selector_label(),
         &items,
         default_label
             .as_deref()
@@ -929,14 +933,6 @@ fn confirm_delete(resource_kind: config::ResourceKind, name: &str) -> Result<(),
     Ok(())
 }
 
-fn render_api_access_map(map: &config::ExistingGroupState) -> String {
-    render_access_map(&map.api_access)
-}
-
-fn render_client_api_access_map(map: &config::ExistingClientPromptState) -> String {
-    render_access_map(&map.api_access)
-}
-
 fn render_headers_map(map: &std::collections::BTreeMap<String, String>) -> String {
     map.iter()
         .map(|(name, value)| format!("{name}={}", escape_header_prompt_value(value)))
@@ -944,19 +940,190 @@ fn render_headers_map(map: &std::collections::BTreeMap<String, String>) -> Strin
         .join(",")
 }
 
-fn render_access_map(map: &std::collections::BTreeMap<String, AccessLevel>) -> String {
-    map.iter()
-        .map(|(api, level)| {
-            format!(
-                "{api}={}",
-                match level {
-                    AccessLevel::Read => "read",
-                    AccessLevel::Write => "write",
+fn prompt_api_access_rules(
+    config_path: Option<&std::path::Path>,
+    password: Option<String>,
+    initial: BTreeMap<String, Vec<ApiAccessRule>>,
+) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, CommandError> {
+    let mut apis = config::list_api_slugs(config_path, password)
+        .map_err(|error| CommandError::new(error.to_string()))?;
+    apis.sort();
+
+    let mut selected = initial;
+    for api in selected.keys() {
+        if !apis.iter().any(|known| known == api) {
+            apis.push(api.clone());
+        }
+    }
+    apis.sort();
+
+    loop {
+        let mut items = apis
+            .iter()
+            .map(|api| format!("{api} (edit permissions)"))
+            .collect::<Vec<_>>();
+        items.push("Done".to_owned());
+
+        let selected_api = config::prompt_select_with_prompt(
+            "Api access",
+            &items,
+            Some("Done"),
+            "config access requires --api-access in non-interactive sessions",
+        )
+        .map_err(|error| CommandError::new(error.to_string()))?;
+
+        if selected_api == "Done" {
+            return Ok(selected);
+        }
+
+        let selected_api = selected_api
+            .strip_suffix(" (edit permissions)")
+            .unwrap_or(selected_api.as_str())
+            .to_owned();
+        let rules = selected.entry(selected_api.clone()).or_default();
+        prompt_api_rules_for_api(&selected_api, rules)?;
+    }
+}
+
+fn prompt_api_rules_for_api(api: &str, rules: &mut Vec<ApiAccessRule>) -> Result<(), CommandError> {
+    loop {
+        let mut items = vec!["Add new rule".to_owned()];
+        items.extend(
+            rules
+                .iter()
+                .map(|rule| format!("{} (delete)", render_api_access_rule(rule))),
+        );
+        items.push("Go back".to_owned());
+
+        let selected = config::prompt_select(
+            &config::prompt_message(
+                &format!("Rules for {api}"),
+                None,
+                None,
+                None,
+                Some("Add new rule, Go back"),
+                None,
+            ),
+            &items,
+            Some("Add new rule"),
+            "config access requires --api-access in non-interactive sessions",
+        )
+        .map_err(|error| CommandError::new(error.to_string()))?;
+
+        match selected.as_str() {
+            "Add new rule" => {
+                let rule = prompt_api_access_rule()?;
+                if !rules.contains(&rule) {
+                    rules.push(rule);
                 }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+            }
+            "Go back" => return Ok(()),
+            value => {
+                let rule_label = value.strip_suffix(" (delete)").unwrap_or(value);
+                rules.retain(|rule| render_api_access_rule(rule) != rule_label);
+            }
+        }
+    }
+}
+
+fn prompt_api_access_rule() -> Result<ApiAccessRule, CommandError> {
+    let method = config::prompt_required_text(
+        &config::prompt_message(
+            "Rule method",
+            None,
+            Some("GET"),
+            Some("GET"),
+            Some("GET, POST, PUT, PATCH, DELETE, *"),
+            None,
+        ),
+        Some("GET"),
+        "config access requires --api-access in non-interactive sessions",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+    let path = config::prompt_required_text(
+        &config::prompt_message(
+            "Rule path",
+            None,
+            Some("*"),
+            Some("/v1/projects/*"),
+            None,
+            Some("use * for every path"),
+        ),
+        Some("*"),
+        "config access requires --api-access in non-interactive sessions",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    Ok(ApiAccessRule {
+        method: parse_prompt_api_access_method(&method)?,
+        path: parse_prompt_api_access_path(&path)?,
+    })
+}
+
+fn parse_prompt_api_access_method(value: &str) -> Result<ApiAccessMethod, CommandError> {
+    let method = value.trim();
+    if method.is_empty() {
+        return Err(CommandError::new("Rule method cannot be empty"));
+    }
+    if method == "*" {
+        return Ok(ApiAccessMethod::Any);
+    }
+
+    let method = method.to_ascii_uppercase();
+    http::Method::from_bytes(method.as_bytes())
+        .map(ApiAccessMethod::Exact)
+        .map_err(|error| CommandError::new(format!("Rule method is invalid: {error}")))
+}
+
+fn parse_prompt_api_access_path(value: &str) -> Result<String, CommandError> {
+    let path = value.trim();
+    if path.is_empty() {
+        return Err(CommandError::new("Rule path cannot be empty"));
+    }
+    if path != "*" && !path.starts_with('/') {
+        return Err(CommandError::new("Rule path must be '*' or start with '/'"));
+    }
+    if path.contains('?') {
+        return Err(CommandError::new(
+            "Rule path must not contain query strings",
+        ));
+    }
+
+    Ok(path.to_owned())
+}
+
+fn render_access_map(map: &BTreeMap<String, Vec<ApiAccessRule>>) -> Vec<String> {
+    if map.is_empty() {
+        return vec![String::new()];
+    }
+
+    map.iter()
+        .map(|(api, rules)| render_api_access_rules(api, rules))
+        .collect()
+}
+
+fn render_api_access_rules(api: &str, rules: &[ApiAccessRule]) -> String {
+    if rules.is_empty() {
+        return format!("{api}:");
+    }
+
+    format!(
+        "{api}:{}",
+        rules
+            .iter()
+            .map(render_api_access_rule)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_api_access_rule(rule: &ApiAccessRule) -> String {
+    let method = match &rule.method {
+        ApiAccessMethod::Any => "*".to_owned(),
+        ApiAccessMethod::Exact(method) => method.as_str().to_ascii_lowercase(),
+    };
+
+    format!("{method}:{}", rule.path)
 }
 
 fn split_optional_header_segments(value: &str) -> Vec<String> {

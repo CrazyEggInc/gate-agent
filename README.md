@@ -69,7 +69,7 @@ gate-agent config api \
 
 gate-agent config group \
   --name local-default \
-  --api-access cats=read
+  --api-access cats:get:*
 
 gate-agent start
 
@@ -142,7 +142,7 @@ curl -i -H 'Authorization: Bearer local-upstream-token' \
 # start gate-agent
 cargo run -- start --config=.secrets --log-level=info
 
-# call gate-agent with the sample local bearer token
+# call gate-agent with the sample local bearer token and broad local projects access
 export GATE_AGENT_TOKEN='default.s3cr3t'
 curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks

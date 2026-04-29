@@ -6,7 +6,7 @@ use reqwest::{Client, redirect};
 use crate::auth::bearer::validate_token;
 use crate::config::ConfigSource;
 use crate::config::app_config::AppConfig;
-use crate::config::secrets::{AccessLevel, ApiConfig, ClientConfig, SecretsConfig};
+use crate::config::secrets::{ApiAccessRule, ApiConfig, ClientConfig, SecretsConfig};
 use crate::error::AppError;
 
 #[derive(Clone, Debug)]
@@ -25,7 +25,7 @@ pub struct AppState {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClientApiAccessEntry<'a> {
-    pub access_level: AccessLevel,
+    pub rules: &'a [ApiAccessRule],
     pub api_config: &'a ApiConfig,
 }
 
@@ -65,45 +65,41 @@ impl AppState {
         Ok(client)
     }
 
-    pub fn client_api_access(
-        &self,
-        client: &ClientConfig,
+    pub fn client_api_access<'a>(
+        &'a self,
+        client: &'a ClientConfig,
         api: &str,
-    ) -> Result<AccessLevel, AppError> {
-        Ok(self.client_api_access_entry(client, api)?.access_level)
+    ) -> Result<&'a [ApiAccessRule], AppError> {
+        Ok(self.client_api_access_entry(client, api)?.rules)
     }
 
     pub fn client_api_access_entry<'a>(
         &'a self,
-        client: &ClientConfig,
+        client: &'a ClientConfig,
         api: &str,
     ) -> Result<ClientApiAccessEntry<'a>, AppError> {
         let api_config = self.api_config(api)?;
-        let access_level =
-            client
-                .api_access
-                .get(api)
-                .copied()
-                .ok_or_else(|| AppError::ForbiddenApi {
-                    api: api.to_owned(),
-                })?;
+        let rules = client
+            .api_access
+            .get(api)
+            .map(Vec::as_slice)
+            .ok_or_else(|| AppError::ForbiddenApi {
+                api: api.to_owned(),
+            })?;
 
-        Ok(ClientApiAccessEntry {
-            access_level,
-            api_config,
-        })
+        Ok(ClientApiAccessEntry { rules, api_config })
     }
 
     pub fn client_api_access_entries<'a>(
         &'a self,
-        client: &ClientConfig,
+        client: &'a ClientConfig,
     ) -> Result<Vec<ClientApiAccessEntry<'a>>, AppError> {
         client
             .api_access
             .iter()
-            .map(|(api, access_level)| {
+            .map(|(api, rules)| {
                 Ok(ClientApiAccessEntry {
-                    access_level: *access_level,
+                    rules: rules.as_slice(),
                     api_config: self.api_config(api)?,
                 })
             })

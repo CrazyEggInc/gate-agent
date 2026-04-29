@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gate_agent::config::secrets::AccessLevel;
+use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule};
 use gate_agent::config::write::{self, ApiUpsert, ClientUpsert, GroupUpsert};
 use secrecy::SecretString;
 
@@ -755,7 +755,7 @@ api_access = {}
             bearer_token_expires_at: None,
             access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([(
                 "projects".to_string(),
-                AccessLevel::Read,
+                vec![exact_rule(http::Method::GET, "/api/*")],
             )])),
         },
         None,
@@ -789,8 +789,8 @@ api_access = {}
         1,
     );
     let client_with_notes = client_with_notes.replacen(
-        "api_access = { projects = \"read\" }\n",
-        "api_access = { projects = \"read\" }\nlabel = \"keep-me\"\n",
+        "api_access = { projects = [{ method = \"get\", path = \"/api/*\" }] }\n",
+        "api_access = { projects = [{ method = \"get\", path = \"/api/*\" }] }\nlabel = \"keep-me\"\n",
         1,
     );
     let client_header = "[clients.partner]\n";
@@ -810,8 +810,14 @@ api_access = {}
             bearer_token: None,
             bearer_token_expires_at: None,
             access: write::ClientAccessUpsert::ApiAccess(std::collections::BTreeMap::from([
-                ("projects".to_string(), AccessLevel::Read),
-                ("billing".to_string(), AccessLevel::Write),
+                (
+                    "projects".to_string(),
+                    vec![exact_rule(http::Method::GET, "/api/*")],
+                ),
+                (
+                    "billing".to_string(),
+                    vec![any_rule("*"), exact_rule(http::Method::POST, "/billing/*")],
+                ),
             ])),
         },
         None,
@@ -837,13 +843,19 @@ api_access = {}
     assert!(second_result.generated_bearer_token.is_none());
     assert_eq!(second_result.bearer_token_expires_at, original_expiration);
 
-    let api_access = find_inline_table_value(client, "api_access").unwrap();
+    assert!(client.contains(
+        "api_access = { billing = [{ method = \"*\", path = \"*\" }, { method = \"post\", path = \"/billing/*\" }], projects = [{ method = \"get\", path = \"/api/*\" }] }"
+    ));
     assert_eq!(
-        api_access,
+        parsed_api_access(&contents, &["clients", "partner", "api_access"], "billing"),
         vec![
-            ("billing".to_string(), "write".to_string()),
-            ("projects".to_string(), "read".to_string()),
+            ("*".to_string(), "*".to_string()),
+            ("post".to_string(), "/billing/*".to_string()),
         ]
+    );
+    assert_eq!(
+        parsed_api_access(&contents, &["clients", "partner", "api_access"], "projects"),
+        vec![("get".to_string(), "/api/*".to_string())]
     );
     assert_eq!(
         find_string_value(client, "label").as_deref(),
@@ -866,7 +878,7 @@ fn config_add_client_prints_generated_bearer_token_once_and_persists_only_hash()
 bearer_token_id = "default-token"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-01T00:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [groups]
 
@@ -888,7 +900,7 @@ timeout_ms = 5000
             "--name",
             "partner",
             "--api-access",
-            "projects=read",
+            "projects:get:/api/*",
         ])
         .output()?;
 
@@ -968,7 +980,7 @@ api_access = {}
             name: "partner-write".to_string(),
             api_access: std::collections::BTreeMap::from([(
                 "projects".to_string(),
-                AccessLevel::Read,
+                vec![exact_rule(http::Method::GET, "/api/*")],
             )]),
         },
         None,
@@ -977,8 +989,8 @@ api_access = {}
     let first_contents = fs::read_to_string(&config_path)?;
     let first_group = section_body(&first_contents, "groups.partner-write").unwrap();
     let group_with_notes = first_group.replacen(
-        "api_access = { projects = \"read\" }\n",
-        "# preserve this group comment\napi_access = { projects = \"read\" }\nlabel = \"keep-me\"\n",
+        "api_access = { projects = [{ method = \"get\", path = \"/api/*\" }] }\n",
+        "# preserve this group comment\napi_access = { projects = [{ method = \"get\", path = \"/api/*\" }] }\nlabel = \"keep-me\"\n",
         1,
     );
     let group_header = "[groups.partner-write]\n";
@@ -996,8 +1008,14 @@ api_access = {}
         &GroupUpsert {
             name: "partner-write".to_string(),
             api_access: std::collections::BTreeMap::from([
-                ("projects".to_string(), AccessLevel::Read),
-                ("billing".to_string(), AccessLevel::Write),
+                (
+                    "projects".to_string(),
+                    vec![exact_rule(http::Method::GET, "/api/*")],
+                ),
+                (
+                    "billing".to_string(),
+                    vec![any_rule("*"), exact_rule(http::Method::POST, "/billing/*")],
+                ),
             ]),
         },
         None,
@@ -1009,12 +1027,27 @@ api_access = {}
     assert!(contents.starts_with("# keep this comment"));
     assert_eq!(contents.matches("[groups.partner-write]").count(), 1);
     assert!(contents.contains("# preserve this group comment"));
+    assert!(group.contains(
+        "api_access = { billing = [{ method = \"*\", path = \"*\" }, { method = \"post\", path = \"/billing/*\" }], projects = [{ method = \"get\", path = \"/api/*\" }] }"
+    ));
     assert_eq!(
-        find_inline_table_value(group, "api_access"),
-        Some(vec![
-            ("billing".to_string(), "write".to_string()),
-            ("projects".to_string(), "read".to_string()),
-        ])
+        parsed_api_access(
+            &contents,
+            &["groups", "partner-write", "api_access"],
+            "billing"
+        ),
+        vec![
+            ("*".to_string(), "*".to_string()),
+            ("post".to_string(), "/billing/*".to_string()),
+        ]
+    );
+    assert_eq!(
+        parsed_api_access(
+            &contents,
+            &["groups", "partner-write", "api_access"],
+            "projects"
+        ),
+        vec![("get".to_string(), "/api/*".to_string())]
     );
     assert_eq!(
         find_string_value(group, "label").as_deref(),
@@ -1035,11 +1068,11 @@ fn add_client_writes_group_and_removes_stale_inline_api_access()
 bearer_token_id = "partner-token"
 bearer_token_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 bearer_token_expires_at = "2030-01-01T00:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 note = "keep-me"
 
 [groups.partner-write]
-api_access = { projects = "write" }
+api_access = { projects = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example/api"
@@ -1230,6 +1263,49 @@ fn split_full_token(value: &str) -> Option<(&str, &str)> {
     }
 
     Some((token_id, secret))
+}
+
+fn exact_rule(method: http::Method, path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Exact(method),
+        path: path.to_string(),
+    }
+}
+
+fn any_rule(path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Any,
+        path: path.to_string(),
+    }
+}
+
+fn parsed_api_access(contents: &str, path: &[&str], api: &str) -> Vec<(String, String)> {
+    let parsed: toml::Value = contents.parse().expect("valid TOML");
+    let mut current = &parsed;
+
+    for segment in path {
+        current = current.get(*segment).expect("path segment exists");
+    }
+
+    current
+        .get(api)
+        .expect("api access exists")
+        .as_array()
+        .expect("api access rules array")
+        .iter()
+        .map(|rule| {
+            (
+                rule.get("method")
+                    .and_then(toml::Value::as_str)
+                    .expect("method string")
+                    .to_string(),
+                rule.get("path")
+                    .and_then(toml::Value::as_str)
+                    .expect("path string")
+                    .to_string(),
+            )
+        })
+        .collect()
 }
 
 fn is_lower_hex(value: &str) -> bool {

@@ -1,8 +1,9 @@
-use gate_agent::auth::{AccessLevel, bearer};
+use gate_agent::auth::{ApiAccessMethod, ApiAccessRule, bearer};
 
 #[test]
 fn auth_module_exposes_bearer_surface_only() {
-    fn accepts_access_level(_: Option<AccessLevel>) {}
+    fn accepts_api_access_method(_: Option<ApiAccessMethod>) {}
+    fn accepts_api_access_rule(_: Option<ApiAccessRule>) {}
     fn accepts_authorization_validator(
         _: fn(
             &str,
@@ -18,7 +19,8 @@ fn auth_module_exposes_bearer_surface_only() {
     ) {
     }
 
-    accepts_access_level(None);
+    accepts_api_access_method(None);
+    accepts_api_access_rule(None);
     accepts_authorization_validator(bearer::validate_bearer_authorized_request);
     accepts_token_validator(bearer::validate_token);
 }

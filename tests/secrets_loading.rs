@@ -8,7 +8,7 @@ use keyring::Credential;
 use keyring::credential::{CredentialApi, CredentialBuilderApi, CredentialPersistence};
 use secrecy::ExposeSecret;
 
-use gate_agent::config::secrets::{AccessLevel, BearerTokenHash, SecretsConfig};
+use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule, BearerTokenHash, SecretsConfig};
 use gate_agent::config::{
     crypto,
     password::{PASSWORD_ENV_VAR, PasswordArgs, PasswordSource, resolve_for_encrypted_create},
@@ -18,6 +18,20 @@ use tempfile::tempdir;
 const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: u16 = 8787;
+
+fn any_rule(path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Any,
+        path: path.to_owned(),
+    }
+}
+
+fn exact_rule(method: http::Method, path: &str) -> ApiAccessRule {
+    ApiAccessRule {
+        method: ApiAccessMethod::Exact(method),
+        path: path.to_owned(),
+    }
+}
 
 fn write_secrets_file(
     contents: &str,
@@ -247,13 +261,35 @@ fn valid_config_body() -> &'static str {
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
 headers = { authorization = "Bearer billing-secret-token" }
 timeout_ms = 5000
 "#
+}
+
+fn api_access_config_error(api_access: &str) -> String {
+    let body = format!(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = {{ {api_access} }}
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = {{ x-api-key = "projects-secret-value" }}
+timeout_ms = 5000
+"#
+    );
+    let (_temp_dir, secrets_file) = write_secrets_file(&body).expect("write secrets config");
+
+    SecretsConfig::load_from_file(&secrets_file)
+        .unwrap_err()
+        .to_string()
 }
 
 #[test]
@@ -276,6 +312,9 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     assert!(sample_contents.contains("group = \"local-default\""));
     assert!(sample_contents.contains("[groups.local-default]"));
     assert!(
+        sample_contents.contains("api_access = { projects = [{ method = \"*\", path = \"*\" }] }")
+    );
+    assert!(
         sample_contents.contains("headers = { authorization = \"Bearer local-upstream-token\" }")
     );
     assert_eq!(client.bearer_token_id, "default");
@@ -289,7 +328,7 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     );
     assert_eq!(
         client.api_access,
-        [("projects".to_string(), AccessLevel::Read)]
+        [("projects".to_string(), vec![any_rule("*")])]
             .into_iter()
             .collect()
     );
@@ -338,7 +377,7 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
     assert_eq!(client.bearer_token_expires_at.nanosecond(), 0);
     assert_eq!(
         client.api_access,
-        [("billing".to_string(), AccessLevel::Write)]
+        [("billing".to_string(), vec![any_rule("*")])]
             .into_iter()
             .collect()
     );
@@ -366,6 +405,93 @@ fn secrets_config_loads_validated_structs() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn secrets_config_loads_mixed_api_access_route_rules() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { projects = [{ method = "get", path = "/api/*" }, { method = "POST", path = "/api/users/*" }], datadog = [{ method = "*", path = "*" }] }
+
+[apis.projects]
+base_url = "https://projects.internal.example"
+headers = { x-api-key = "projects-secret-value" }
+timeout_ms = 5000
+
+[apis.datadog]
+base_url = "https://datadog.internal.example"
+headers = { x-api-key = "datadog-secret-value" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let client = config.clients.get("default").expect("default client");
+
+    assert_eq!(
+        client.api_access["projects"],
+        vec![
+            exact_rule(http::Method::GET, "/api/*"),
+            exact_rule(http::Method::POST, "/api/users/*"),
+        ]
+    );
+    assert_eq!(client.api_access["datadog"], vec![any_rule("*")]);
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_empty_api_access_array() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = []
+
+[apis.project]
+base_url = "https://project.internal.example"
+headers = { x-api-key = "project-secret-value" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let client = config.clients.get("default").expect("default client");
+
+    assert!(client.api_access.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_empty_api_access_rules_array() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = [{ project = [] }]
+
+[apis.project]
+base_url = "https://project.internal.example"
+headers = { x-api-key = "project-secret-value" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let client = config.clients.get("default").expect("default client");
+
+    assert_eq!(client.api_access.get("project"), Some(&Vec::new()));
+
+    Ok(())
+}
+
+#[test]
 fn secrets_config_parses_valid_toml_from_source_label() -> Result<(), Box<dyn std::error::Error>> {
     let config = SecretsConfig::parse(
         r#"
@@ -373,7 +499,7 @@ fn secrets_config_parses_valid_toml_from_source_label() -> Result<(), Box<dyn st
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "get", path = "*" }] }
 
         [apis.billing]
         base_url = "https://billing.internal.example"
@@ -398,9 +524,12 @@ api_access = { billing = "read" }
     );
     assert_eq!(
         client.api_access,
-        [("billing".to_string(), AccessLevel::Read)]
-            .into_iter()
-            .collect()
+        [(
+            "billing".to_string(),
+            vec![exact_rule(http::Method::GET, "*")]
+        )]
+        .into_iter()
+        .collect()
     );
     assert_eq!(api.base_url.as_str(), "https://billing.internal.example/");
     assert_eq!(api.headers.len(), 1);
@@ -424,7 +553,7 @@ fn secrets_config_parse_errors_use_stdin_source_label() {
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write"
+api_access = { billing = [{ method = "*", path = "*" }]
 "#,
         "stdin",
     )
@@ -446,7 +575,7 @@ fn secrets_config_loads_encrypted_file_with_password() -> Result<(), Box<dyn std
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "get", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -521,7 +650,7 @@ fn secrets_config_loads_encrypted_file_with_keyring_password()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "get", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -597,7 +726,7 @@ fn secrets_config_falls_through_to_prompt_after_keyring_read_failure()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "get", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -644,7 +773,7 @@ fn secrets_config_backfills_keyring_after_successful_prompt_decrypt()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "read" }
+api_access = { billing = [{ method = "get", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -743,7 +872,7 @@ fn secrets_config_loads_multiple_clients_sharing_one_api() -> Result<(), Box<dyn
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.partner]
 bearer_token_id = "partner"
@@ -752,7 +881,7 @@ bearer_token_expires_at = "2026-10-09T12:00:00Z"
 group = "shared-read"
 
 [groups.shared-read]
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -771,7 +900,7 @@ timeout_ms = 5000
             .expect("default client")
             .api_access
             .get("projects")
-            == Some(&AccessLevel::Read)
+            == Some(&vec![exact_rule(http::Method::GET, "*")])
     );
     assert!(
         config
@@ -780,7 +909,7 @@ timeout_ms = 5000
             .expect("partner client")
             .api_access
             .get("projects")
-            == Some(&AccessLevel::Read)
+            == Some(&vec![exact_rule(http::Method::GET, "*")])
     );
 
     Ok(())
@@ -796,10 +925,10 @@ bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
 group = "shared-read"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [groups.shared-read]
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -883,7 +1012,7 @@ bearer_token_expires_at = "2026-10-08T12:00:00Z"
 group = "shared-read"
 
 [groups.shared-read]
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 description = "readonly"
 
 [apis.projects]
@@ -929,15 +1058,14 @@ timeout_ms = 5000
 }
 
 #[test]
-fn secrets_config_rejects_unknown_access_level_in_api_access()
--> Result<(), Box<dyn std::error::Error>> {
+fn secrets_config_rejects_old_string_api_access_syntax() -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
 [clients.default]
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "admin" }
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -948,14 +1076,17 @@ timeout_ms = 5000
 
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
-    assert!(error.to_string().contains("unknown variant `admin`"));
-    assert!(error.to_string().contains("expected `read` or `write`"));
+    assert!(
+        error
+            .to_string()
+            .contains("data did not match any variant of untagged enum RawApiAccess")
+    );
 
     Ok(())
 }
 
 #[test]
-fn secrets_config_rejects_unknown_access_level_in_group_api_access()
+fn secrets_config_rejects_old_string_group_api_access_syntax()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, secrets_file) = write_secrets_file(
         r#"
@@ -966,7 +1097,7 @@ bearer_token_expires_at = "2026-10-08T12:00:00Z"
 group = "shared-access"
 
 [groups.shared-access]
-api_access = { projects = "admin" }
+api_access = { projects = "read" }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -977,10 +1108,70 @@ timeout_ms = 5000
 
     let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
 
-    assert!(error.to_string().contains("unknown variant `admin`"));
-    assert!(error.to_string().contains("expected `read` or `write`"));
+    assert!(
+        error
+            .to_string()
+            .contains("data did not match any variant of untagged enum RawApiAccess")
+    );
 
     Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_blank_api_access_method() {
+    let error = api_access_config_error(r#"projects = [{ method = "", path = "*" }]"#);
+
+    assert_eq!(
+        error,
+        "clients.default.api_access.projects[0].method cannot be empty"
+    );
+}
+
+#[test]
+fn secrets_config_rejects_invalid_api_access_method() {
+    let error = api_access_config_error(r#"projects = [{ method = "bad method", path = "*" }]"#);
+
+    assert!(error.starts_with("clients.default.api_access.projects[0].method is invalid:"));
+}
+
+#[test]
+fn secrets_config_rejects_blank_api_access_path() {
+    let error = api_access_config_error(r#"projects = [{ method = "get", path = "" }]"#);
+
+    assert_eq!(
+        error,
+        "clients.default.api_access.projects[0].path cannot be empty"
+    );
+}
+
+#[test]
+fn secrets_config_rejects_api_access_path_without_leading_slash() {
+    let error = api_access_config_error(r#"projects = [{ method = "get", path = "api/*" }]"#);
+
+    assert_eq!(
+        error,
+        "clients.default.api_access.projects[0].path must be '*' or start with '/'"
+    );
+}
+
+#[test]
+fn secrets_config_rejects_api_access_path_with_query() {
+    let error = api_access_config_error(r#"projects = [{ method = "get", path = "/api?x=1" }]"#);
+
+    assert_eq!(
+        error,
+        "clients.default.api_access.projects[0].path must not contain query strings"
+    );
+}
+
+#[test]
+fn secrets_config_rejects_api_access_path_with_fragment() {
+    let error = api_access_config_error(r#"projects = [{ method = "get", path = "/api#users" }]"#);
+
+    assert_eq!(
+        error,
+        "clients.default.api_access.projects[0].path must not contain fragments"
+    );
 }
 
 #[test]
@@ -995,7 +1186,7 @@ bearer_token_expires_at = "2026-10-08T12:00:00Z"
 group = "shared-access"
 
 [groups.shared-access]
-api_access = { unknown = "read" }
+api_access = { unknown = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1101,7 +1292,7 @@ fn secrets_config_rejects_non_lowercase_api_slug() -> Result<(), Box<dyn std::er
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.Projects]
 base_url = "https://projects.internal.example"
@@ -1125,7 +1316,7 @@ fn secrets_config_rejects_api_slug_with_slash() -> Result<(), Box<dyn std::error
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis."projects/api"]
 base_url = "https://projects.internal.example"
@@ -1152,7 +1343,7 @@ fn secrets_config_rejects_non_lowercase_client_slug() -> Result<(), Box<dyn std:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1177,7 +1368,7 @@ fn secrets_config_rejects_client_slug_with_trailing_space() -> Result<(), Box<dy
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1205,7 +1396,7 @@ fn secrets_config_rejects_non_lowercase_api_access_keys() -> Result<(), Box<dyn 
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { Projects = "read" }
+api_access = { Projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1233,7 +1424,7 @@ fn secrets_config_rejects_api_access_keys_with_trailing_space()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { "projects " = "read" }
+api_access = { "projects " = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1260,7 +1451,7 @@ fn secrets_config_rejects_unknown_api_in_api_access() -> Result<(), Box<dyn std:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { unknown = "write" }
+api_access = { unknown = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1287,7 +1478,7 @@ fn secrets_config_rejects_duplicate_api_access_keys() -> Result<(), Box<dyn std:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read", projects = "write" }
+api_access = { projects = [{ method = "get", path = "*" }], projects = [{ method = "*", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1317,13 +1508,13 @@ fn secrets_config_rejects_duplicate_client_bearer_token_ids()
 bearer_token_id = "shared-id"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.partner]
 bearer_token_id = "shared-id"
 bearer_token_hash = "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
 bearer_token_expires_at = "2026-10-09T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1351,13 +1542,13 @@ fn secrets_config_rejects_duplicate_client_bearer_token_hashes()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-09T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1386,7 +1577,7 @@ unexpected = "nope"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1412,7 +1603,7 @@ fn secrets_config_rejects_legacy_client_auth_fields() -> Result<(), Box<dyn std:
 api_key = "default-key"
 api_key_expires_at = "2026-10-08T12:00:00Z"
 signing_secret = "replace-me"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1464,7 +1655,7 @@ fn secrets_config_rejects_unknown_api_fields() -> Result<(), Box<dyn std::error:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1493,7 +1684,7 @@ fn secrets_config_loads_optional_api_metadata() -> Result<(), Box<dyn std::error
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1524,7 +1715,7 @@ fn secrets_config_rejects_non_http_docs_url() -> Result<(), Box<dyn std::error::
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1552,7 +1743,7 @@ fn secrets_config_rejects_non_http_base_url_schemes() -> Result<(), Box<dyn std:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "ftp://projects.internal.example"
@@ -1579,7 +1770,7 @@ fn secrets_config_rejects_zero_timeout() -> Result<(), Box<dyn std::error::Error
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1606,7 +1797,7 @@ fn secrets_config_defaults_missing_timeout_ms() -> Result<(), Box<dyn std::error
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1629,7 +1820,7 @@ fn secrets_config_rejects_invalid_header_name() -> Result<(), Box<dyn std::error
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1658,7 +1849,7 @@ fn secrets_config_allows_api_without_upstream_auth_injection()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1682,7 +1873,7 @@ fn secrets_config_loads_api_with_one_header() -> Result<(), Box<dyn std::error::
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1712,7 +1903,7 @@ fn secrets_config_loads_api_with_multiple_headers() -> Result<(), Box<dyn std::e
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1744,7 +1935,7 @@ fn secrets_config_loads_api_with_basic_auth() -> Result<(), Box<dyn std::error::
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1773,7 +1964,7 @@ fn secrets_config_loads_api_with_basic_auth_username_only() -> Result<(), Box<dy
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1801,7 +1992,7 @@ fn secrets_config_loads_api_with_basic_auth_empty_password()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1829,7 +2020,7 @@ fn secrets_config_rejects_basic_auth_with_authorization_header()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1857,7 +2048,7 @@ fn secrets_config_rejects_empty_basic_auth_username() -> Result<(), Box<dyn std:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1885,7 +2076,7 @@ fn secrets_config_preserves_raw_basic_auth_values_without_trim_mutation()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { billing = "write" }
+api_access = { billing = [{ method = "*", path = "*" }] }
 
 [apis.billing]
 base_url = "https://billing.internal.example"
@@ -1913,7 +2104,7 @@ fn secrets_config_rejects_case_only_duplicate_api_headers() -> Result<(), Box<dy
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1941,7 +2132,7 @@ fn secrets_config_preserves_raw_header_value_without_trim_mutation()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1971,7 +2162,7 @@ fn secrets_config_rejects_legacy_api_auth_header_field() -> Result<(), Box<dyn s
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -1995,7 +2186,7 @@ fn secrets_config_rejects_legacy_api_auth_value_field() -> Result<(), Box<dyn st
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -2019,7 +2210,7 @@ fn secrets_config_rejects_legacy_api_auth_scheme_field() -> Result<(), Box<dyn s
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -2044,7 +2235,7 @@ fn secrets_config_rejects_invalid_header_value_without_secret_leak()
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -2074,7 +2265,7 @@ fn secrets_config_rejects_empty_header_value() -> Result<(), Box<dyn std::error:
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -2101,7 +2292,7 @@ fn secrets_config_rejects_whitespace_only_header_value() -> Result<(), Box<dyn s
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"

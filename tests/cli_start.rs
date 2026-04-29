@@ -14,7 +14,7 @@ const VALID_CONFIG: &str = r#"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -42,7 +42,7 @@ port = {port}
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = {{ projects = "read" }}
+api_access = {{ projects = [{{ method = "get", path = "*" }}] }}
 
 [apis.projects]
 base_url = "https://projects.internal.example"

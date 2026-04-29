@@ -1,6 +1,10 @@
 use axum::body::Body;
 
-use crate::{app::AppState, auth::bearer::AuthorizedRequest, error::AppError};
+use crate::{
+    app::AppState,
+    auth::bearer::{AuthorizedRequest, api_access_allows},
+    error::AppError,
+};
 
 use super::{
     request::{ForwardRequest, forward_request_from_proxy_request, map_forward_request},
@@ -44,20 +48,18 @@ fn authorize_forward_request(
     request: &ForwardRequest,
     authorized: &AuthorizedRequest,
 ) -> Result<(), AppError> {
-    let required_access = super::required_access_for_method(&request.method);
-    let Some(token_access) = authorized.access.apis.get(&request.api_slug).copied() else {
-        return Err(AppError::ForbiddenApi {
-            api: request.api_slug.clone(),
-        });
-    };
-
-    if !token_access.allows(required_access) {
-        return Err(AppError::ForbiddenApi {
-            api: request.api_slug.clone(),
-        });
+    if api_access_allows(
+        authorized,
+        &request.api_slug,
+        &request.method,
+        &request.path_and_query,
+    ) {
+        return Ok(());
     }
 
-    Ok(())
+    Err(AppError::ForbiddenApi {
+        api: request.api_slug.clone(),
+    })
 }
 
 pub async fn forward_prepared_request(

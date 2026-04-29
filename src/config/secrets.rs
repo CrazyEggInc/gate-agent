@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use http::header::{HeaderName, HeaderValue};
 use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -46,23 +46,22 @@ pub struct ClientConfig {
     pub bearer_token_id: String,
     pub bearer_token_hash: BearerTokenHash,
     pub bearer_token_expires_at: UtcTimestamp,
-    pub api_access: BTreeMap<String, AccessLevel>,
+    pub api_access: BTreeMap<String, Vec<ApiAccessRule>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BearerTokenHash(String);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AccessLevel {
-    Read,
-    Write,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiAccessMethod {
+    Any,
+    Exact(http::Method),
 }
 
-impl AccessLevel {
-    pub fn allows(self, required: Self) -> bool {
-        self >= required
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiAccessRule {
+    pub method: ApiAccessMethod,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,13 +126,27 @@ struct RawClientConfig {
     bearer_token_hash: String,
     bearer_token_expires_at: String,
     group: Option<String>,
-    api_access: Option<BTreeMap<String, AccessLevel>>,
+    api_access: Option<RawApiAccess>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGroupConfig {
-    api_access: BTreeMap<String, AccessLevel>,
+    api_access: RawApiAccess,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawApiAccess {
+    Map(BTreeMap<String, Vec<RawApiAccessRule>>),
+    Entries(Vec<BTreeMap<String, Vec<RawApiAccessRule>>>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApiAccessRule {
+    method: String,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,7 +353,7 @@ impl ClientConfig {
     fn try_from_raw(
         slug: &str,
         raw_config: RawClientConfig,
-        groups: &BTreeMap<String, BTreeMap<String, AccessLevel>>,
+        groups: &BTreeMap<String, BTreeMap<String, Vec<ApiAccessRule>>>,
         apis: &BTreeMap<String, ApiConfig>,
     ) -> Result<Self, ConfigError> {
         validate_slug("client", slug)?;
@@ -678,12 +691,12 @@ fn validate_slug(kind: &str, value: &str) -> Result<(), ConfigError> {
 
 fn validate_api_access_map(
     field: &str,
-    api_access: BTreeMap<String, AccessLevel>,
+    api_access: RawApiAccess,
     apis: &BTreeMap<String, ApiConfig>,
-) -> Result<BTreeMap<String, AccessLevel>, ConfigError> {
+) -> Result<BTreeMap<String, Vec<ApiAccessRule>>, ConfigError> {
     let mut validated = BTreeMap::new();
 
-    for (api_slug, access_level) in api_access {
+    for (api_slug, rules) in flatten_api_access(field, api_access)? {
         if !is_valid_slug(&api_slug) {
             return Err(ConfigError::new(format!(
                 "{field} contains invalid api slug '{api_slug}'"
@@ -696,10 +709,87 @@ fn validate_api_access_map(
             )));
         }
 
-        validated.insert(api_slug, access_level);
+        let mut validated_rules = Vec::with_capacity(rules.len());
+
+        for (index, rule) in rules.into_iter().enumerate() {
+            validated_rules.push(ApiAccessRule {
+                method: validate_api_access_method(
+                    &format!("{field}.{api_slug}[{index}].method"),
+                    rule.method,
+                )?,
+                path: validate_api_access_path(
+                    &format!("{field}.{api_slug}[{index}].path"),
+                    rule.path,
+                )?,
+            });
+        }
+
+        validated.insert(api_slug, validated_rules);
     }
 
     Ok(validated)
+}
+
+fn flatten_api_access(
+    field: &str,
+    api_access: RawApiAccess,
+) -> Result<BTreeMap<String, Vec<RawApiAccessRule>>, ConfigError> {
+    let entries = match api_access {
+        RawApiAccess::Map(map) => return Ok(map),
+        RawApiAccess::Entries(entries) => entries,
+    };
+
+    let mut map = BTreeMap::new();
+
+    for entry in entries {
+        for (api_slug, rules) in entry {
+            if map.insert(api_slug.clone(), rules).is_some() {
+                return Err(ConfigError::new(format!(
+                    "{field} contains duplicate api '{api_slug}'"
+                )));
+            }
+        }
+    }
+
+    Ok(map)
+}
+
+fn validate_api_access_method(field: &str, value: String) -> Result<ApiAccessMethod, ConfigError> {
+    let method = required_string(field, value)?;
+
+    if method == "*" {
+        return Ok(ApiAccessMethod::Any);
+    }
+
+    let method = method.to_ascii_uppercase();
+
+    http::Method::from_bytes(method.as_bytes())
+        .map(ApiAccessMethod::Exact)
+        .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))
+}
+
+fn validate_api_access_path(field: &str, value: String) -> Result<String, ConfigError> {
+    let path = required_string(field, value)?;
+
+    if path != "*" && !path.starts_with('/') {
+        return Err(ConfigError::new(format!(
+            "{field} must be '*' or start with '/'"
+        )));
+    }
+
+    if path.contains('?') {
+        return Err(ConfigError::new(format!(
+            "{field} must not contain query strings"
+        )));
+    }
+
+    if path.contains('#') {
+        return Err(ConfigError::new(format!(
+            "{field} must not contain fragments"
+        )));
+    }
+
+    Ok(path)
 }
 
 fn validate_date(field: &str, year: i32, month: u8, day: u8) -> Result<(), ConfigError> {

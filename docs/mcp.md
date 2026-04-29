@@ -34,7 +34,7 @@ Expected behavior:
 1. the client sends exactly one `Authorization: Bearer <token>` header to `POST /mcp`
 2. the bearer token is treated as an opaque credential
 3. the server validates that bearer token against configured server-side state
-4. the matched client's effective `api_access` becomes the MCP authorization scope
+4. the matched client's effective `api_access` route whitelist becomes the MCP authorization scope
 
 There is no secondary auth handshake for MCP. A client that can authenticate to `/proxy` with a direct bearer token must use that same model for `/mcp`.
 
@@ -77,13 +77,16 @@ No other tools are part of the supported product contract.
 
 `list_apis` is the discovery tool for the authenticated client.
 
-The result must be derived from the client's effective `api_access`, including any access inherited through configured groups after config resolution.
+The result must be derived from the client's effective `api_access`, including any route rules inherited through configured groups after config resolution.
 
 Discovery expectations:
 
 - only APIs present in the authenticated client's effective `api_access` are listed
 - each listed API includes its configured slug
-- each listed API includes the effective access level available to that client
+- each listed API includes the effective route rules available to that client
+- each route rule includes `method` and `path`
+- route rule `method = "*"` means any HTTP method
+- route rule `path = "*"` means any upstream path for that API
 - each listed API includes operator-configured `description` when present
 - each listed API includes operator-configured `docs_url` when present
 - API-specific discovery metadata belongs here, not in `tools/list`
@@ -97,7 +100,7 @@ Discovery expectations:
 
 ## call_api request contract
 
-`call_api` lets an authenticated MCP client call an API that is already allowed by its effective `api_access`.
+`call_api` lets an authenticated MCP client call an API route that is already allowed by its effective `api_access` route whitelist.
 
 Request expectations:
 
@@ -114,9 +117,12 @@ Request expectations:
 Authorization expectations:
 
 - the selected API must be allowed by the authenticated client's effective `api_access`
-- method access follows the same read/write policy as `/proxy`
-- `write` access satisfies `read`
-- unauthorized or unknown APIs fail closed
+- the selected method and path must match at least one configured route rule for that API
+- `method = "*"` matches any requested method
+- `path = "*"` matches any requested path
+- exact paths and glob-style path rules are matched against `call_api.path`
+- query parameters in `call_api.query` are ignored for route-rule matching
+- unauthorized APIs, unknown APIs, and missing route-rule matches fail closed with `403 forbidden_api`
 
 Forwarding expectations:
 

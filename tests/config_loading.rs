@@ -39,7 +39,7 @@ const VALID_CONFIG: &str = r#"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -56,7 +56,7 @@ port = 9898
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"
@@ -73,7 +73,7 @@ port = 9393
 bearer_token_id = "stdin-default"
 bearer_token_hash = "5fd8d7dc05bd649e11e71f60b6bd897ea7d35857c133ccfc74a06537e2ec4f38"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://stdin-projects.internal.example"
@@ -86,7 +86,7 @@ const CONFIG_WITH_API_METADATA: &str = r#"
 bearer_token_id = "default"
 bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
 bearer_token_expires_at = "2026-10-08T12:00:00Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [apis.projects]
 base_url = "https://projects.internal.example"

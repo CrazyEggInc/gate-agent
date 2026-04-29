@@ -13,7 +13,7 @@ use gate_agent::commands::config::{
 use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::password::PASSWORD_ENV_VAR;
 use gate_agent::config::path::CONFIG_ENV_VAR;
-use gate_agent::config::secrets::AccessLevel;
+use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule};
 use gate_agent::config::write::{self, ClientAccessUpsert, ClientUpsert, sha256_hex};
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::tempdir;
@@ -31,7 +31,7 @@ const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 bearer_token_id = "0011223344556677"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [groups]
 
@@ -46,7 +46,7 @@ const INVALID_BEARER_VALIDATE_CONFIG: &str = r#"
 bearer_token_id = "0011223344556677"
 bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { projects = "read" }
+api_access = { projects = [{ method = "get", path = "*" }] }
 
 [groups]
 
@@ -58,7 +58,7 @@ const STDIN_BEARER_VALIDATE_CONFIG: &str = r#"
 bearer_token_id = "8899aabbccddeeff"
 bearer_token_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 bearer_token_expires_at = "2030-01-02T03:04:05Z"
-api_access = { stdin-projects = "read" }
+api_access = { stdin-projects = [{ method = "get", path = "*" }] }
 
 [groups]
 
@@ -391,6 +391,43 @@ fn string_at<'a>(value: &'a Value, path: &[&str]) -> &'a str {
         .unwrap_or_else(|| panic!("expected string at {}", path.join(".")))
 }
 
+fn get_rule(path: &str) -> Vec<ApiAccessRule> {
+    vec![ApiAccessRule {
+        method: ApiAccessMethod::Exact(http::Method::GET),
+        path: path.to_owned(),
+    }]
+}
+
+fn apply_test_api(config_path: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.to_path_buf()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: name.to_owned(),
+        delete: false,
+        base_url: Some(format!("https://{name}.internal.example/api")),
+        headers: Some(vec![]),
+        auth: ConfigApiAuthSelection::Preserve,
+        timeout_ms: Some(5_000),
+    })?;
+
+    Ok(())
+}
+
+fn assert_api_access_rule(config: &Value, path: &[&str], method: &str, rule_path: &str) {
+    let rule = config
+        .get(path[0])
+        .and_then(|value| value.get(path[1]))
+        .and_then(|value| value.get(path[2]))
+        .and_then(|value| value.get(path[3]))
+        .and_then(Value::as_array)
+        .and_then(|rules| rules.first())
+        .unwrap_or_else(|| panic!("expected api_access rule at {}", path.join(".")));
+
+    assert_eq!(rule.get("method").and_then(Value::as_str), Some(method));
+    assert_eq!(rule.get("path").and_then(Value::as_str), Some(rule_path));
+}
+
 #[test]
 fn config_init_generates_default_bearer_token_and_persists_only_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -480,7 +517,7 @@ fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner-readonly".to_owned(),
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
     apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
@@ -548,7 +585,7 @@ fn config_add_client_generates_bearer_token_when_missing_and_prints_it_once()
             "--name",
             "partner",
             "--api-access",
-            "projects=read",
+            "projects:get:*",
         ])
         .output()?;
 
@@ -562,9 +599,11 @@ fn config_add_client_generates_bearer_token_when_missing_and_prints_it_once()
     let config = load_toml(&config_path)?;
     assert_client_metadata_matches(&config, "partner", &tokens[0].1);
     assert_no_plain_bearer_token_persisted(&config, &tokens[0].1);
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
 
     Ok(())
@@ -593,7 +632,7 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
             "--bearer-token-expires-at",
             "2031-02-03",
             "--api-access",
-            "projects=write",
+            "projects:*:*",
         ])
         .output()?;
 
@@ -611,9 +650,11 @@ fn config_add_client_generates_bearer_token_with_explicit_expiry()
         string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
         "2031-02-03T00:00:00Z"
     );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "*",
+        "*",
     );
 
     Ok(())
@@ -634,7 +675,7 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
     let before = load_toml(&config_path)?;
     let old_id = string_at(&before, &["clients", "partner", "bearer_token_id"]).to_owned();
@@ -667,9 +708,54 @@ fn config_rotate_client_secret_rotates_plaintext_client_and_preserves_existing_e
         string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
         "2031-02-03T00:00:00Z"
     );
+    assert_api_access_rule(
+        &after,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_rotate_client_secret_preserves_explicit_empty_inline_api_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.partner]\n",
+            "bearer_token_id = \"partner\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = {}\n\n",
+        ),
+    )?;
+
+    let outcome = rotate_client_secret(ConfigRotateSecretArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "partner".to_owned(),
+        bearer_token_expires_at: None,
+    })?;
+
+    let after = load_toml(&config_path)?;
+    assert_client_metadata_matches(&after, "partner", &outcome.generated_bearer_token);
     assert_eq!(
-        string_at(&after, &["clients", "partner", "api_access", "projects"]),
-        "read"
+        string_at(&after, &["clients", "partner", "bearer_token_expires_at"]),
+        "2030-01-02T03:04:05Z"
+    );
+    assert!(
+        after
+            .get("clients")
+            .and_then(|value| value.get("partner"))
+            .and_then(|value| value.get("api_access"))
+            .and_then(Value::as_table)
+            .is_some_and(toml::map::Map::is_empty)
     );
 
     Ok(())
@@ -688,7 +774,7 @@ fn config_rotate_client_secret_updates_expiry_when_override_is_supplied()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner-readonly".to_owned(),
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
     apply_client(ConfigClientArgs {
         config: Some(config_path.clone()),
@@ -746,7 +832,7 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
             bearer_token: Some(existing_token.to_owned()),
             bearer_token_expires_at: Some("2030-01-02".to_owned()),
             access: ClientAccessUpsert::ApiAccess(
-                [("projects".to_owned(), AccessLevel::Read)]
+                [("projects".to_owned(), get_rule("*"))]
                     .into_iter()
                     .collect(),
             ),
@@ -762,7 +848,7 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=write".to_owned()],
+        api_access: vec!["projects:*:*".to_owned()],
     })?;
 
     let config = load_toml(&config_path)?;
@@ -771,9 +857,11 @@ fn config_add_client_updates_expiry_without_rotating_existing_bearer_token()
         string_at(&config, &["clients", "partner", "bearer_token_expires_at"]),
         "2031-02-03T00:00:00Z"
     );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "*",
+        "*",
     );
 
     Ok(())
@@ -799,7 +887,7 @@ fn encrypted_config_rotate_client_secret_preserves_password_workflow()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
 
     let outcome = rotate_client_secret(ConfigRotateSecretArgs {
@@ -823,9 +911,11 @@ fn encrypted_config_rotate_client_secret_preserves_password_workflow()
     assert_eq!(outcome.bearer_token_expires_at, "2031-02-03T00:00:00Z");
     assert_client_metadata_matches(&config, "partner", &outcome.generated_bearer_token);
     assert_no_plain_bearer_token_persisted(&config, &outcome.generated_bearer_token);
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
 
     Ok(())
@@ -876,7 +966,7 @@ fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_ba
             "--name",
             "partner",
             "--api-access",
-            "projects=read",
+            "projects:get:*",
         ])
         .output()?;
     assert!(add_client_output.status.success(), "{add_client_output:?}");
@@ -902,12 +992,11 @@ fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_ba
     assert!(show_output.status.success(), "{show_output:?}");
 
     let shown_config = String::from_utf8(show_output.stdout)?.parse::<Value>()?;
-    assert_eq!(
-        string_at(
-            &shown_config,
-            &["clients", "partner", "api_access", "projects"]
-        ),
-        "read"
+    assert_api_access_rule(
+        &shown_config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
     assert_eq!(
         keyring_password_for(&keyring_path, &config_path)?,
@@ -953,12 +1042,11 @@ fn encrypted_config_rotate_client_secret_cli_uses_keyring_password_after_show_ba
     let rotated_token = &tokens[0].1;
     assert_client_metadata_matches(&updated_config, "partner", rotated_token);
     assert_no_plain_bearer_token_persisted(&updated_config, rotated_token);
-    assert_eq!(
-        string_at(
-            &updated_config,
-            &["clients", "partner", "api_access", "projects"]
-        ),
-        "read"
+    assert_api_access_rule(
+        &updated_config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
     assert_ne!(
         string_at(&updated_config, &["clients", "partner", "bearer_token_id"]),
@@ -1014,9 +1102,11 @@ fn config_show_reads_binary_age_config_with_password() -> Result<(), Box<dyn std
         string_at(&config, &["clients", "default", "bearer_token_id"]),
         "0011223344556677"
     );
-    assert_eq!(
-        string_at(&config, &["clients", "default", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "default", "api_access", "projects"],
+        "get",
+        "*",
     );
     assert_eq!(String::from_utf8(output.stderr)?, "");
 
@@ -1097,12 +1187,11 @@ fn encrypted_config_rotate_client_secret_supports_binary_age_config()
     let rotated_token = &tokens[0].1;
     assert_client_metadata_matches(&updated_config, "default", rotated_token);
     assert_no_plain_bearer_token_persisted(&updated_config, rotated_token);
-    assert_eq!(
-        string_at(
-            &updated_config,
-            &["clients", "default", "api_access", "projects"]
-        ),
-        "read"
+    assert_api_access_rule(
+        &updated_config,
+        &["clients", "default", "api_access", "projects"],
+        "get",
+        "*",
     );
     assert_ne!(
         string_at(&updated_config, &["clients", "default", "bearer_token_id"]),
@@ -1198,24 +1287,31 @@ fn config_add_client_merges_repeated_and_comma_separated_api_access_flags()
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
         api_access: vec![
-            "projects=read,billing=write".to_owned(),
-            "reports=read".to_owned(),
+            "projects:get:*,post:/projects".to_owned(),
+            "billing:*:*".to_owned(),
+            "reports:get:*".to_owned(),
         ],
     })?;
 
     let config = load_toml(&config_path)?;
 
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "billing"]),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "billing"],
+        "*",
+        "*",
     );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "reports"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "reports"],
+        "get",
+        "*",
     );
 
     Ok(())
@@ -1249,14 +1345,58 @@ fn config_add_client_rejects_conflicting_duplicate_api_access_entries()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned(), "projects=write".to_owned()],
+        api_access: vec!["projects:get:*".to_owned(), "projects:get:*".to_owned()],
     })
     .expect_err("conflicting api access should fail");
 
     assert_eq!(
         error.to_string(),
-        "conflicting api_access entries for api 'projects'"
+        "duplicate api_access rule for api 'projects'"
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_accepts_empty_per_api_access_flag() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_client(ConfigClientArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects:".to_owned()],
+    })?;
+
+    let config = load_toml(&config_path)?;
+    let projects = config
+        .get("clients")
+        .and_then(|value| value.get("partner"))
+        .and_then(|value| value.get("api_access"))
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_array)
+        .expect("projects access array");
+
+    assert!(projects.is_empty());
 
     Ok(())
 }
@@ -1289,13 +1429,59 @@ fn config_add_client_rejects_invalid_api_access_level_with_clear_message()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=admin".to_owned()],
+        api_access: vec!["projects:BAD METHOD:*".to_owned()],
     })
-    .expect_err("invalid api access level should fail");
+    .expect_err("invalid api access method should fail");
 
     assert_eq!(
         error.to_string(),
-        "api_access level 'admin' must be one of: read, write"
+        "api_access method is invalid: invalid HTTP method"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_malformed_existing_api_access_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    write_text(
+        &config_path,
+        concat!(
+            "[clients.partner]\n",
+            "bearer_token_id = \"partner\"\n",
+            "bearer_token_hash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "bearer_token_expires_at = \"2030-01-02T03:04:05Z\"\n",
+            "api_access = \"broken\"\n\n",
+            "[apis.projects]\n",
+            "base_url = \"https://projects.internal.example\"\n"
+        ),
+    )?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec![],
+    })
+    .expect_err("malformed existing api_access should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "clients.partner.api_access must be a table, inline table, or array of inline tables"
     );
 
     Ok(())
@@ -1329,13 +1515,13 @@ fn config_add_client_rejects_leading_empty_segment_in_api_access_arg()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec![",projects=read".to_owned()],
+        api_access: vec![",projects:get:*".to_owned()],
     })
     .expect_err("leading empty segment should be rejected");
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access api slug ',projects' must contain only lowercase letters, digits, or hyphen"
     );
 
     Ok(())
@@ -1369,13 +1555,13 @@ fn config_add_client_rejects_trailing_comma_in_api_access_arg()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=read,".to_owned()],
+        api_access: vec!["projects:get:*,".to_owned()],
     })
     .expect_err("trailing comma should be rejected");
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access rule lists cannot contain empty comma-separated segments"
     );
 
     Ok(())
@@ -1409,13 +1595,13 @@ fn config_add_client_rejects_doubled_comma_in_api_access_arg()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=read,,billing=write".to_owned()],
+        api_access: vec!["projects:get:*,,billing:*:*".to_owned()],
     })
     .expect_err("doubled comma should be rejected");
 
     assert_eq!(
         error.to_string(),
-        "api_access entries cannot contain empty comma-separated segments"
+        "api_access rule lists cannot contain empty comma-separated segments"
     );
 
     Ok(())
@@ -1449,13 +1635,211 @@ fn config_add_client_rejects_malformed_segment_in_comma_separated_api_access_arg
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-01-02".to_owned()),
         group: None,
-        api_access: vec!["projects=read,billing".to_owned()],
+        api_access: vec!["projects:get:*,billing".to_owned()],
     })
     .expect_err("malformed comma-separated segment should be rejected");
 
     assert_eq!(
         error.to_string(),
-        "invalid api_access entry 'billing'; expected api=level"
+        "invalid api_access rule 'billing'; expected method:path"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_invalid_api_access_slug() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["Projects:get:*".to_owned()],
+    })
+    .expect_err("invalid api access slug should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access api slug 'Projects' must contain only lowercase letters, digits, or hyphen"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_invalid_api_access_path() -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects:get:api/v1".to_owned()],
+    })
+    .expect_err("invalid api access path should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access path must be '*' or start with '/'"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_api_access_path_with_query_string()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects:get:/v1/tasks?limit=1".to_owned()],
+    })
+    .expect_err("api access path query string should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access path must not contain query strings"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_api_access_path_with_fragment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects:get:/v1/tasks#section".to_owned()],
+    })
+    .expect_err("api access path fragment should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "api_access path must not contain fragments"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_add_client_rejects_old_api_access_level_format() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    let error = apply_client(ConfigClientArgs {
+        config: Some(config_path),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner".to_owned(),
+        bearer_token_expires_at: Some("2030-01-02".to_owned()),
+        group: None,
+        api_access: vec!["projects=read".to_owned()],
+    })
+    .expect_err("old api access level format should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid api_access entry 'projects=read'; expected api:method:path[,method:path...]"
     );
 
     Ok(())
@@ -1543,7 +1927,7 @@ fn config_add_client_uses_prompted_name_and_existing_group()
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
                 name: Some("partner-readonly".to_owned()),
-                api_access: vec!["projects=read".to_owned()],
+                api_access: vec!["projects:get:*".to_owned()],
             }),
         },
     ))?;
@@ -1598,13 +1982,25 @@ fn config_add_client_creates_prompted_new_group_with_api_access()
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
     set_test_prompt_inputs(&[
         "partner",
         "group",
         "add new group",
         "partner-readonly",
-        "projects=read,reports=write",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
     ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
@@ -1631,19 +2027,17 @@ fn config_add_client_creates_prompted_new_group_with_api_access()
         Some("partner-readonly")
     );
     assert!(client.get("api_access").is_none());
-    assert_eq!(
-        string_at(
-            &config,
-            &["groups", "partner-readonly", "api_access", "projects"]
-        ),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["groups", "partner-readonly", "api_access", "projects"],
+        "get",
+        "*",
     );
-    assert_eq!(
-        string_at(
-            &config,
-            &["groups", "partner-readonly", "api_access", "reports"]
-        ),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["groups", "partner-readonly", "api_access", "reports"],
+        "*",
+        "*",
     );
     assert_client_has_bearer_metadata(&config, "partner");
 
@@ -1669,8 +2063,24 @@ fn config_add_client_falls_back_to_prompted_inline_api_access_when_group_is_blan
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
-    set_test_prompt_inputs(&["partner", "", "projects=read,reports=write"])?;
+    set_test_prompt_inputs(&[
+        "partner",
+        "",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
+    ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1692,13 +2102,17 @@ fn config_add_client_falls_back_to_prompted_inline_api_access_when_group_is_blan
     let client = table_at(&config, &["clients", "partner"]);
 
     assert!(client.get("group").is_none());
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "reports"]),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "reports"],
+        "*",
+        "*",
     );
     assert_client_has_bearer_metadata(&config, "partner");
 
@@ -1724,8 +2138,23 @@ fn config_add_group_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn 
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
+    apply_test_api(&config_path, "projects")?;
+    apply_test_api(&config_path, "reports")?;
 
-    set_test_prompt_inputs(&["readonly", "projects=read,reports=write"])?;
+    set_test_prompt_inputs(&[
+        "readonly",
+        "projects",
+        "Add new rule",
+        "get",
+        "*",
+        "Go back",
+        "reports",
+        "Add new rule",
+        "*",
+        "*",
+        "Go back",
+        "Done",
+    ])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -1742,20 +2171,24 @@ fn config_add_group_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn 
 
     let config = load_toml(&config_path)?;
 
-    assert_eq!(
-        string_at(&config, &["groups", "readonly", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["groups", "readonly", "api_access", "projects"],
+        "get",
+        "*",
     );
-    assert_eq!(
-        string_at(&config, &["groups", "readonly", "api_access", "reports"]),
-        "write"
+    assert_api_access_rule(
+        &config,
+        &["groups", "readonly", "api_access", "reports"],
+        "*",
+        "*",
     );
 
     Ok(())
 }
 
 #[test]
-fn config_add_group_rejects_empty_api_access_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn config_add_group_accepts_empty_api_access_entries() -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1773,19 +2206,22 @@ fn config_add_group_rejects_empty_api_access_entries() -> Result<(), Box<dyn std
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
 
-    let error = apply_group(ConfigGroupArgs {
-        config: Some(config_path),
+    apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
         password: None,
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "readonly".to_owned(),
         api_access: vec![],
-    })
-    .expect_err("empty group api_access should fail");
+    })?;
 
-    assert_eq!(
-        error.to_string(),
-        "api_access entries are required for groups"
+    let config = load_toml(&config_path)?;
+    let group = table_at(&config, &["groups", "readonly"]);
+    assert!(
+        group
+            .get("api_access")
+            .and_then(Value::as_table)
+            .is_some_and(toml::map::Map::is_empty)
     );
 
     Ok(())
@@ -3448,7 +3884,7 @@ fn config_add_client_implicit_config_creation_prints_default_and_client_tokens_o
             "--name",
             "partner",
             "--api-access",
-            "projects=read",
+            "projects:get:*",
         ])
         .output()?;
 
@@ -3509,13 +3945,13 @@ fn config_add_group_invalid_mutation_does_not_create_missing_config()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         name: "readonly".to_owned(),
         delete: false,
-        api_access: vec![],
+        api_access: vec!["projects:get:api/v1".to_owned()],
     })
     .expect_err("invalid group mutation should fail");
 
     assert_eq!(
         error.to_string(),
-        "api_access entries are required for groups"
+        "api_access path must be '*' or start with '/'"
     );
     assert!(!config_path.exists());
 
@@ -3565,7 +4001,7 @@ fn config_add_client_rejects_invalid_bearer_token_timestamp_message()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2030-02-31".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })
     .expect_err("invalid timestamp should fail");
 
@@ -3674,7 +4110,7 @@ fn encrypted_config_add_client_preserves_password_workflow()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
 
     let shown = show(ConfigShowArgs {
@@ -3685,9 +4121,11 @@ fn encrypted_config_add_client_preserves_password_workflow()
     let config = shown.parse::<Value>()?;
 
     assert_client_has_bearer_metadata(&config, "partner");
-    assert_eq!(
-        string_at(&config, &["clients", "partner", "api_access", "projects"]),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["clients", "partner", "api_access", "projects"],
+        "get",
+        "*",
     );
 
     Ok(())
@@ -3720,7 +4158,7 @@ fn encrypted_config_add_client_removes_stale_keyring_password_after_failed_decry
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })
     .expect_err("stale keyring password should fail decrypt");
 
@@ -3764,7 +4202,7 @@ fn encrypted_config_add_client_backfills_keyring_after_flag_password_decrypt()
         name: "partner".to_owned(),
         bearer_token_expires_at: Some("2031-02-03".to_owned()),
         group: None,
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
 
     assert_eq!(
@@ -3966,7 +4404,7 @@ fn encrypted_config_add_group_backfills_keyring_after_flag_password_decrypt()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner-readonly".to_owned(),
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
 
     assert_eq!(
@@ -3980,12 +4418,11 @@ fn encrypted_config_add_group_backfills_keyring_after_flag_password_decrypt()
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
     })?;
     let config = shown.parse::<Value>()?;
-    assert_eq!(
-        string_at(
-            &config,
-            &["groups", "partner-readonly", "api_access", "projects"]
-        ),
-        "read"
+    assert_api_access_rule(
+        &config,
+        &["groups", "partner-readonly", "api_access", "projects"],
+        "get",
+        "*",
     );
 
     Ok(())
@@ -4021,7 +4458,7 @@ fn encrypted_config_add_client_group_prompt_backfills_keyring_after_flag_passwor
         log_level: DEFAULT_LOG_LEVEL.to_owned(),
         delete: false,
         name: "partner-readonly".to_owned(),
-        api_access: vec!["projects=read".to_owned()],
+        api_access: vec!["projects:get:*".to_owned()],
     })?;
     std::fs::remove_file(&keyring_path)?;
 
@@ -4362,7 +4799,7 @@ fn config_add_client_bootstraps_encrypted_config_when_password_is_supplied()
             "--bearer-token-expires-at",
             "2031-02-03",
             "--api-access",
-            "projects=read",
+            "projects:get:*",
         ])
         .output()?;
 
