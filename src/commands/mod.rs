@@ -54,6 +54,38 @@ impl From<AppError> for CommandError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResourceSelectionIntent {
+    Manage { existing_only: bool },
+    Reference { existing_only: bool },
+}
+
+impl ResourceSelectionIntent {
+    fn existing_only(self) -> bool {
+        match self {
+            Self::Manage { existing_only } | Self::Reference { existing_only } => existing_only,
+        }
+    }
+
+    fn label_for_existing(self, name: &str) -> String {
+        match self {
+            Self::Manage { .. } => format!("{name} (edit)"),
+            Self::Reference { .. } => name.to_owned(),
+        }
+    }
+
+    fn default_label(self, value: &str) -> String {
+        self.label_for_existing(value)
+    }
+
+    fn selected_name(self, selected: &str) -> &str {
+        match self {
+            Self::Manage { .. } => selected.strip_suffix(" (edit)").unwrap_or(selected),
+            Self::Reference { .. } => selected,
+        }
+    }
+}
+
 pub fn run(command: Command) -> Result<(), CommandError> {
     if matches!(command, Command::Version) {
         return version::run();
@@ -328,7 +360,9 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         args.name,
         config::ResourceKind::Api,
         &names,
-        args.delete,
+        ResourceSelectionIntent::Manage {
+            existing_only: args.delete,
+        },
         None,
         "API name",
         "config api requires --name in non-interactive sessions",
@@ -572,7 +606,9 @@ fn resolve_config_group_args(
         args.name,
         config::ResourceKind::Group,
         &names,
-        args.delete,
+        ResourceSelectionIntent::Manage {
+            existing_only: args.delete,
+        },
         None,
         "Group name",
         "config group requires --name in non-interactive sessions",
@@ -628,7 +664,9 @@ fn resolve_config_client_args(
         args.name,
         config::ResourceKind::Client,
         &names,
-        args.delete,
+        ResourceSelectionIntent::Manage {
+            existing_only: args.delete,
+        },
         None,
         "Client name",
         "config client requires --name in non-interactive sessions",
@@ -721,7 +759,9 @@ fn resolve_config_client_args(
                     None,
                     config::ResourceKind::Group,
                     &groups,
-                    false,
+                    ResourceSelectionIntent::Reference {
+                        existing_only: false,
+                    },
                     existing.as_ref().and_then(|state| state.group.as_deref()),
                     "Group name",
                     "config client requires --group or --api-access in non-interactive sessions",
@@ -795,7 +835,9 @@ fn resolve_rotate_secret_args(
         Some(args.name),
         config::ResourceKind::Client,
         &names,
-        true,
+        ResourceSelectionIntent::Manage {
+            existing_only: true,
+        },
         None,
         "Client name",
         "config client rotate-secret requires --name in non-interactive sessions",
@@ -840,7 +882,7 @@ fn resolve_resource_name(
     value: Option<String>,
     resource_kind: config::ResourceKind,
     names: &[String],
-    existing_only: bool,
+    intent: ResourceSelectionIntent,
     default: Option<&str>,
     label: &str,
     non_interactive_message: &str,
@@ -857,16 +899,16 @@ fn resolve_resource_name(
     names.sort();
     let mut items = names
         .iter()
-        .map(|name| format!("{name} (edit)"))
+        .map(|name| intent.label_for_existing(name))
         .collect::<Vec<_>>();
 
-    if !existing_only {
+    if !intent.existing_only() {
         items.push(resource_kind.add_new_label().to_owned());
     }
 
     let default_label = default
         .filter(|value| !value.trim().is_empty())
-        .map(|value| format!("{value} (edit)"));
+        .map(|value| intent.default_label(value));
 
     let selected = config::prompt_select_with_prompt(
         resource_kind.selector_label(),
@@ -887,10 +929,7 @@ fn resolve_resource_name(
         .map_err(|error| CommandError::new(error.to_string()));
     }
 
-    Ok(selected
-        .strip_suffix(" (edit)")
-        .unwrap_or(selected.as_str())
-        .to_owned())
+    Ok(intent.selected_name(&selected).to_owned())
 }
 
 fn prompt_required(

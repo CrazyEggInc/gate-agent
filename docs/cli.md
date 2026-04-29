@@ -290,7 +290,7 @@ Rules and behavior:
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - when required fields are omitted in an interactive create flow, the command prompts for them; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
 - in the interactive client flow, the CLI asks for `Access mode` before prompting for `Group name`
-- when groups already exist, the `Group name` prompt lists those slugs as `<name> (edit)` for up/down selection and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
+- when groups already exist, the `Group name` prompt references those slugs as plain `<name>` values for up/down selection and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - `Group name` is required when `Access mode` is `group`; a blank response fails instead of falling back to inline `api_access`
 - prompts stay single-line and avoid extra descriptive text when the question itself is already clear
 - when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future and expects `YYYY-MM-DD`

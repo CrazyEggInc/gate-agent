@@ -488,7 +488,7 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
 }
 
 #[test]
-fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
+fn config_client_tty_group_reference_selector_shows_plain_existing_groups()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
         .lock()
@@ -556,7 +556,65 @@ fn config_client_tty_prompts_show_access_mode_options_and_existing_groups()
         !stderr.contains("Group name:")
             && stderr.contains("local-default")
             && stderr.contains("partner-readonly")
-            && stderr.contains("(edit)")
+            && stderr.contains("add new group"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("local-default (edit)"), "{stderr}");
+    assert!(!stderr.contains("partner-readonly (edit)"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn config_group_tty_manage_selector_keeps_edit_labels_for_existing_groups()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join(".secrets");
+
+    unsafe {
+        std::env::remove_var(TEST_PROMPT_INPUTS_ENV_VAR);
+        std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR);
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+    }
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+    apply_group(ConfigGroupArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "partner-readonly".to_owned(),
+        api_access: vec!["projects:get:*".to_owned()],
+    })?;
+
+    let output = run_gate_agent_in_tty_with_input(
+        &workspace,
+        &[
+            "config",
+            "group",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+        ],
+        "\n\n",
+    )?;
+
+    assert!(output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr)?.replace("\r", "");
+    assert!(
+        stderr.contains("local-default (edit)")
+            && stderr.contains("partner-readonly (edit)")
             && stderr.contains("add new group"),
         "{stderr}"
     );

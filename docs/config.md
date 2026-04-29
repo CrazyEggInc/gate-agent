@@ -390,7 +390,7 @@ Behavior:
 - when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future
 - resource-name prompts are labeled `Existing Clients`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new client` entry
 - selecting the add-new entry prompts for the name afterward
-- the group access prompt lists existing group slugs as `<name> (edit)` and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
+- the group access prompt references existing group slugs as plain `<name>` values and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
 - when updating an encrypted config, password resolution follows flag → env → keyring → prompt
