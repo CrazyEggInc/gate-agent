@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "gate-agent"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "age",
  "assert_cmd",
