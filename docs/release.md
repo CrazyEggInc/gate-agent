@@ -22,7 +22,24 @@ Each published stable release must also include stable latest aliases:
 - `gate-agent-latest-macos-arm64.tar.gz`
 - `gate-agent-latest-sha256sums.txt`
 
-The stable latest aliases are uploaded to stable releases only. Prereleases are marked as GitHub prereleases, do not update GitHub's latest release pointer, and publish only versioned assets. Stable releases explicitly update GitHub's latest release pointer. Installers should use GitHub's `releases/latest/download` URLs when they want the newest stable release, and versioned `releases/download/vX.Y.Z` or `releases/download/vX.Y.Z-prerelease` URLs when they need a pinned version.
+The stable latest aliases are uploaded to stable releases only. Prereleases are marked as GitHub prereleases, do not update GitHub's latest release pointer, and publish only versioned assets. Stable releases explicitly update GitHub's latest release pointer. Release verification must run the installer from the release tag, for example `curl -fsSL https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/tags/vX.Y.Z/install.sh | VERSION=X.Y.Z sh`, so the installer logic and downloaded artifacts come from the same immutable release. The installer uses GitHub's `releases/latest/download` URLs only when `VERSION` is omitted, and versioned `releases/download/vX.Y.Z` or `releases/download/vX.Y.Z-prerelease` URLs when `VERSION` is set.
+
+## Installer contract
+
+The repository root includes `install.sh` for public hosting through GitHub raw content. Release verification and pinned installs should use the tag-scoped script URL: `https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/tags/vX.Y.Z/install.sh` or `https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/tags/vX.Y.Z-prerelease/install.sh`.
+
+The installer must:
+
+- run under POSIX `sh`
+- support Linux x64 and macOS ARM64, matching release assets
+- download the archive and checksum manifest for the selected release
+- verify the selected archive before installing
+- install to `~/.local/bin/gate-agent` by default
+- add the install directory to the user's shell `PATH` when needed
+- support `VERSION=X.Y.Z`, `VERSION=vX.Y.Z`, `VERSION=X.Y.Z-prerelease`, or `VERSION=vX.Y.Z-prerelease` for pinned installs
+- support `GATE_AGENT_INSTALL_DIR=/path/to/bin` for alternate install directories
+
+Stable release tags use `vX.Y.Z` and map to download paths under `releases/download/vX.Y.Z`. Prerelease tags use `vX.Y.Z-prerelease` and map to download paths under `releases/download/vX.Y.Z-prerelease`.
 
 ## Checksum contract
 
@@ -93,10 +110,8 @@ Publish failures may leave a release record or partial assets. Re-run the failed
 After a release publishes:
 
 ```sh
+TAG=vX.Y.Z
 gh release view vX.Y.Z --json tagName,targetCommitish,assets
-curl -fsSLO https://github.com/CrazyEggInc/gate-agent/releases/latest/download/gate-agent-latest-sha256sums.txt
-curl -fsSLO https://github.com/CrazyEggInc/gate-agent/releases/latest/download/gate-agent-latest-linux-x64.tar.gz
-grep ' gate-agent-latest-linux-x64.tar.gz$' gate-agent-latest-sha256sums.txt | sha256sum --check -
-tar -xzf gate-agent-latest-linux-x64.tar.gz
-./gate-agent version
+curl -fsSL "https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/tags/${TAG}/install.sh" | VERSION="$TAG" GATE_AGENT_INSTALL_DIR="$(pwd)/verify-bin" sh
+./verify-bin/gate-agent version
 ```
