@@ -7,7 +7,9 @@ use crate::{
 };
 
 use super::{
-    request::{ForwardRequest, forward_request_from_proxy_request, map_forward_request},
+    request::{
+        ForwardRequest, forward_request_from_proxy_request, has_dot_segment, map_forward_request,
+    },
     response::{ForwardedResponse, map_response},
     upstream::execute_request,
 };
@@ -48,6 +50,12 @@ fn authorize_forward_request(
     request: &ForwardRequest,
     authorized: &AuthorizedRequest,
 ) -> Result<(), AppError> {
+    if has_dot_segment(request.path_only()) {
+        return Err(AppError::BadProxyPath(
+            "request path must not contain dot segments".to_owned(),
+        ));
+    }
+
     if request.method == http::Method::TRACE {
         return Err(AppError::BadRequest(
             "TRACE requests are not supported".to_owned(),

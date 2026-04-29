@@ -128,13 +128,17 @@ fn build_upstream_url(base_url: &Url, raw_suffix: &str) -> Result<Url, AppError>
 }
 
 fn reject_dot_segments(raw_path: &str) -> Result<(), AppError> {
-    if raw_path.split('/').any(is_dot_segment) {
+    if has_dot_segment(raw_path) {
         return Err(AppError::BadProxyPath(
             "request path must not contain dot segments".to_owned(),
         ));
     }
 
     Ok(())
+}
+
+pub(crate) fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(is_dot_segment)
 }
 
 fn is_dot_segment(segment: &str) -> bool {
