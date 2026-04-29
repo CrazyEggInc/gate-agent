@@ -107,7 +107,7 @@ Authorization fails closed. A configured API slug alone does not allow any reque
 - path `*` matches any upstream suffix path
 - exact paths and glob-style path patterns are matched against the path only; query strings are not considered
 - missing API access or missing route-rule match fails with `403 forbidden_api`
-- the router generates an internal `x-request-id` for each request and propagates that generated value
+- the router generates an internal `x-gate-agent-request-id` for each request and propagates that generated value
 
 - route family:
   - `/mcp`

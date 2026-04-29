@@ -103,13 +103,14 @@ async fn mcp_route_rejects_malformed_bearer_token_before_json_rpc_dispatch()
         .await?;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("x-request-id").is_none());
     assert_eq!(
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -163,13 +164,14 @@ async fn mcp_route_rejects_duplicate_authorization_headers()
     let response = app.oneshot(request).await?;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("x-request-id").is_none());
     assert_eq!(
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -212,9 +214,10 @@ async fn mcp_route_accepts_valid_bearer_token_for_initialize()
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("www-authenticate").is_none());
+    assert!(response.headers().get("x-request-id").is_none());
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?;
     assert_ne!(request_id, "req-mcp-init");
@@ -265,7 +268,7 @@ async fn mcp_route_rejects_oversized_request_body_before_json_rpc_dispatch()
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();

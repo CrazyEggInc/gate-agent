@@ -7,6 +7,8 @@ use tracing_subscriber::{EnvFilter, fmt::MakeWriter, prelude::*};
 
 use crate::error::AppError;
 
+pub(crate) const GATE_AGENT_REQUEST_ID_HEADER: &str = "x-gate-agent-request-id";
+
 static TRACING_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Clone, Debug)]

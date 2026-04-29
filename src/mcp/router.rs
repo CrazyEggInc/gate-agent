@@ -13,8 +13,8 @@ use crate::{
     },
     error::AppError,
     telemetry::{
-        LoggedClient, LoggedRequestContext, generate_internal_request_id,
-        sanitize_request_uri_for_logs,
+        GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext,
+        generate_internal_request_id, sanitize_request_uri_for_logs,
     },
 };
 
@@ -51,7 +51,7 @@ pub async fn mcp_handler(State(state): State<AppState>, request: Request<Body>) 
     };
 
     response.headers_mut().insert(
-        "x-request-id",
+        GATE_AGENT_REQUEST_ID_HEADER,
         http::HeaderValue::from_str(&request_id)
             .expect("request id should always be a valid header value"),
     );

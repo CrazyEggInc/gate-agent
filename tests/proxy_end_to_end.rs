@@ -134,6 +134,7 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
             Request::builder()
                 .method("POST")
                 .uri("/proxy/billing/v1/projects/1/tasks?expand=1")
+                .header("x-request-id", "client-request-id")
                 .header("authorization", format!("Bearer {token}"))
                 .header("x-custom", "preserved")
                 .header("content-type", "application/json")
@@ -145,10 +146,11 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
     assert_eq!(response.headers().get("x-upstream").unwrap(), "present");
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("response request id")
         .to_str()?
         .to_owned();
+    assert!(response.headers().get("x-request-id").is_none());
     let body = response.into_body().collect().await?.to_bytes();
     assert_eq!(body, bytes::Bytes::from_static(b"upstream ok"));
 
@@ -165,8 +167,12 @@ async fn proxy_route_forwards_only_suffix_after_api_segment_and_injects_request_
         "application/json"
     );
     assert_eq!(
-        captured.headers.get("x-request-id").unwrap(),
+        captured.headers.get("x-gate-agent-request-id").unwrap(),
         request_id.as_str()
+    );
+    assert_eq!(
+        captured.headers.get("x-request-id").unwrap(),
+        "client-request-id"
     );
     assert_eq!(
         captured.body,
@@ -513,9 +519,10 @@ async fn proxy_route_rejects_missing_authorization_header() -> Result<(), Box<dy
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
+    assert!(response.headers().get("x-request-id").is_none());
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -609,9 +616,10 @@ async fn proxy_route_returns_consistent_invalid_token_error_with_request_id_for_
         response.headers().get("www-authenticate").unwrap(),
         "Bearer"
     );
+    assert!(response.headers().get("x-request-id").is_none());
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -664,7 +672,7 @@ async fn proxy_route_rejects_duplicate_authorization_headers()
     );
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -705,10 +713,11 @@ async fn proxy_route_maps_upstream_timeout_to_gateway_timeout()
         .await?;
 
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(response.headers().get("x-request-id").is_none());
 
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("generated request id")
         .to_str()?
         .to_owned();
@@ -1136,7 +1145,7 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
     assert!(response.headers().get("x-api-key").is_none());
     let request_id = response
         .headers()
-        .get("x-request-id")
+        .get("x-gate-agent-request-id")
         .expect("response request id")
         .to_str()?
         .to_owned();
@@ -1152,7 +1161,7 @@ async fn proxy_route_streams_upstream_response_body_and_preserves_headers()
 
     assert!(captured_request.starts_with("get /api/stream?expand=1 http/1.1\r\n"));
     assert!(captured_request.contains("authorization: bearer billing-secret-token\r\n"));
-    assert!(captured_request.contains(&format!("x-request-id: {request_id}\r\n")));
+    assert!(captured_request.contains(&format!("x-gate-agent-request-id: {request_id}\r\n")));
 
     Ok(())
 }

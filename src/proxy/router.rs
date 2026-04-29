@@ -16,7 +16,7 @@ use crate::auth::bearer::{extract_authorization_header, validate_bearer_authoriz
 use crate::error::{AppError, LoggedErrorCode};
 use crate::mcp::router::mcp_handler;
 use crate::telemetry::{
-    LoggedClient, LoggedRequestContext, generate_internal_request_id,
+    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext, generate_internal_request_id,
     sanitize_request_uri_for_logs, sanitize_url_for_logs,
 };
 
@@ -200,7 +200,7 @@ async fn proxy_handler_with_path(
 async fn proxy_response(state: AppState, api_slug: String, mut request: Request<Body>) -> Response {
     let request_id = generate_internal_request_id();
     request.headers_mut().insert(
-        "x-request-id",
+        GATE_AGENT_REQUEST_ID_HEADER,
         http::HeaderValue::from_str(&request_id)
             .expect("request id should always be a valid header value"),
     );
@@ -222,7 +222,7 @@ async fn proxy_response(state: AppState, api_slug: String, mut request: Request<
     };
 
     response.headers_mut().insert(
-        "x-request-id",
+        GATE_AGENT_REQUEST_ID_HEADER,
         http::HeaderValue::from_str(&request_id)
             .expect("request id should always be a valid header value"),
     );

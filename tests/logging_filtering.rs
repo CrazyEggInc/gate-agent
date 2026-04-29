@@ -345,7 +345,7 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         assert_eq!(response.status(), StatusCode::CREATED);
         let response_request_id = response
             .headers()
-            .get("x-request-id")
+            .get("x-gate-agent-request-id")
             .expect("generated request id")
             .to_str()?;
         assert_ne!(response_request_id, "caller-secret-request-id");

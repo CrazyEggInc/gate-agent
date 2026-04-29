@@ -23,7 +23,7 @@ These routes continue to define the direct HTTP proxy behavior. They are not rep
 The router also applies:
 
 - request timeout layer with 60 second outer timeout
-- internal request ID generation and response propagation through `x-request-id`
+- internal request ID generation and response propagation through `x-gate-agent-request-id`
 - request completion logging with `client_id` on every request
 
 The per-request outer timeout is separate from the per-upstream timeout configured on each API entry.
