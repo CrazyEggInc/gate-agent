@@ -130,6 +130,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset_name: linux-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_name: linux-x64-musl
           - os: macos-14
             target: aarch64-apple-darwin
             asset_name: macos-arm64
@@ -139,6 +142,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Install Linux musl build dependencies
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -225,12 +234,14 @@ jobs:
 
           release_assets=(
             "dist/gate-agent-${RELEASE_TAG}-linux-x64.tar.gz"
+            "dist/gate-agent-${RELEASE_TAG}-linux-x64-musl.tar.gz"
             "dist/gate-agent-${RELEASE_TAG}-macos-arm64.tar.gz"
             "dist/gate-agent-${RELEASE_TAG}-sha256sums.txt"
           )
           if [[ "${RELEASE_TAG}" != *-* ]]; then
             release_assets+=(
               "dist/gate-agent-latest-linux-x64.tar.gz"
+              "dist/gate-agent-latest-linux-x64-musl.tar.gz"
               "dist/gate-agent-latest-macos-arm64.tar.gz"
               "dist/gate-agent-latest-sha256sums.txt"
             )
