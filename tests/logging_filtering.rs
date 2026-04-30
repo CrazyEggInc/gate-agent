@@ -472,6 +472,133 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route(
+        "/api/{*path}",
+        any(|| async {
+            let mut response = Response::new(Body::from(r#"{"ok":true}"#));
+            *response.status_mut() = StatusCode::OK;
+            response
+        }),
+    );
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("x-request-id", "caller-mcp-secret-request-id")
+                    .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "jsonrpc":"2.0",
+                            "id":1,
+                            "method":"tools/call",
+                            "params":{
+                                "name":"call_api",
+                                "arguments":{
+                                    "api":"billing",
+                                    "method":"GET",
+                                    "path":"/v1/projects/1/tasks",
+                                    "query":{"expand":"1","jwt":"query-secret"}
+                                }
+                            }
+                        }"#,
+                    ))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_request_id = response
+            .headers()
+            .get("x-gate-agent-request-id")
+            .expect("generated request id")
+            .to_str()?;
+        assert_ne!(response_request_id, "caller-mcp-secret-request-id");
+
+        Ok(())
+    })
+    .await?;
+
+    let completion = find_event_with_keys(
+        &logs.entries,
+        &[
+            "client",
+            "request_id",
+            "method",
+            "uri",
+            "status",
+            "latency_ms",
+            "api",
+            "upstream_method",
+            "upstream_url",
+            "upstream_status",
+            "timeout_ms",
+        ],
+    );
+
+    assert_eq!(
+        find_string(completion, &["client"]).as_deref(),
+        Some("default")
+    );
+    let logged_request_id = find_string(completion, &["request_id"])
+        .expect("completion log should include generated request id");
+    assert_ne!(logged_request_id, "caller-mcp-secret-request-id");
+    assert_eq!(
+        find_string(completion, &["method"]).as_deref(),
+        Some("POST")
+    );
+    assert_eq!(find_string(completion, &["uri"]).as_deref(), Some("/mcp"));
+    assert_eq!(
+        find_status_code(completion, &["status", "status_code"]),
+        Some(200)
+    );
+    assert!(
+        find_u64(completion, &["latency_ms"]).is_some(),
+        "logs were: {}",
+        logs.raw
+    );
+    assert_eq!(
+        find_string(completion, &["api"]).as_deref(),
+        Some("billing")
+    );
+    assert_eq!(
+        find_string(completion, &["upstream_method"]).as_deref(),
+        Some("GET")
+    );
+    let expected_upstream_url = format!("{base_url}/api/v1/projects/1/tasks");
+    assert_eq!(
+        find_string(completion, &["upstream_url"]).as_deref(),
+        Some(expected_upstream_url.as_str())
+    );
+    assert_eq!(
+        find_status_code(completion, &["upstream_status", "upstream_status_code"]),
+        Some(200)
+    );
+    assert_eq!(find_u64(completion, &["timeout_ms"]), Some(5_000));
+    assert!(!logs.raw.contains("expand=1"), "logs were: {}", logs.raw);
+    assert!(
+        !logs.raw.contains("jwt=query-secret"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
+    assert!(
+        !logs.raw.contains("caller-mcp-secret-request-id"),
+        "logs were: {}",
+        logs.raw
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn completion_logs_add_error_code_only_for_application_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));

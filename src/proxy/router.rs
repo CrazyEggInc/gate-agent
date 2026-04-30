@@ -16,22 +16,13 @@ use crate::auth::bearer::{extract_authorization_header, validate_bearer_authoriz
 use crate::error::{AppError, LoggedErrorCode};
 use crate::mcp::router::mcp_handler;
 use crate::telemetry::{
-    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext, generate_internal_request_id,
-    sanitize_request_uri_for_logs, sanitize_url_for_logs,
+    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext, LoggedUpstreamRequest,
+    generate_internal_request_id, sanitize_request_uri_for_logs, sanitize_url_for_logs,
 };
 
 use super::forward::forward_proxy_request;
 
 const ROUTER_TIMEOUT_SECS: u64 = 60;
-
-#[derive(Clone, Debug)]
-struct LoggedUpstreamRequest {
-    api: String,
-    upstream_method: String,
-    upstream_url: String,
-    upstream_status: String,
-    timeout_ms: u64,
-}
 
 #[derive(Debug)]
 struct ProxyResponseError {

@@ -17,6 +17,7 @@ use crate::{
         forward::{forward_prepared_request, prepare_authorized_forward_request},
         request::ForwardRequest,
     },
+    telemetry::{LoggedUpstreamRequest, sanitize_url_for_logs},
 };
 
 use super::protocol::{ToolDefinition, ToolResult};
@@ -179,6 +180,7 @@ async fn call_api(
     let arguments: CallApiArguments = serde_json::from_value(arguments)
         .map_err(|error| AppError::BadRequest(format!("invalid call_api arguments: {error}")))?;
     let response_headers = arguments.response_headers;
+    let api = arguments.api.clone();
     let forward_request = build_forward_request(arguments)?;
     let prepared = prepare_authorized_forward_request(forward_request, authorized)?;
     let forward = forward_prepared_request(state, prepared).await?;
@@ -187,7 +189,16 @@ async fn call_api(
         AppError::Internal(format!("failed to serialize MCP call_api result: {error}"))
     })?;
 
-    Ok(ToolResult::success(content_json))
+    Ok(ToolResult::success_with_upstream(
+        content_json,
+        LoggedUpstreamRequest {
+            api,
+            upstream_method: forward.upstream_method,
+            upstream_url: sanitize_url_for_logs(&forward.upstream_url),
+            upstream_status: forward.upstream_status,
+            timeout_ms: forward.timeout_ms,
+        },
+    ))
 }
 
 fn call_api_tool_definition() -> ToolDefinition {

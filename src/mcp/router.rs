@@ -156,5 +156,11 @@ async fn handle_tools_call(
         }
     };
 
-    JsonRpcResponse::success(id, result).into_response()
+    let upstream_request = result.upstream_request.clone();
+    let mut response = JsonRpcResponse::success(id, result).into_response();
+    if let Some(upstream_request) = upstream_request {
+        response.extensions_mut().insert(upstream_request);
+    }
+
+    response
 }

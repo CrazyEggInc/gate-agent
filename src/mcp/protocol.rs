@@ -5,6 +5,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
 
+use crate::telemetry::LoggedUpstreamRequest;
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum JsonRpcId {
@@ -86,6 +88,8 @@ pub struct ToolResult {
     pub structured_content: Value,
     #[serde(rename = "isError")]
     pub is_error: bool,
+    #[serde(skip)]
+    pub(crate) upstream_request: Option<LoggedUpstreamRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,16 +130,30 @@ where
 }
 
 impl ToolResult {
-    pub fn success(content_json: Value) -> Self {
+    pub(crate) fn success(content_json: Value) -> Self {
         let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
         Self {
             content: vec![ToolTextContent::text(text)],
             structured_content: content_json,
             is_error: false,
+            upstream_request: None,
         }
     }
 
-    pub fn app_error(error: &crate::error::AppError) -> Self {
+    pub(crate) fn success_with_upstream(
+        content_json: Value,
+        upstream_request: LoggedUpstreamRequest,
+    ) -> Self {
+        let text = serde_json::to_string_pretty(&content_json).unwrap_or_else(|_| "{}".to_owned());
+        Self {
+            content: vec![ToolTextContent::text(text)],
+            structured_content: content_json,
+            is_error: false,
+            upstream_request: Some(upstream_request),
+        }
+    }
+
+    pub(crate) fn app_error(error: &crate::error::AppError) -> Self {
         let content_json = json!({
             "code": error.code(),
             "message": match error {
@@ -149,6 +167,7 @@ impl ToolResult {
             content: vec![ToolTextContent::text(text)],
             structured_content: content_json,
             is_error: true,
+            upstream_request: None,
         }
     }
 }
