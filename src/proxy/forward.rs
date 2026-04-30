@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use axum::body::Body;
 
 use crate::{
@@ -25,6 +27,7 @@ pub struct ForwardSuccess {
     pub upstream_method: String,
     pub upstream_url: String,
     pub upstream_status: String,
+    pub upstream_ms: u128,
     pub timeout_ms: u64,
 }
 
@@ -85,7 +88,9 @@ pub async fn forward_prepared_request(
     let outbound_request = map_forward_request(prepared.request, api_config)?;
     let upstream_method = outbound_request.method().to_string();
     let upstream_url = outbound_request.url().to_string();
+    let upstream_started = Instant::now();
     let upstream_response = execute_request(state.client(), outbound_request, timeout_ms).await?;
+    let upstream_ms = upstream_started.elapsed().as_millis();
     let upstream_status = upstream_response.status().to_string();
     let response = map_response(upstream_response)?;
 
@@ -94,6 +99,7 @@ pub async fn forward_prepared_request(
         upstream_method,
         upstream_url,
         upstream_status,
+        upstream_ms,
         timeout_ms,
     })
 }

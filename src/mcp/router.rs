@@ -13,7 +13,7 @@ use crate::{
     },
     error::AppError,
     telemetry::{
-        GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext,
+        GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedMcpRequest, LoggedRequestContext,
         generate_internal_request_id, sanitize_request_uri_for_logs,
     },
 };
@@ -99,13 +99,16 @@ async fn handle_mcp_request(
         )
     })?;
     if jsonrpc != "2.0" {
-        return Err((
-            Some(client_slug),
-            json_rpc_error_response(id, -32600, "invalid request"),
-        ));
+        let mut response = json_rpc_error_response(id, -32600, "invalid request");
+        response
+            .extensions_mut()
+            .insert(logged_mcp_request(&method, &params));
+
+        return Err((Some(client_slug), response));
     }
 
-    let response = match method.as_str() {
+    let logged_mcp_request = logged_mcp_request(&method, &params);
+    let mut response = match method.as_str() {
         "initialize" => JsonRpcResponse::success(id, initialize_result()).into_response(),
         "tools/list" => JsonRpcResponse::success(
             id,
@@ -118,8 +121,26 @@ async fn handle_mcp_request(
         _ => JsonRpcResponse::<serde_json::Value>::error(id, -32601, "method not found")
             .into_response(),
     };
+    response.extensions_mut().insert(logged_mcp_request);
 
     Ok((client_slug, response))
+}
+
+fn logged_mcp_request(method: &str, params: &Option<Value>) -> LoggedMcpRequest {
+    LoggedMcpRequest {
+        mcp_method: method.to_owned(),
+        mcp_name: mcp_name(params),
+    }
+}
+
+fn mcp_name(params: &Option<Value>) -> String {
+    params
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("-")
+        .to_owned()
 }
 
 fn json_rpc_error_response(id: Option<JsonRpcId>, code: i32, message: &'static str) -> Response {

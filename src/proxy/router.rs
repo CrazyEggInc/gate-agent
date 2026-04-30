@@ -5,19 +5,21 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{Request, StatusCode},
+    middleware::{self, Next},
     response::Response,
     routing::{any, get},
 };
-use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
-use tracing::{Level, info};
+use tower_http::timeout::TimeoutLayer;
+use tracing::{debug, info};
 
 use crate::app::AppState;
 use crate::auth::bearer::{extract_authorization_header, validate_bearer_authorized_request};
 use crate::error::{AppError, LoggedErrorCode};
 use crate::mcp::router::mcp_handler;
 use crate::telemetry::{
-    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedRequestContext, LoggedUpstreamRequest,
-    generate_internal_request_id, sanitize_request_uri_for_logs, sanitize_url_for_logs,
+    GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedMcpRequest, LoggedRequestContext,
+    LoggedUpstreamRequest, generate_internal_request_id, sanitize_request_uri_for_logs,
+    sanitize_url_for_logs,
 };
 
 use super::forward::forward_proxy_request;
@@ -41,131 +43,268 @@ pub fn build_router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(ROUTER_TIMEOUT_SECS),
         ))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    tracing::span!(
-                        Level::INFO,
-                        "http_request",
-                        request_id = "-",
-                        method = %request.method(),
-                        uri = %sanitize_request_uri_for_logs(request.uri()),
-                    )
-                })
-                .on_response(
-                    |response: &Response, latency: Duration, span: &tracing::Span| {
-                        let _enter = span.enter();
-                        let request_context = response.extensions().get::<LoggedRequestContext>();
-                        let error_code = response
-                            .extensions()
-                            .get::<LoggedErrorCode>()
-                            .map(|value| value.0);
-                        let client = response
-                            .extensions()
-                            .get::<LoggedClient>()
-                            .map(|value| &value.0);
-                        let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
-
-                        let request_id = request_context
-                            .map(|value| value.request_id.as_str())
-                            .unwrap_or("-");
-                        let method = request_context
-                            .map(|value| value.method.as_str())
-                            .unwrap_or("-");
-                        let uri = request_context
-                            .map(|value| value.uri.as_str())
-                            .unwrap_or("-");
-
-                        match (error_code, client, upstream_request) {
-                            (Some(error_code), Some(client), Some(upstream_request)) => info!(
-                                client = %client,
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                error_code,
-                                api = %upstream_request.api,
-                                upstream_method = %upstream_request.upstream_method,
-                                upstream_url = %upstream_request.upstream_url,
-                                upstream_status = %upstream_request.upstream_status,
-                                timeout_ms = upstream_request.timeout_ms,
-                            ),
-                            (Some(error_code), Some(client), None) => info!(
-                                client = %client,
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                error_code,
-                            ),
-                            (None, Some(client), Some(upstream_request)) => info!(
-                                client = %client,
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                api = %upstream_request.api,
-                                upstream_method = %upstream_request.upstream_method,
-                                upstream_url = %upstream_request.upstream_url,
-                                upstream_status = %upstream_request.upstream_status,
-                                timeout_ms = upstream_request.timeout_ms,
-                            ),
-                            (None, Some(client), None) => info!(
-                                client = %client,
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                            ),
-                            (Some(error_code), None, Some(upstream_request)) => info!(
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                error_code,
-                                api = %upstream_request.api,
-                                upstream_method = %upstream_request.upstream_method,
-                                upstream_url = %upstream_request.upstream_url,
-                                upstream_status = %upstream_request.upstream_status,
-                                timeout_ms = upstream_request.timeout_ms,
-                            ),
-                            (Some(error_code), None, None) => info!(
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                error_code,
-                            ),
-                            (None, None, Some(upstream_request)) => info!(
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                                api = %upstream_request.api,
-                                upstream_method = %upstream_request.upstream_method,
-                                upstream_url = %upstream_request.upstream_url,
-                                upstream_status = %upstream_request.upstream_status,
-                                timeout_ms = upstream_request.timeout_ms,
-                            ),
-                            (None, None, None) => info!(
-                                request_id = %request_id,
-                                method = %method,
-                                uri = %uri,
-                                status = %response.status(),
-                                latency_ms = latency.as_millis(),
-                            ),
-                        }
-                    },
-                ),
-        )
+        .layer(middleware::from_fn(log_request))
         .with_state(state)
+}
+
+async fn log_request(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().to_string();
+    let uri = sanitize_request_uri_for_logs(request.uri());
+    let response = next.run(request).await;
+
+    log_response(&method, &uri, &response);
+
+    response
+}
+
+fn log_response(default_method: &str, default_uri: &str, response: &Response) {
+    let request_context = response.extensions().get::<LoggedRequestContext>();
+    let error_code = response
+        .extensions()
+        .get::<LoggedErrorCode>()
+        .map(|value| value.0);
+
+    let Some(request_context) = request_context else {
+        log_response_without_request_id(default_method, default_uri, response, error_code);
+
+        return;
+    };
+
+    let client = response
+        .extensions()
+        .get::<LoggedClient>()
+        .map(|value| &value.0);
+    let mcp_request = response.extensions().get::<LoggedMcpRequest>();
+    let upstream_request = response.extensions().get::<LoggedUpstreamRequest>();
+
+    let request_id = request_context.request_id.as_str();
+    let method = request_context.method.as_str();
+    let uri = request_context.uri.as_str();
+
+    macro_rules! completion {
+        ($($field:tt)*) => {
+            if logs_at_info(uri) {
+                info!($($field)*)
+            } else {
+                debug!($($field)*)
+            }
+        };
+    }
+
+    match (error_code, client, mcp_request, upstream_request) {
+        (Some(error_code), Some(client), Some(mcp_request), Some(upstream_request)) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (Some(error_code), Some(client), Some(mcp_request), None) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+        ),
+        (None, Some(client), Some(mcp_request), Some(upstream_request)) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (None, Some(client), Some(mcp_request), None) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+        ),
+        (Some(error_code), Some(client), None, Some(upstream_request)) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (Some(error_code), Some(client), None, None) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+        ),
+        (None, Some(client), None, Some(upstream_request)) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (None, Some(client), None, None) => completion!(
+            client = %client,
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+        ),
+        (Some(error_code), None, Some(mcp_request), Some(upstream_request)) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (Some(error_code), None, Some(mcp_request), None) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+        ),
+        (None, None, Some(mcp_request), Some(upstream_request)) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (None, None, Some(mcp_request), None) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            mcp_method = %mcp_request.mcp_method,
+            mcp_name = %mcp_request.mcp_name,
+        ),
+        (Some(error_code), None, None, Some(upstream_request)) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (Some(error_code), None, None, None) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+        ),
+        (None, None, None, Some(upstream_request)) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            upstream_api = %upstream_request.api,
+            upstream_method = %upstream_request.upstream_method,
+            upstream_url = %upstream_request.upstream_url,
+            upstream_status = %upstream_request.upstream_status,
+            upstream_ms = upstream_request.upstream_ms,
+            timeout_ms = upstream_request.timeout_ms,
+        ),
+        (None, None, None, None) => completion!(
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+        ),
+    }
+}
+
+fn log_response_without_request_id(
+    method: &str,
+    uri: &str,
+    response: &Response,
+    error_code: Option<&'static str>,
+) {
+    macro_rules! completion {
+        ($($field:tt)*) => {
+            if logs_at_info(uri) {
+                info!($($field)*)
+            } else {
+                debug!($($field)*)
+            }
+        };
+    }
+
+    if let Some(error_code) = error_code {
+        completion!(
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error_code,
+        );
+    } else {
+        completion!(
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+        );
+    }
+}
+
+fn logs_at_info(uri: &str) -> bool {
+    uri == "/mcp" || uri.starts_with("/proxy/")
 }
 
 async fn health_handler() -> &'static str {
@@ -244,6 +383,7 @@ async fn handle_proxy_request(
         upstream_method: forward.upstream_method,
         upstream_url: sanitize_url_for_logs(&forward.upstream_url),
         upstream_status: forward.upstream_status,
+        upstream_ms: forward.upstream_ms,
         timeout_ms: forward.timeout_ms,
     });
 
