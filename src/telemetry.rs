@@ -21,6 +21,15 @@ pub(crate) struct LoggedRequestContext {
     pub uri: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LoggedUpstreamRequest {
+    pub api: String,
+    pub upstream_method: String,
+    pub upstream_url: String,
+    pub upstream_status: String,
+    pub timeout_ms: u64,
+}
+
 #[derive(Serialize)]
 struct FatalErrorLogRecord {
     level: &'static str,
