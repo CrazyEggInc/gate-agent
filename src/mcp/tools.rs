@@ -196,6 +196,7 @@ async fn call_api(
             upstream_method: forward.upstream_method,
             upstream_url: sanitize_url_for_logs(&forward.upstream_url),
             upstream_status: forward.upstream_status,
+            upstream_ms: forward.upstream_ms,
             timeout_ms: forward.timeout_ms,
         },
     ))

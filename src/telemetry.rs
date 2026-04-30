@@ -22,11 +22,18 @@ pub(crate) struct LoggedRequestContext {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct LoggedMcpRequest {
+    pub mcp_method: String,
+    pub mcp_name: String,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct LoggedUpstreamRequest {
     pub api: String,
     pub upstream_method: String,
     pub upstream_url: String,
     pub upstream_status: String,
+    pub upstream_ms: u128,
     pub timeout_ms: u64,
 }
 
@@ -378,7 +385,7 @@ mod tests {
         tracing::info!(
             status = "201 Created",
             latency_ms = 12,
-            api = "billing",
+            upstream_api = "billing",
             upstream_method = "GET",
             upstream_url = "https://example.com/api/v1/projects/1/tasks",
             upstream_status = "201 Created",
@@ -396,7 +403,10 @@ mod tests {
             payload.get("status").and_then(Value::as_str),
             Some("201 Created")
         );
-        assert_eq!(payload.get("api").and_then(Value::as_str), Some("billing"));
+        assert_eq!(
+            payload.get("upstream_api").and_then(Value::as_str),
+            Some("billing")
+        );
         assert_eq!(
             payload.get("timeout_ms").and_then(Value::as_u64),
             Some(5000)

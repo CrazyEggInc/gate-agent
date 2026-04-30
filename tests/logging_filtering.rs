@@ -214,6 +214,38 @@ fn assert_message_absent(entries: &[Value], unexpected: &str) {
     );
 }
 
+fn assert_mcp_completion_present<'a>(entries: &'a [Value], method: &str, name: &str) -> &'a Value {
+    entries
+        .iter()
+        .find(|entry| {
+            find_string(entry, &["mcp_method"]).as_deref() == Some(method)
+                && find_string(entry, &["mcp_name"]).as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("missing MCP completion for {method}/{name}: {entries:#?}"))
+}
+
+fn assert_completion_absent(entries: &[Value], method: &str, uri: &str) {
+    let found = entries.iter().any(|entry| {
+        find_string(entry, &["method"]).as_deref() == Some(method)
+            && find_string(entry, &["uri"]).as_deref() == Some(uri)
+    });
+
+    assert!(
+        !found,
+        "unexpected completion for {method} {uri}: {entries:#?}"
+    );
+}
+
+fn assert_completion_present<'a>(entries: &'a [Value], method: &str, uri: &str) -> &'a Value {
+    entries
+        .iter()
+        .find(|entry| {
+            find_string(entry, &["method"]).as_deref() == Some(method)
+                && find_string(entry, &["uri"]).as_deref() == Some(uri)
+        })
+        .unwrap_or_else(|| panic!("missing completion for {method} {uri}: {entries:#?}"))
+}
+
 fn write_secrets_file(
     contents: &str,
 ) -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>> {
@@ -317,6 +349,125 @@ async fn debug_logging_stays_crate_scoped() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn info_logging_hides_non_mcp_and_non_api_request_completions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("info", || async {
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let options = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(options.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        Ok(())
+    })
+    .await?;
+
+    assert_completion_absent(&logs.entries, "GET", "/health");
+    assert_completion_absent(&logs.entries, "OPTIONS", "/health");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn debug_logging_includes_non_mcp_and_non_api_request_completions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route("/{*path}", any(|| async { StatusCode::NO_CONTENT }));
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let options = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(options.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        Ok(())
+    })
+    .await?;
+
+    let health = assert_completion_present(&logs.entries, "GET", "/health");
+    assert_eq!(
+        find_status_code(health, &["status", "status_code"]),
+        Some(200)
+    );
+    assert!(
+        !contains_key(health, "request_id"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !contains_key(health, "latency_ms"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !contains_key(health, "upstream_ms"),
+        "logs were: {}",
+        logs.raw
+    );
+
+    let options = assert_completion_present(&logs.entries, "OPTIONS", "/health");
+    assert_eq!(
+        find_status_code(options, &["status", "status_code"]),
+        Some(405)
+    );
+    assert!(
+        !contains_key(options, "request_id"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !contains_key(options, "latency_ms"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !contains_key(options, "upstream_ms"),
+        "logs were: {}",
+        logs.raw
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_log()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Router::new().route(
@@ -366,11 +517,11 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
             "method",
             "uri",
             "status",
-            "latency_ms",
-            "api",
+            "upstream_api",
             "upstream_method",
             "upstream_url",
             "upstream_status",
+            "upstream_ms",
             "timeout_ms",
         ],
     );
@@ -391,13 +542,8 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         find_status_code(completion, &["status", "status_code"]),
         Some(201)
     );
-    assert!(
-        find_u64(completion, &["latency_ms"]).is_some(),
-        "logs were: {}",
-        logs.raw
-    );
     assert_eq!(
-        find_string(completion, &["api"]).as_deref(),
+        find_string(completion, &["upstream_api"]).as_deref(),
         Some("billing")
     );
     assert_eq!(
@@ -413,7 +559,17 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         find_status_code(completion, &["upstream_status", "upstream_status_code"]),
         Some(201)
     );
+    assert!(
+        find_u64(completion, &["upstream_ms"]).is_some(),
+        "logs were: {}",
+        logs.raw
+    );
     assert_eq!(find_u64(completion, &["timeout_ms"]), Some(5_000));
+    assert!(
+        !contains_key(completion, "latency_ms"),
+        "logs were: {}",
+        logs.raw
+    );
     assert!(
         !contains_key(completion, "error_code"),
         "logs were: {}",
@@ -467,6 +623,148 @@ async fn successful_proxy_requests_include_safe_upstream_fields_in_completion_lo
         "logs were: {}",
         logs.raw
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn info_logging_emits_all_mcp_completions() -> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route(
+        "/api/{*path}",
+        any(|| async {
+            let mut response = Response::new(Body::from(r#"{"ok":true}"#));
+            *response.status_mut() = StatusCode::OK;
+            response
+        }),
+    );
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = format!("Bearer {DEFAULT_TOKEN}");
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("info", || async {
+        let initialize = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(initialize.status(), StatusCode::OK);
+
+        let list_apis = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_apis","arguments":{}}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(list_apis.status(), StatusCode::OK);
+
+        let call_api = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/v1/projects/1/tasks"}}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(call_api.status(), StatusCode::OK);
+
+        Ok(())
+    })
+    .await?;
+
+    assert_mcp_completion_present(&logs.entries, "initialize", "-");
+    assert_mcp_completion_present(&logs.entries, "tools/call", "list_apis");
+    assert_mcp_completion_present(&logs.entries, "tools/call", "call_api");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn debug_logging_emits_all_mcp_completions() -> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new().route(
+        "/api/{*path}",
+        any(|| async {
+            let mut response = Response::new(Body::from(r#"{"ok":true}"#));
+            *response.status_mut() = StatusCode::OK;
+            response
+        }),
+    );
+    let base_url = spawn_upstream(upstream).await?;
+    let config = load_test_config(&base_url)?;
+    let token = format!("Bearer {DEFAULT_TOKEN}");
+    let app = build_router(AppState::from_config(&config)?);
+
+    let logs = captured_dispatch("debug", || async {
+        let initialize = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(initialize.status(), StatusCode::OK);
+
+        let list_apis = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_apis","arguments":{}}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(list_apis.status(), StatusCode::OK);
+
+        let call_api = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("authorization", token.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"billing","method":"GET","path":"/v1/projects/1/tasks"}}}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(call_api.status(), StatusCode::OK);
+
+        Ok(())
+    })
+    .await?;
+
+    assert_mcp_completion_present(&logs.entries, "initialize", "-");
+    assert_mcp_completion_present(&logs.entries, "tools/call", "list_apis");
+    assert_mcp_completion_present(&logs.entries, "tools/call", "call_api");
 
     Ok(())
 }
@@ -534,11 +832,13 @@ async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log(
             "method",
             "uri",
             "status",
-            "latency_ms",
-            "api",
+            "mcp_method",
+            "mcp_name",
+            "upstream_api",
             "upstream_method",
             "upstream_url",
             "upstream_status",
+            "upstream_ms",
             "timeout_ms",
         ],
     );
@@ -559,13 +859,24 @@ async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log(
         find_status_code(completion, &["status", "status_code"]),
         Some(200)
     );
-    assert!(
-        find_u64(completion, &["latency_ms"]).is_some(),
-        "logs were: {}",
-        logs.raw
+    assert_eq!(
+        find_string(completion, &["mcp_method"]).as_deref(),
+        Some("tools/call")
     );
     assert_eq!(
-        find_string(completion, &["api"]).as_deref(),
+        find_string(completion, &["mcp_name"]).as_deref(),
+        Some("call_api")
+    );
+    assert_eq!(
+        find_string(completion, &["mcp_method"]).as_deref(),
+        Some("tools/call")
+    );
+    assert_eq!(
+        find_string(completion, &["mcp_name"]).as_deref(),
+        Some("call_api")
+    );
+    assert_eq!(
+        find_string(completion, &["upstream_api"]).as_deref(),
         Some("billing")
     );
     assert_eq!(
@@ -581,7 +892,17 @@ async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log(
         find_status_code(completion, &["upstream_status", "upstream_status_code"]),
         Some(200)
     );
+    assert!(
+        find_u64(completion, &["upstream_ms"]).is_some(),
+        "logs were: {}",
+        logs.raw
+    );
     assert_eq!(find_u64(completion, &["timeout_ms"]), Some(5_000));
+    assert!(
+        !contains_key(completion, "latency_ms"),
+        "logs were: {}",
+        logs.raw
+    );
     assert!(!logs.raw.contains("expand=1"), "logs were: {}", logs.raw);
     assert!(
         !logs.raw.contains("jwt=query-secret"),
@@ -631,7 +952,6 @@ async fn completion_logs_add_error_code_only_for_application_errors()
             "method",
             "uri",
             "status",
-            "latency_ms",
             "error_code",
         ],
     );
@@ -652,14 +972,19 @@ async fn completion_logs_add_error_code_only_for_application_errors()
         find_status_code(completion, &["status", "status_code"]),
         Some(403)
     );
-    assert!(
-        find_u64(completion, &["latency_ms"]).is_some(),
-        "logs were: {}",
-        logs.raw
-    );
     assert_eq!(
         find_string(completion, &["error_code"]).as_deref(),
         Some("forbidden_api")
+    );
+    assert!(
+        !contains_key(completion, "latency_ms"),
+        "logs were: {}",
+        logs.raw
+    );
+    assert!(
+        !contains_key(completion, "upstream_ms"),
+        "logs were: {}",
+        logs.raw
     );
     assert!(!logs.raw.contains(DEFAULT_TOKEN), "logs were: {}", logs.raw);
     assert!(

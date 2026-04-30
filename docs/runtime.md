@@ -123,7 +123,7 @@ This JSON policy applies consistently to:
 - startup logs
 - per-request completion logs
 
-The schema should stay vendor-neutral and portable. Consumers may rely on stable business fields such as client, request ID, method, URI, status, latency, API slug, upstream metadata, error code, and error message, but they must not depend on formatter-specific field ordering or nesting details.
+The schema should stay vendor-neutral and portable. Consumers may rely on stable business fields such as client, request ID, method, URI, status, upstream API slug, upstream metadata, upstream duration, error code, and error message, but they must not depend on formatter-specific field ordering or nesting details.
 
 Expected logging behavior:
 
@@ -134,10 +134,14 @@ Expected logging behavior:
 - the selected level applies only to `gate-agent` targets
 - dependency targets must remain limited to warning and error output even when the application runs at `debug`
 - startup logs must use the same newline-delimited JSON policy as request logs
-- each HTTP request must emit a completion log with method, URI, status, latency, and request ID
+- requests to `/mcp` and `/proxy` API routes must emit completion logs at `info`
+- requests to any other route, including `/health` and unmatched routes, must emit completion logs only at `debug`
+- each HTTP request completion log must include method, URI, and status; request ID must be included only when one was assigned to the routed request
 - authenticated proxy completion logs must include the authorized client slug as the top-level `client` field
 - authenticated `/mcp` request completion logs must also remain attributable to the authorized client
-- proxy request completion logs must also include safe upstream metadata: API slug, outbound method, outbound URL, upstream status, and timeout
+- authenticated `/mcp` request completion logs must include `mcp_method` and `mcp_name`; requests without a tool name use `mcp_name: "-"`
+- proxy and MCP `call_api` completion logs must include safe upstream metadata only when an upstream request is performed and upstream metadata is available: upstream API slug as `upstream_api`, outbound method, outbound URL, upstream status, upstream duration as `upstream_ms`, and timeout
+- for the `call_api` completion log contract, `upstream_ms` must be present only for requests that call a configured remote upstream API
 - completion logs must include `error_code` only when the response came from an application error
 - when a top-level `status` field is present for an HTTP completion log, it represents the HTTP response status and may be rendered as a standard status line string such as `201 Created`; consumers that need only the numeric code should read that value portably rather than depend on formatter-specific duplicate fields
 - logs must not include formatter-added `span` or `spans` metadata
