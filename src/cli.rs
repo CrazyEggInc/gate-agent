@@ -35,7 +35,10 @@ pub enum Command {
 
 #[derive(Clone, Debug, Args)]
 pub struct StartArgs {
-    #[arg(long, help = "Bind address for the local listener")]
+    #[arg(
+        long,
+        help = "Bind address for the local listener as host:port (example: 0.0.0.0:8787)"
+    )]
     pub bind: Option<SocketAddr>,
 
     #[arg(long, help = "Path to the config file")]
@@ -44,7 +47,11 @@ pub struct StartArgs {
     #[arg(short = 'p', long, help = "Password for encrypted config files")]
     pub password: Option<String>,
 
-    #[arg(long, default_value = DEFAULT_LOG_LEVEL, help = "Log level for server output")]
+    #[arg(
+        long,
+        default_value = DEFAULT_LOG_LEVEL,
+        help = "Log level for server output: warn, info, or debug"
+    )]
     pub log_level: String,
 }
 
@@ -209,7 +216,7 @@ pub struct ConfigApiArgs {
 
     #[arg(
         long,
-        help = "Upstream headers as name=value pairs. Repeat flag to add multiple upstream headers"
+        help = "Upstream headers as name=value pairs (example: x-api-key=secret). Repeat flag to add multiple upstream headers"
     )]
     pub header: Vec<String>,
 
@@ -245,7 +252,7 @@ pub struct ConfigClientArgs {
 
     #[arg(
         long = "bearer-token-expires-at",
-        help = "Bearer token expiry timestamp"
+        help = "Bearer token expiry date-only as YYYY-MM-DD (example: 2026-01-01)"
     )]
     pub bearer_token_expires_at: Option<String>,
 
@@ -254,7 +261,7 @@ pub struct ConfigClientArgs {
 
     #[arg(
         long = "api-access",
-        help = "API route rule as api:method:path; method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
+        help = "API route rule as api:method:path (example: projects:get:*); method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
     )]
     pub api_access: Vec<String>,
 
@@ -299,7 +306,7 @@ struct ConfigRotateSecretArgsRaw {
 
     #[arg(
         long = "bearer-token-expires-at",
-        help = "Replacement bearer token expiry timestamp"
+        help = "Replacement bearer token expiry date-only as YYYY-MM-DD (example: 2026-01-01)"
     )]
     bearer_token_expires_at: Option<String>,
 }
@@ -379,7 +386,7 @@ pub struct ConfigGroupArgs {
 
     #[arg(
         long = "api-access",
-        help = "API route rule as api:method:path; method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
+        help = "API route rule as api:method:path (example: projects:get:*); method is HTTP verb or *; path supports * wildcards. Repeat flag or comma-separate rules"
     )]
     pub api_access: Vec<String>,
 }
