@@ -65,10 +65,13 @@ fn start_help_uses_config_flag() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = help_output(&["start", "--help"])?;
 
     assert!(stdout.contains("--bind"));
+    assert!(stdout.contains("Bind address for the local listener as host:port"));
+    assert!(stdout.contains("0.0.0.0:8787"));
     assert!(!stdout.contains("[default: 127.0.0.1:8787]"));
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--password"));
     assert!(stdout.contains("--log-level"));
+    assert!(stdout.contains("warn, info, or debug"));
     assert!(!stdout.contains("--secrets-file"));
     assert!(!stdout.contains("SECRETS_FILE"));
 
@@ -111,6 +114,10 @@ fn config_client_rotate_secret_help_lists_expected_flags() -> Result<(), Box<dyn
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--bearer-token-expires-at"));
+    assert!(stdout.contains("date-only"));
+    assert!(stdout.contains("YYYY-MM-DD"));
+    assert!(stdout.contains("2026-01-01"));
+    assert!(!stdout.contains("timestamp"));
     assert!(!stdout.contains("--group"));
     assert!(!stdout.contains("--api-access"));
 
@@ -177,6 +184,7 @@ fn config_group_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Er
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--api-access"));
     assert!(stdout.contains("API route rule as api:method:path"));
+    assert!(stdout.contains("projects:get:*"));
     assert!(stdout.contains("method is HTTP verb or *"));
     assert!(stdout.contains("path supports * wildcards"));
     assert!(stdout.contains("Repeat flag or comma-separate rules"));
@@ -213,6 +221,8 @@ fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Erro
     assert!(stdout.contains("--basic-auth"));
     assert!(stdout.contains("Configure upstream HTTP Basic auth interactively"));
     assert!(stdout.contains("--header"));
+    assert!(stdout.contains("name=value"));
+    assert!(stdout.contains("x-api-key=secret"));
     assert!(stdout.contains("Repeat flag to add multiple upstream headers"));
     assert!(stdout.contains("--timeout-ms"));
     assert!(stdout.contains("--delete"));
@@ -323,11 +333,16 @@ fn config_client_help_lists_expected_flags() -> Result<(), Box<dyn std::error::E
     assert!(stdout.contains("--log-level"));
     assert!(stdout.contains("--name"));
     assert!(stdout.contains("--bearer-token-expires-at"));
+    assert!(stdout.contains("date-only"));
+    assert!(stdout.contains("YYYY-MM-DD"));
+    assert!(stdout.contains("2026-01-01"));
+    assert!(!stdout.contains("timestamp"));
     assert!(stdout.contains("--group"));
     assert!(stdout.contains("--api-access"));
     assert!(stdout.contains("rotate-secret"));
     assert!(stdout.contains("--delete"));
     assert!(stdout.contains("API route rule as api:method:path"));
+    assert!(stdout.contains("projects:get:*"));
     assert!(stdout.contains("method is HTTP verb or *"));
     assert!(stdout.contains("path supports * wildcards"));
     assert!(stdout.contains("Repeat flag or comma-separate rules"));

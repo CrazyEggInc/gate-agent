@@ -89,9 +89,11 @@ fn start_help_lists_runtime_flags() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = String::from_utf8(output.stdout)?;
 
     assert!(stdout.contains("Start the local proxy server"));
-    assert!(stdout.contains("Bind address for the local listener"));
+    assert!(stdout.contains("Bind address for the local listener as host:port"));
+    assert!(stdout.contains("0.0.0.0:8787"));
     assert!(stdout.contains("Path to the config file"));
     assert!(stdout.contains("Log level for server output"));
+    assert!(stdout.contains("warn, info, or debug"));
     assert!(stdout.contains("--bind"));
     assert!(stdout.contains("--config"));
     assert!(stdout.contains("--log-level"));

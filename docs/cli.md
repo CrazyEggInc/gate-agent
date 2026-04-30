@@ -51,10 +51,10 @@ Encrypted read expectations:
 
 Accepted flags:
 
-- `--bind <addr>`
+- `--bind <host:port>` (for example, `0.0.0.0:8787`)
 - `--config <path>`
 - `--password <value>` / `-p <value>`
-- `--log-level <level>`
+- `--log-level <level>` (`warn`, `info`, or `debug`)
 
 Behavior:
 
@@ -62,7 +62,7 @@ Behavior:
 - prefers non-empty piped stdin over file-backed config sources
 - prompts only when the selected config is encrypted and no password flag, env var, or keyring entry is available
 - validates config before starting
-- when `--bind` is provided explicitly, uses that address as the listener override
+- when `--bind` is provided explicitly, uses that full socket address as the listener override
 - when `--bind` is omitted, uses `[server].bind` and `[server].port` from config
 - configs without `[server]` remain valid and fall back to `127.0.0.1:8787`
 - binds the requested listener and serves HTTP traffic
@@ -171,7 +171,7 @@ Accepted flags:
 - `--name`
 - `--base-url`
 - `--basic-auth`
-- repeated `--header <name=value>`
+- repeated `--header <name=value>` (for example, `--header x-api-key=secret`)
 - optional `--timeout-ms`
 - `-d` / `--delete`
 
@@ -187,7 +187,7 @@ Behavior:
 - optional Basic-auth setup can still prompt in interactive `config api` sessions even when `--basic-auth` is omitted
 - `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
 - `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
-- each `--header` value must use `<name>=<value>` format
+- each `--header` value must use `<name>=<value>` format, for example `x-api-key=secret`
 - repeated `--header` flags replace the stored upstream header map with exactly the provided headers for that invocation, subject to auth-mode rules below
 - repeated `--header` still manages generic upstream headers
 - bearer-style usage uses full value inside one repeated flag, for example `--header authorization=Bearer my-token`
@@ -239,7 +239,7 @@ Must accept:
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 - `--name`
-- repeated `--api-access <api:method:path[,method:path...]>`
+- repeated `--api-access <api:method:path[,method:path...]>` (for example, `--api-access projects:get:*`)
 - `-d` / `--delete`
 
 Behavior:
@@ -257,6 +257,9 @@ Behavior:
 - selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
+- each `--api-access` value accepts one API slug followed by one or more `method:path` route rules, for example `projects:get:*`
+- repeated `--api-access` flags are merged across API slugs
+- one flag may contain comma-separated route rules for one API, such as `--api-access projects:get:*,post:/projects`; use another flag for another API, such as `--api-access billing:*:*`
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
 - non-interactive delete requires explicit `--name`
 - interactive delete asks with destructive wording that says the action cannot be undone and defaults to No
@@ -270,9 +273,9 @@ Accepted flags:
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 - `--name`
-- `--bearer-token-expires-at`
+- `--bearer-token-expires-at <YYYY-MM-DD>` (for example, `2026-01-01`)
 - `--group <slug>`
-- repeated `--api-access <api:method:path[,method:path...]>`
+- repeated `--api-access <api:method:path[,method:path...]>` (for example, `--api-access projects:get:*`)
 - `-d` / `--delete`
 
 Rules and behavior:
@@ -281,7 +284,7 @@ Rules and behavior:
 - `--group` and `--api-access` are mutually exclusive
 - `--api-access` accepts one API slug followed by one or more `method:path` route rules, where `method` is an HTTP verb or `*` and `path` is `*` or a path starting with `/`
 - repeated `--api-access` flags are merged across API slugs
-- if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
+- if `--bearer-token-expires-at` is supplied, it must use date-only form `YYYY-MM-DD`, for example `2026-01-01`; the stored expiry uses midnight UTC for that date
 - one flag may contain comma-separated route rules for one API, such as `--api-access projects:get:*,post:/projects`; use another flag for another API, such as `--api-access billing:*:*`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
@@ -317,7 +320,7 @@ Accepted flags:
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 - `--name`
-- `--bearer-token-expires-at`
+- `--bearer-token-expires-at <YYYY-MM-DD>` (for example, `2026-01-01`)
 
 Rules and behavior:
 
@@ -325,7 +328,7 @@ Rules and behavior:
 - fails if config file does not already exist
 - fails if target client does not already exist
 - when required fields are omitted in an interactive session, the command prompts for the client name with an up/down selector of existing clients
-- if `--bearer-token-expires-at` is supplied, it must use date form `YYYY-MM-DD`; the stored timestamp uses midnight UTC for that date
+- if `--bearer-token-expires-at` is supplied, it must use date-only form `YYYY-MM-DD`, for example `2026-01-01`; the stored expiry uses midnight UTC for that date
 - if `--bearer-token-expires-at` is omitted, existing expiry is preserved exactly and used as the interactive default when rotating an existing client
 - rotation generates a brand-new bearer token and replaces persisted `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - existing `group` or inline `api_access` stays unchanged

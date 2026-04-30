@@ -252,7 +252,7 @@ Add or update client with generated token on create:
 ```sh
 cargo run -- config client --config .secrets \
   --name partner \
-  --bearer-token-expires-at '2031-02-03T04:05:06Z' \
+  --bearer-token-expires-at '2031-02-03' \
   --group local-default
 ```
 
@@ -263,7 +263,7 @@ Rotate an existing client token:
 ```sh
 cargo run -- config client rotate-secret --config .secrets \
   --name partner \
-  --bearer-token-expires-at '2032-03-04T05:06:07Z'
+  --bearer-token-expires-at '2032-03-04'
 ```
 
 That command prints replacement bearer token once, persists only replacement token metadata, and leaves existing client access rules unchanged. Update any local `GATE_AGENT_TOKEN` export to use replacement token after rotation.
