@@ -777,7 +777,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["none", "n"])?,
+            serde_json::to_string(&[] as &[&str])?,
         );
     }
 
@@ -818,6 +818,95 @@ timeout_ms = 5000
             .and_then(Value::as_str),
         Some("projects-user")
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_api_partial_flags_report_missing_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[] as &[&str])?,
+        );
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            base_url: Some("https://projects.internal.example/api".to_owned()),
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))
+    .expect_err("partial config api flags should report missing name");
+
+    assert_eq!(error.to_string(), "Missing required fields: --name");
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_api_partial_flags_report_missing_base_url_on_create()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[] as &[&str])?,
+        );
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: None,
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))
+    .expect_err("partial config api flags should report missing base URL");
+
+    assert_eq!(error.to_string(), "Missing required fields: --base-url");
 
     Ok(())
 }

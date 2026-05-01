@@ -362,10 +362,11 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
 }
 
 fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs, CommandError> {
-    let use_interactive_questionnaire = should_prompt_for_config_api_args(&args) || args.delete;
+    let use_interactive_questionnaire = should_prompt_for_config_api_args(&args);
+    let use_interactive_selection = use_interactive_questionnaire || args.delete;
     let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let selection = if use_interactive_questionnaire {
+    let selection = if use_interactive_selection {
         resolve_managed_resource_selection(
             args.name,
             config::ResourceKind::Api,
@@ -380,9 +381,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
             name: args
                 .name
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    CommandError::new("config api requires --name in non-interactive sessions")
-                })?,
+                .ok_or_else(|| missing_required_fields(["--name"]))?,
             action: if args.delete {
                 ManagedResourceAction::Delete
             } else {
@@ -411,6 +410,10 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         config::load_existing_api_state(args.config.as_deref(), args.password.clone(), &name)
             .map_err(|error| CommandError::new(error.to_string()))?;
     let interactive = interactive_questionnaire_available() && use_interactive_questionnaire;
+
+    if !interactive && existing.is_none() && args.base_url.is_none() {
+        return Err(missing_required_fields(["--base-url"]));
+    }
 
     let base_url = if args.base_url.is_some() {
         args.base_url
@@ -1029,6 +1032,10 @@ fn prompt_managed_resource_action(
             "invalid action '{value}'; expected edit, delete, or cancel"
         ))),
     }
+}
+
+fn missing_required_fields<const N: usize>(fields: [&str; N]) -> CommandError {
+    CommandError::new(format!("Missing required fields: {}", fields.join(", ")))
 }
 
 fn prompt_required(
