@@ -16,7 +16,7 @@ use crate::config::secrets::{
 use super::ConfigError;
 use super::crypto::{
     ConfigFileFormat, LoadedConfigText, load_config_text, resolve_format_from_bytes,
-    serialize_for_format, write_config_file_atomic,
+    serialize_for_format, serialize_for_format_with_factor, write_config_file_atomic,
 };
 
 const DEFAULT_BEARER_TOKEN_VALIDITY_DAYS: u64 = 180;
@@ -144,6 +144,24 @@ pub fn init_config_with_default_bearer_token_and_server(
     server_bind: &str,
     server_port: u16,
 ) -> Result<String, WriteConfigError> {
+    init_config_with_default_bearer_token_and_server_and_encryption_factor(
+        path,
+        encrypted,
+        password,
+        None,
+        server_bind,
+        server_port,
+    )
+}
+
+pub fn init_config_with_default_bearer_token_and_server_and_encryption_factor(
+    path: &Path,
+    encrypted: bool,
+    password: Option<&SecretString>,
+    encryption_factor: Option<u8>,
+    server_bind: &str,
+    server_port: u16,
+) -> Result<String, WriteConfigError> {
     let default_bearer_token = generate_bearer_token()?;
     let config = render_initial_config(&default_bearer_token, server_bind, server_port)?;
     let format = if encrypted {
@@ -152,7 +170,8 @@ pub fn init_config_with_default_bearer_token_and_server(
         ConfigFileFormat::PlaintextToml
     };
 
-    let serialized = serialize_for_format(&format, &config, password)?;
+    let serialized =
+        serialize_for_format_with_factor(&format, &config, password, encryption_factor)?;
     write_config_file_atomic(path, &serialized)?;
     Ok(default_bearer_token)
 }
@@ -300,14 +319,14 @@ fn render_initial_config(
     let clients = get_or_insert_table(document.as_table_mut(), "clients")?;
     let default_client = get_or_insert_table(clients, "default")?;
     apply_bearer_metadata(default_client, &metadata);
-    set_string(default_client, "group", "local-default");
+    set_string(default_client, "group", "default");
 
     let server = get_or_insert_table(document.as_table_mut(), "server")?;
     set_string(server, "bind", server_bind);
     set_integer(server, "port", u64::from(server_port))?;
 
     let groups = get_or_insert_table(document.as_table_mut(), "groups")?;
-    let local_default_group = get_or_insert_table(groups, "local-default")?;
+    let local_default_group = get_or_insert_table(groups, "default")?;
     set_api_access_inline_table(
         local_default_group,
         "api_access",

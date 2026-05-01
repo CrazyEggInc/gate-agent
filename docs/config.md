@@ -46,6 +46,7 @@ Encrypted read expectations:
 
 - passphrase-encrypted `age` reads support standard CLI `age` passphrase files in ASCII-armored or binary form
 - encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
+- encrypted writes use scrypt work factor `10` unless `GATE_AGENT_ENCRYPTION_FACTOR` is set
 
 ## Password sources
 
@@ -192,14 +193,14 @@ Validation expectations:
 `.secrets.example` is the runnable local/dev sample:
 
 ```toml
-[groups.local-default]
+[groups.default]
 api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.default]
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2036-10-08T12:00:00Z"
-group = "local-default"
+group = "default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
@@ -227,7 +228,7 @@ timeout_ms = 5000
 
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
 
-This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.local-default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
+This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
 
 ## CLI-assisted config management
 
@@ -243,11 +244,11 @@ Behavior:
 - creates parent directories as needed
 - writes a minimal config with:
   - explicit `[server]` settings for bind and port
-  - explicit `[groups]` with `[groups.local-default]`
-  - `groups.local-default.api_access = {}`
+  - explicit `[groups]` with `[groups.default]`
+  - `groups.default.api_access = {}`
   - generated `clients.default` bearer token metadata
   - generated `bearer_token_expires_at` about 180 days in the future
-  - `clients.default.group = "local-default"`
+  - `clients.default.group = "default"`
   - empty `[apis]`
 - prints the generated default client bearer token once to stdout
 - persists only the token id, hash, and expiry
@@ -256,7 +257,7 @@ Behavior:
   - `Server port (default: 8787)`
 - when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
 
-Fresh init keeps `groups.local-default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
+Fresh init keeps `groups.default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions
@@ -265,6 +266,7 @@ When encryption is enabled:
 
 - the generated config is encrypted immediately
 - initial password resolution uses `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
+- encryption work factor resolution uses `--encryption-factor`, then `GATE_AGENT_ENCRYPTION_FACTOR`, then default `10`
 - interactive prompting asks twice and requires an exact match
 - encrypted init leaves the keyring empty for that config path and removes any stale cached password
 
@@ -307,6 +309,9 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one `[apis.<name>]` entry by default
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
+- runs the optional interactive questionnaire only when no API-management flags are supplied
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, and `--delete`
+- when any API-management flag is supplied, omitted flags are treated as non-interactive omissions and preserve existing values on update
 - on interactive update, current values become prompt defaults and blank answers keep those defaults
 - on non-interactive update, omitted flags preserve current values instead of clearing them
 - `--basic-auth` selects upstream Basic auth mode
@@ -339,14 +344,18 @@ Behavior:
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
-- when required operator input is missing in an interactive session, prompts for it instead of failing immediately; resource-name prompts are labeled `Existing Apis`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new api` entry
-- selecting the add-new entry prompts for the name afterward
+- when required operator input is missing in an interactive edit/create flow, prompts for it instead of failing immediately; resource-name prompts are labeled `Existing Apis`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new api` entry
+- selecting an existing API opens an action prompt with `edit`, `delete`, and `cancel`; delete-only selectors list existing APIs only and do not include `add new api`
+- selecting the add-new entry in edit/create flows prompts for the name afterward
 - API delete is blocked when any group references that API in `groups.*.api_access` or any inline-access client references it in `clients.*.api_access`
 - API delete never cascades; operators must remove those references first
 
 Interactive questionnaire flow:
 
-- `API name:`
+- `Existing Apis` up/down selector showing existing names as plain `<name>` values and an `add new api` entry
+- delete-only selectors list existing APIs only and omit `add new api`
+- choosing an existing API immediately opens an action prompt with `edit`, `delete`, and `cancel`
+- choosing `add new api` prompts for `API name:` afterward
 - `Base URL (example: https://projects.internal.example/api):`
 - `Headers (example: x-api-key=secret; leave empty for no headers):`
 - optional Basic auth follow-up after headers
@@ -388,8 +397,9 @@ Behavior:
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately
 - `--bearer-token-expires-at` accepts `YYYY-MM-DD` and stores that date as midnight UTC
 - when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future
-- resource-name prompts are labeled `Existing Clients`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new client` entry
-- selecting the add-new entry prompts for the name afterward
+- resource-name prompts are labeled `Existing Clients`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new client` entry in edit/create flows
+- selecting an existing client opens an action prompt with `edit`, `delete`, and `cancel`; delete-only selectors list existing clients only and do not include `add new client`
+- selecting the add-new entry in edit/create flows prompts for the name afterward
 - the group access prompt references existing group slugs as plain `<name>` values and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - referenced APIs are validated at runtime load, not at write time
 - does not verify that referenced APIs already exist in `[apis.*]` at write time; that is enforced by runtime config loading
@@ -446,7 +456,7 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one group entry by default
 - `-d` / `--delete` deletes one existing group entry instead of add-or-update
-- prompts for the name and inline `api_access` when that required input is missing in an interactive session; resource-name prompts are labeled `Existing Groups`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new group` entry; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
+- prompts for the name and inline `api_access` when that required input is missing in an interactive edit/create flow; resource-name prompts are labeled `Existing Groups`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new group` entry in edit/create flows; selecting an existing group opens an action prompt with `edit`, `delete`, and `cancel`; delete-only selectors list existing groups only and do not include `add new group`; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
 - when updating interactively, current values become prompt defaults and blank answers keep those defaults
 - when updating non-interactively, omitting `--api-access` preserves current access values instead of clearing them
 - preserves encrypted-vs-plaintext format on update

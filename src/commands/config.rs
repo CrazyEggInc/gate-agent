@@ -293,6 +293,7 @@ const MAX_ROTATE_TOKEN_ATTEMPTS: usize = 8;
 pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
     init_with_server(
         args,
+        None,
         crate::config::secrets::DEFAULT_SERVER_BIND,
         crate::config::secrets::DEFAULT_SERVER_PORT,
     )
@@ -300,6 +301,7 @@ pub fn init(args: ConfigInitArgs) -> Result<PathBuf, ConfigCommandError> {
 
 pub fn init_with_server(
     args: ConfigInitArgs,
+    encryption_factor: Option<u8>,
     server_bind: &str,
     server_port: u16,
 ) -> Result<PathBuf, ConfigCommandError> {
@@ -321,13 +323,15 @@ pub fn init_with_server(
         None
     };
 
-    let default_bearer_token = write::init_config_with_default_bearer_token_and_server(
-        &path,
-        args.encrypted,
-        password.as_ref(),
-        server_bind,
-        server_port,
-    )?;
+    let default_bearer_token =
+        write::init_config_with_default_bearer_token_and_server_and_encryption_factor(
+            &path,
+            args.encrypted,
+            password.as_ref(),
+            encryption_factor,
+            server_bind,
+            server_port,
+        )?;
 
     if args.encrypted {
         forget_keyring_password_if_present(&path);

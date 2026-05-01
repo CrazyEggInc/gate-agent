@@ -86,6 +86,8 @@ pub struct ConfigInitArgs {
 
     pub encrypted: bool,
 
+    pub encryption_factor: Option<u8>,
+
     pub password: Option<String>,
 
     pub log_level: String,
@@ -99,6 +101,12 @@ struct ConfigInitArgsRaw {
     #[arg(long, help = "Write the new config encrypted at rest")]
     encrypted: bool,
 
+    #[arg(
+        long,
+        help = "Scrypt work factor for encrypted config creation; defaults to 10 unless GATE_AGENT_ENCRYPTION_FACTOR is set"
+    )]
+    encryption_factor: Option<u8>,
+
     #[arg(short = 'p', long, help = "Password for encrypted config files")]
     password: Option<String>,
 
@@ -111,6 +119,7 @@ impl From<ConfigInitArgsRaw> for ConfigInitArgs {
         Self {
             config: value.config,
             encrypted: value.encrypted,
+            encryption_factor: value.encryption_factor,
             password: value.password,
             log_level: value.log_level,
         }

@@ -15,7 +15,7 @@ use gate_agent::config::{
 };
 use tempfile::tempdir;
 
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
+const ENCRYPTION_FACTOR_ENV_VAR: &str = "GATE_AGENT_ENCRYPTION_FACTOR";
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: u16 = 8787;
 
@@ -309,8 +309,8 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     assert!(sample_contents.contains("bearer_token_id = \"default\""));
     assert!(sample_contents.contains("bearer_token_hash"));
     assert!(sample_contents.contains("bearer_token_expires_at = \"2036-10-08T12:00:00Z\""));
-    assert!(sample_contents.contains("group = \"local-default\""));
-    assert!(sample_contents.contains("[groups.local-default]"));
+    assert!(sample_contents.contains("group = \"default\""));
+    assert!(sample_contents.contains("[groups.default]"));
     assert!(
         sample_contents.contains("api_access = { projects = [{ method = \"*\", path = \"*\" }] }")
     );
@@ -569,7 +569,7 @@ api_access = { billing = [{ method = "*", path = "*" }]
 
 #[test]
 fn secrets_config_loads_encrypted_file_with_password() -> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::set(&[(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4"))]);
+    let _env_guard = PasswordEnvGuard::set(&[(ENCRYPTION_FACTOR_ENV_VAR, Some("1"))]);
     let plaintext = r#"
 [clients.default]
 bearer_token_id = "default"
@@ -609,7 +609,7 @@ timeout_ms = 5000
 #[test]
 fn secrets_config_rejects_wrong_password_for_encrypted_file()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _env_guard = PasswordEnvGuard::set(&[(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4"))]);
+    let _env_guard = PasswordEnvGuard::set(&[(ENCRYPTION_FACTOR_ENV_VAR, Some("1"))]);
     let plaintext = r#"
 [clients.default]
 bearer_token_id = "default"
@@ -643,7 +643,7 @@ fn secrets_config_loads_encrypted_file_with_keyring_password()
 -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = PasswordEnvGuard::set(&[
         (PASSWORD_ENV_VAR, None),
-        (TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4")),
+        (ENCRYPTION_FACTOR_ENV_VAR, Some("1")),
     ]);
     let plaintext = r#"
 [clients.default]
@@ -682,7 +682,7 @@ fn secrets_config_rejects_wrong_keyring_password_for_encrypted_file()
 -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = PasswordEnvGuard::set(&[
         (PASSWORD_ENV_VAR, None),
-        (TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4")),
+        (ENCRYPTION_FACTOR_ENV_VAR, Some("1")),
     ]);
     let plaintext = r#"
 [clients.default]
@@ -719,7 +719,7 @@ fn secrets_config_falls_through_to_prompt_after_keyring_read_failure()
         (PASSWORD_ENV_VAR, None),
         ("GATE_AGENT_TEST_PROMPT_PASSWORD", None),
         ("GATE_AGENT_TEST_PROMPT_CONFIRM", None),
-        (TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4")),
+        (ENCRYPTION_FACTOR_ENV_VAR, Some("1")),
     ]);
     let plaintext = r#"
 [clients.default]
@@ -766,7 +766,7 @@ fn secrets_config_backfills_keyring_after_successful_prompt_decrypt()
         (PASSWORD_ENV_VAR, None),
         ("GATE_AGENT_TEST_PROMPT_PASSWORD", None),
         ("GATE_AGENT_TEST_PROMPT_CONFIRM", None),
-        (TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4")),
+        (ENCRYPTION_FACTOR_ENV_VAR, Some("1")),
     ]);
     let plaintext = r#"
 [clients.default]
@@ -806,7 +806,7 @@ fn secrets_config_removes_stale_keyring_password_after_decrypt_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let _env_guard = PasswordEnvGuard::set(&[
         (PASSWORD_ENV_VAR, None),
-        (TEST_SCRYPT_WORK_FACTOR_ENV_VAR, Some("4")),
+        (ENCRYPTION_FACTOR_ENV_VAR, Some("1")),
     ]);
     let plaintext = r#"
 [clients.default]

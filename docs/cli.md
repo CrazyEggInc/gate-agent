@@ -44,6 +44,7 @@ Encrypted read expectations:
 
 - passphrase-encrypted `age` config reads support standard CLI `age` passphrase files in ASCII-armored or binary form
 - encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
+- encrypted writes use scrypt work factor `10` unless `GATE_AGENT_ENCRYPTION_FACTOR` is set
 - wrong-password failures stay concise
 - unsupported `age` modes, malformed or corrupted encrypted files, and excessive scrypt work factors return specific operator-facing errors
 
@@ -94,6 +95,7 @@ Accepted flags:
 
 - `--config <path>`
 - `--encrypted`
+- `--encryption-factor <0-30>`
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 
@@ -116,6 +118,7 @@ Behavior:
 - persists only `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - when encryption is enabled, writes encrypted config and confirms interactive passwords by double entry
 - when encryption is enabled, resolves the initial password from `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
+- when encryption is enabled, `--encryption-factor` overrides `GATE_AGENT_ENCRYPTION_FACTOR`; if neither is set, the scrypt work factor defaults to `10`
 - when encrypted init succeeds, leaves the system keyring empty for the selected config path and removes any stale cached password for that path
 - later successful encrypted reads may also backfill the password for that config path, and later encrypted reads may reuse cached passwords through the standard lookup order
 - explicit args keep the command non-interactive for those inputs
@@ -182,9 +185,12 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
-- explicitly supplied `config api` inputs such as `--name`, `--base-url`, and any `--header` flags skip their own prompts
-- omitted header input can still prompt in interactive `config api` sessions
-- optional Basic-auth setup can still prompt in interactive `config api` sessions even when `--basic-auth` is omitted
+- `config api` runs the optional interactive questionnaire only when no API-management flags are supplied
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, `--delete`, and `--basic-auth`
+- when any API-management flag is supplied, the interactive questionnaire is disabled and omitted flags are treated as non-interactive omissions
+- when using any API-management flag to create a new API, callers must supply `--name`, `--base-url`, and any other required values; partial create attempts fail with missing-field errors instead of prompting
+- in non-interactive update mode, omitted fields preserve existing values
+- `--basic-auth` selects upstream Basic auth mode and still prompts for credentials because the flag explicitly requests that auth flow
 - `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
 - `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
 - each `--header` value must use `<name>=<value>` format, for example `x-api-key=secret`
@@ -209,8 +215,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts are labeled `Existing Apis`, list existing API names as `<name> (edit)` for up/down selection, and include an `add new api` entry; selecting an existing API updates it, selecting `add new api` asks for the new name
-- selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Apis`, list existing API names as plain `<name>` values for up/down selection, and include an `add new api` entry in edit/create flows; delete-only selectors list existing APIs only and do not include `add new api`; selecting an existing API opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new api` asks for the new name
+- selecting the add-new entry in edit/create flows prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for them in a single-line format with minimal wording
 - in non-interactive update mode, omitted flags preserve existing values instead of clearing them
@@ -229,7 +235,7 @@ Behavior:
 - any other Basic auth password text stores that text as `basic_auth.password`
 - existing Basic auth password prompt includes `blank clears existing password; enter password to keep or change`
 - new Basic auth password prompt includes `blank stores empty password; enter 'none' for username-only basic auth`
-- explicit `config api` args skip prompts only for their own inputs; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
+- explicit API-management args skip the optional questionnaire; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
 
 ### `config group`
 
@@ -253,8 +259,8 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts are labeled `Existing Groups`, list existing group names as `<name> (edit)` for up/down selection, and include an `add new group` entry; selecting an existing group updates it, selecting `add new group` asks for the new name
-- selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Groups`, list existing group names as plain `<name>` values for up/down selection, and include an `add new group` entry in edit/create flows; delete-only selectors list existing groups only and do not include `add new group`; selecting an existing group opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new group` asks for the new name
+- selecting the add-new entry in edit/create flows prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
 - each `--api-access` value accepts one API slug followed by one or more `method:path` route rules, for example `projects:get:*`
@@ -288,8 +294,8 @@ Rules and behavior:
 - one flag may contain comma-separated route rules for one API, such as `--api-access projects:get:*,post:/projects`; use another flag for another API, such as `--api-access billing:*:*`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
-- interactive name prompts are labeled `Existing Clients`, list existing client names as `<name> (edit)` for up/down selection, and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name
-- selecting the add-new entry prompts for the name afterward
+- interactive name prompts are labeled `Existing Clients`, list existing client names as plain `<name>` values for up/down selection, and include an `add new client` entry in edit/create flows; delete-only selectors list existing clients only and do not include `add new client`; selecting an existing client opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new client` asks for the new name
+- selecting the add-new entry in edit/create flows prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - when required fields are omitted in an interactive create flow, the command prompts for them; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
 - in the interactive client flow, the CLI asks for `Access mode` before prompting for `Group name`

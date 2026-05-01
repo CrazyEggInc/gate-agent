@@ -280,7 +280,7 @@ async fn proxy_route_forwards_basic_auth_written_by_config_api()
         config: Some(config_path.clone()),
         password: None,
         log_level: "debug".to_owned(),
-        name: "local-default".to_owned(),
+        name: "default".to_owned(),
         delete: false,
         api_access: vec!["billing:*:*".to_owned()],
     })?;

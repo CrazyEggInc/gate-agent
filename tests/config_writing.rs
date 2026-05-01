@@ -7,35 +7,6 @@ use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule};
 use gate_agent::config::write::{self, ApiUpsert, ClientUpsert, GroupUpsert};
 use secrecy::SecretString;
 
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
 #[test]
 fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -77,14 +48,14 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 
     assert_eq!(
         find_string_value(default_client, "group").as_deref(),
-        Some("local-default")
+        Some("default")
     );
     assert_eq!(find_inline_table_value(default_client, "api_access"), None);
     assert!(!default_client.contains("api_access ="));
     let bearer_token_id_index = default_client.find("bearer_token_id = ").unwrap();
     let bearer_token_hash_index = default_client.find("bearer_token_hash = ").unwrap();
     let bearer_token_expires_at_index = default_client.find("bearer_token_expires_at = ").unwrap();
-    let group_index = default_client.find("group = \"local-default\"").unwrap();
+    let group_index = default_client.find("group = \"default\"").unwrap();
     assert!(bearer_token_id_index < bearer_token_hash_index);
     assert!(bearer_token_hash_index < bearer_token_expires_at_index);
     assert!(bearer_token_expires_at_index < group_index);
@@ -99,7 +70,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     let groups = section_body(&contents, "groups").unwrap();
     assert!(groups.trim().is_empty());
 
-    let local_default_group = section_body(&contents, "groups.local-default").unwrap();
+    let local_default_group = section_body(&contents, "groups.default").unwrap();
     assert_eq!(
         find_inline_table_value(local_default_group, "api_access"),
         Some(vec![])
@@ -116,7 +87,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
             .and_then(|value| value.get("default"))
             .and_then(|value| value.get("group"))
             .and_then(toml::Value::as_str),
-        Some("local-default")
+        Some("default")
     );
     assert!(
         parsed
@@ -128,7 +99,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     assert_eq!(
         parsed
             .get("groups")
-            .and_then(|value| value.get("local-default"))
+            .and_then(|value| value.get("default"))
             .and_then(|value| value.get("api_access"))
             .and_then(toml::Value::as_table)
             .map(toml::value::Table::len),
@@ -138,7 +109,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     let default_client_index = contents.find("[clients.default]\n").unwrap();
     let server_index = contents.find("[server]\n").unwrap();
     let groups_index = contents.find("[groups]\n").unwrap();
-    let local_default_group_index = contents.find("[groups.local-default]\n").unwrap();
+    let local_default_group_index = contents.find("[groups.default]\n").unwrap();
     let apis_index = contents.find("[apis]\n").unwrap();
     assert!(default_client_index < server_index);
     assert!(server_index < groups_index);
@@ -181,9 +152,15 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("nested/config/gate-agent.secrets");
     let password = SecretString::from("super-secret-passphrase".to_owned());
-    let _env_guard = EnvVarGuard::set(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
 
-    write::init_config(&config_path, true, Some(&password))?;
+    write::init_config_with_default_bearer_token_and_server_and_encryption_factor(
+        &config_path,
+        true,
+        Some(&password),
+        Some(1),
+        "127.0.0.1",
+        8787,
+    )?;
 
     let raw_contents = fs::read_to_string(&config_path)?;
     assert!(raw_contents.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
@@ -193,9 +170,9 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let loaded = write::load_display_text(&config_path, Some(&password))?;
     assert!(loaded.toml.contains("[clients.default]"));
     assert!(loaded.toml.contains("[server]"));
-    assert!(loaded.toml.contains("group = \"local-default\""));
+    assert!(loaded.toml.contains("group = \"default\""));
     assert!(loaded.toml.contains("[groups]"));
-    assert!(loaded.toml.contains("[groups.local-default]"));
+    assert!(loaded.toml.contains("[groups.default]"));
     assert!(loaded.toml.contains("api_access = {}"));
     assert!(loaded.toml.contains("[apis]"));
     assert!(loaded.toml.contains("bind = \"127.0.0.1\""));
@@ -208,16 +185,47 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let default_client = section_body(&loaded.toml, "clients.default").unwrap();
     assert_eq!(
         find_string_value(default_client, "group").as_deref(),
-        Some("local-default")
+        Some("default")
     );
     assert_eq!(find_inline_table_value(default_client, "api_access"), None);
     assert!(!default_client.contains("api_access ="));
 
-    let local_default_group = section_body(&loaded.toml, "groups.local-default").unwrap();
+    let local_default_group = section_body(&loaded.toml, "groups.default").unwrap();
     assert_eq!(
         find_inline_table_value(local_default_group, "api_access"),
         Some(vec![])
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_init_encryption_factor_flag_overrides_env_var() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("super-secret-passphrase".to_owned());
+
+    let output = Command::cargo_bin("gate-agent")?
+        .env("GATE_AGENT_ENCRYPTION_FACTOR", "31")
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--encrypted",
+            "--password",
+            "super-secret-passphrase",
+            "--encryption-factor",
+            "1",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+    let loaded = write::load_display_text(&config_path, Some(&password))?;
+
+    assert!(loaded.toml.contains("[clients.default]"));
+    assert!(loaded.toml.contains("[server]"));
 
     Ok(())
 }

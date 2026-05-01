@@ -24,7 +24,7 @@ const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
+const ENCRYPTION_FACTOR_ENV_VAR: &str = "GATE_AGENT_ENCRYPTION_FACTOR";
 
 const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
@@ -89,7 +89,7 @@ impl EnvGuard {
         std::env::set_current_dir(current_dir)?;
         unsafe {
             std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
-            std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
+            std::env::set_var(ENCRYPTION_FACTOR_ENV_VAR, "1");
         }
 
         Ok(Self {
@@ -126,7 +126,7 @@ fn tracked_env_vars() -> Vec<&'static str> {
         TEST_PROMPT_INPUTS_ENV_VAR,
         TEST_PROMPT_PASSWORD_ENV_VAR,
         DISABLE_INTERACTIVE_ENV_VAR,
-        TEST_SCRYPT_WORK_FACTOR_ENV_VAR,
+        ENCRYPTION_FACTOR_ENV_VAR,
     ]
 }
 
@@ -153,7 +153,7 @@ fn write_binary_age_config(
     }
 
     let mut recipient = age::scrypt::Recipient::new(password.clone());
-    recipient.set_work_factor(4);
+    recipient.set_work_factor(1);
     let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as _))?;
     let mut output = Vec::new();
     let mut writer = encryptor.wrap_output(&mut output)?;
@@ -460,16 +460,16 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
     let default_client = table_at(&config, &["clients", "default"]);
     assert_eq!(
         default_client.get("group").and_then(Value::as_str),
-        Some("local-default")
+        Some("default")
     );
     assert!(default_client.get("api_access").is_none());
     assert!(config.get("server").and_then(Value::as_table).is_some());
     assert!(config.get("apis").and_then(Value::as_table).is_some());
-    let default_group = table_at(&config, &["groups", "local-default"]);
+    let default_group = table_at(&config, &["groups", "default"]);
     let default_group_api_access = default_group
         .get("api_access")
         .and_then(Value::as_table)
-        .expect("groups.local-default.api_access should be table");
+        .expect("groups.default.api_access should be table");
     assert!(default_group_api_access.is_empty());
     assert_eq!(string_at(&config, &["server", "bind"]), "127.0.0.1");
     assert_eq!(
@@ -554,12 +554,12 @@ fn config_client_tty_group_reference_selector_shows_plain_existing_groups()
     );
     assert!(
         !stderr.contains("Group name:")
-            && stderr.contains("local-default")
+            && stderr.contains("default")
             && stderr.contains("partner-readonly")
             && stderr.contains("add new group"),
         "{stderr}"
     );
-    assert!(!stderr.contains("local-default (edit)"), "{stderr}");
+    assert!(!stderr.contains("default (edit)"), "{stderr}");
     assert!(!stderr.contains("partner-readonly (edit)"), "{stderr}");
 
     Ok(())
@@ -606,18 +606,24 @@ fn config_group_tty_manage_selector_keeps_edit_labels_for_existing_groups()
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
         ],
-        "\n\n",
+        "\n\n\n",
     )?;
 
     assert!(output.status.success(), "{output:?}");
 
     let stderr = String::from_utf8(output.stderr)?.replace("\r", "");
     assert!(
-        stderr.contains("local-default (edit)")
-            && stderr.contains("partner-readonly (edit)")
+        stderr.contains("default")
+            && stderr.contains("partner-readonly")
             && stderr.contains("add new group"),
         "{stderr}"
     );
+    assert!(stderr.contains("Action for group 'default'"), "{stderr}");
+    assert!(stderr.contains("edit"), "{stderr}");
+    assert!(stderr.contains("delete"), "{stderr}");
+    assert!(stderr.contains("cancel"), "{stderr}");
+    assert!(!stderr.contains("default (edit)"), "{stderr}");
+    assert!(!stderr.contains("partner-readonly (edit)"), "{stderr}");
 
     Ok(())
 }
@@ -2322,7 +2328,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
-                timeout_ms: Some(5_000),
+                timeout_ms: None,
             }),
         },
     ))?;
@@ -2381,7 +2387,7 @@ fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
-                timeout_ms: Some(5_000),
+                timeout_ms: None,
             }),
         },
     ))?;
@@ -2671,7 +2677,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
         timeout_ms: Some(5_000),
     })?;
 
-    set_test_prompt_inputs(&["", "none", ""])?;
+    set_test_prompt_inputs(&["", "", "", "none", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -2680,7 +2686,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
-                name: Some("projects".to_owned()),
+                name: None,
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
@@ -4825,10 +4831,7 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
         group_error.to_string(),
         "config group requires --name in non-interactive sessions"
     );
-    assert_eq!(
-        api_error.to_string(),
-        "config api requires --name in non-interactive sessions"
-    );
+    assert_eq!(api_error.to_string(), "Missing required fields: --name");
 
     Ok(())
 }
