@@ -823,6 +823,186 @@ timeout_ms = 5000
 }
 
 #[test]
+fn config_command_dispatch_interactive_api_action_deletes_selected_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+timeout_ms = 5000
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["projects", "delete", "y"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            base_url: None,
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    assert!(
+        written
+            .get("apis")
+            .and_then(|value| value.get("projects"))
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_interactive_group_action_deletes_selected_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+timeout_ms = 5000
+
+[groups.readonly]
+api_access = { projects = [{ method = "get", path = "*" }] }
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["readonly", "delete", "y"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Group(ConfigGroupArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            api_access: vec![],
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    assert!(
+        written
+            .get("groups")
+            .and_then(|value| value.get("readonly"))
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_interactive_client_action_deletes_selected_entry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[apis.projects]
+base_url = "https://projects.internal.example/api"
+timeout_ms = 5000
+
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+
+[clients.mobile-app]
+bearer_token_id = "mobile-app"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = { projects = [{ method = "get", path = "*" }] }
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["mobile-app", "delete", "y"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Client(ConfigClientArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            bearer_token_expires_at: None,
+            group: None,
+            api_access: vec![],
+            command: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    assert!(
+        written
+            .get("clients")
+            .and_then(|value| value.get("mobile-app"))
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
@@ -859,7 +1039,7 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "", "none", "n"],
+        &["", "", "", "none", "n"],
         &[
             "config",
             "api",
@@ -1041,7 +1221,7 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "", "", "n"],
+        &["", "", "", "", "n"],
         &[
             "config",
             "api",
@@ -1165,7 +1345,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "", "y", "billing-user", "billing-pass"])?,
+            serde_json::to_string(&["", "", "", "", "y", "billing-user", "billing-pass"])?,
         );
     }
 
@@ -1324,7 +1504,7 @@ timeout_ms = 5000
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "", "", "y", "", ""],
+        &["", "", "", "", "y", "", ""],
         &[
             "config",
             "api",
@@ -1394,7 +1574,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "", "n"])?,
+            serde_json::to_string(&["", "", "", "", "n"])?,
         );
     }
 
@@ -1465,7 +1645,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "authorization=Bearer rotated-token", "n"])?,
+            serde_json::to_string(&["", "", "", "authorization=Bearer rotated-token", "n"])?,
         );
     }
 

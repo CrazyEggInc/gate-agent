@@ -342,7 +342,8 @@ Behavior:
 - successful decrypts from flag, env, or prompt backfill the keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
 - explicit args keep the command non-interactive
-- when required operator input is missing in an interactive session, prompts for it instead of failing immediately; resource-name prompts are labeled `Existing Apis`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new api` entry
+- when required operator input is missing in an interactive session, prompts for it instead of failing immediately; resource-name prompts are labeled `Existing Apis`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new api` entry
+- selecting an existing API opens an action prompt with `edit`, `delete`, and `cancel`
 - selecting the add-new entry prompts for the name afterward
 - API delete is blocked when any group references that API in `groups.*.api_access` or any inline-access client references it in `clients.*.api_access`
 - API delete never cascades; operators must remove those references first
@@ -391,7 +392,8 @@ Behavior:
 - when required operator input is missing in an interactive session, prompts for it instead of failing immediately
 - `--bearer-token-expires-at` accepts `YYYY-MM-DD` and stores that date as midnight UTC
 - when adding a new client interactively, `Bearer token expiration` defaults to a date about six months in the future
-- resource-name prompts are labeled `Existing Clients`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new client` entry
+- resource-name prompts are labeled `Existing Clients`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new client` entry
+- selecting an existing client opens an action prompt with `edit`, `delete`, and `cancel`
 - selecting the add-new entry prompts for the name afterward
 - the group access prompt references existing group slugs as plain `<name>` values and includes an `add new group` entry; choosing `add new group` asks for the group name and group `api_access` before writing the client reference
 - referenced APIs are validated at runtime load, not at write time
@@ -449,7 +451,7 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one group entry by default
 - `-d` / `--delete` deletes one existing group entry instead of add-or-update
-- prompts for the name and inline `api_access` when that required input is missing in an interactive session; resource-name prompts are labeled `Existing Groups`, use an up/down selector with existing names shown as `<name> (edit)`, and include an `add new group` entry; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
+- prompts for the name and inline `api_access` when that required input is missing in an interactive session; resource-name prompts are labeled `Existing Groups`, use an up/down selector with existing names shown as plain `<name>` values, and include an `add new group` entry; selecting an existing group opens an action prompt with `edit`, `delete`, and `cancel`; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
 - when updating interactively, current values become prompt defaults and blank answers keep those defaults
 - when updating non-interactively, omitting `--api-access` preserves current access values instead of clearing them
 - preserves encrypted-vs-plaintext format on update

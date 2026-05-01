@@ -60,6 +60,17 @@ enum ResourceSelectionIntent {
     Reference { existing_only: bool },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagedResourceAction {
+    Edit,
+    Delete,
+}
+
+struct ManagedResourceSelection {
+    name: String,
+    action: ManagedResourceAction,
+}
+
 impl ResourceSelectionIntent {
     fn existing_only(self) -> bool {
         match self {
@@ -69,7 +80,7 @@ impl ResourceSelectionIntent {
 
     fn label_for_existing(self, name: &str) -> String {
         match self {
-            Self::Manage { .. } => format!("{name} (edit)"),
+            Self::Manage { .. } => name.to_owned(),
             Self::Reference { .. } => name.to_owned(),
         }
     }
@@ -79,10 +90,7 @@ impl ResourceSelectionIntent {
     }
 
     fn selected_name(self, selected: &str) -> &str {
-        match self {
-            Self::Manage { .. } => selected.strip_suffix(" (edit)").unwrap_or(selected),
-            Self::Reference { .. } => selected,
-        }
+        selected
     }
 }
 
@@ -357,27 +365,34 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
     let use_interactive_questionnaire = should_prompt_for_config_api_args(&args);
     let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let name = if use_interactive_questionnaire {
-        resolve_resource_name(
+    let selection = if use_interactive_questionnaire {
+        resolve_managed_resource_selection(
             args.name,
             config::ResourceKind::Api,
             &names,
-            ResourceSelectionIntent::Manage {
-                existing_only: args.delete,
-            },
+            args.delete,
             None,
             "API name",
             "config api requires --name in non-interactive sessions",
         )?
     } else {
-        args.name
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                CommandError::new("config api requires --name in non-interactive sessions")
-            })?
+        ManagedResourceSelection {
+            name: args
+                .name
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    CommandError::new("config api requires --name in non-interactive sessions")
+                })?,
+            action: if args.delete {
+                ManagedResourceAction::Delete
+            } else {
+                ManagedResourceAction::Edit
+            },
+        }
     };
+    let name = selection.name;
 
-    if args.delete {
+    if selection.action == ManagedResourceAction::Delete {
         confirm_delete(config::ResourceKind::Api, &name)?;
         return Ok(config::ConfigApiArgs {
             config: args.config,
@@ -619,19 +634,18 @@ fn resolve_config_group_args(
 ) -> Result<config::ConfigGroupArgs, CommandError> {
     let names = config::list_group_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let name = resolve_resource_name(
+    let selection = resolve_managed_resource_selection(
         args.name,
         config::ResourceKind::Group,
         &names,
-        ResourceSelectionIntent::Manage {
-            existing_only: args.delete,
-        },
+        args.delete,
         None,
         "Group name",
         "config group requires --name in non-interactive sessions",
     )?;
+    let name = selection.name;
 
-    if args.delete {
+    if selection.action == ManagedResourceAction::Delete {
         confirm_delete(config::ResourceKind::Group, &name)?;
         return Ok(config::ConfigGroupArgs {
             config: args.config,
@@ -677,19 +691,18 @@ fn resolve_config_client_args(
 ) -> Result<config::ConfigClientArgs, CommandError> {
     let names = config::list_client_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let name = resolve_resource_name(
+    let selection = resolve_managed_resource_selection(
         args.name,
         config::ResourceKind::Client,
         &names,
-        ResourceSelectionIntent::Manage {
-            existing_only: args.delete,
-        },
+        args.delete,
         None,
         "Client name",
         "config client requires --name in non-interactive sessions",
     )?;
+    let name = selection.name;
 
-    if args.delete {
+    if selection.action == ManagedResourceAction::Delete {
         confirm_delete(config::ResourceKind::Client, &name)?;
         return Ok(config::ConfigClientArgs {
             config: args.config,
@@ -947,6 +960,75 @@ fn resolve_resource_name(
     }
 
     Ok(intent.selected_name(&selected).to_owned())
+}
+
+fn resolve_managed_resource_selection(
+    value: Option<String>,
+    resource_kind: config::ResourceKind,
+    names: &[String],
+    existing_only: bool,
+    default: Option<&str>,
+    label: &str,
+    non_interactive_message: &str,
+) -> Result<ManagedResourceSelection, CommandError> {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        return Ok(ManagedResourceSelection {
+            name: value,
+            action: if existing_only {
+                ManagedResourceAction::Delete
+            } else {
+                ManagedResourceAction::Edit
+            },
+        });
+    }
+
+    let name = resolve_resource_name(
+        None,
+        resource_kind,
+        names,
+        ResourceSelectionIntent::Manage { existing_only },
+        default,
+        label,
+        non_interactive_message,
+    )?;
+
+    if existing_only || !names.iter().any(|existing| existing == &name) {
+        return Ok(ManagedResourceSelection {
+            name,
+            action: if existing_only {
+                ManagedResourceAction::Delete
+            } else {
+                ManagedResourceAction::Edit
+            },
+        });
+    }
+
+    let action = prompt_managed_resource_action(resource_kind, &name, non_interactive_message)?;
+    Ok(ManagedResourceSelection { name, action })
+}
+
+fn prompt_managed_resource_action(
+    resource_kind: config::ResourceKind,
+    name: &str,
+    non_interactive_message: &str,
+) -> Result<ManagedResourceAction, CommandError> {
+    let actions = vec!["edit".to_owned(), "delete".to_owned(), "cancel".to_owned()];
+    let selected = config::prompt_select_with_prompt(
+        &format!("Action for {} '{}'", resource_kind.label(), name),
+        &actions,
+        Some("edit"),
+        non_interactive_message,
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?;
+
+    match selected.as_str() {
+        "edit" => Ok(ManagedResourceAction::Edit),
+        "delete" => Ok(ManagedResourceAction::Delete),
+        "cancel" => Err(CommandError::new("selection cancelled")),
+        value => Err(CommandError::new(format!(
+            "invalid action '{value}'; expected edit, delete, or cancel"
+        ))),
+    }
 }
 
 fn prompt_required(

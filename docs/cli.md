@@ -210,7 +210,7 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts are labeled `Existing Apis`, list existing API names as `<name> (edit)` for up/down selection, and include an `add new api` entry; selecting an existing API updates it, selecting `add new api` asks for the new name
+- interactive name prompts are labeled `Existing Apis`, list existing API names as plain `<name>` values for up/down selection, and include an `add new api` entry; selecting an existing API opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new api` asks for the new name
 - selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for them in a single-line format with minimal wording
@@ -254,7 +254,7 @@ Behavior:
 - when updating an encrypted config, password lookup follows flag, env var, keyring, then prompt
 - successful decrypts from flag, env var, or prompt backfill the system keyring for that config path
 - stale cached keyring passwords are removed automatically when decrypt fails with an invalid keyring password
-- interactive name prompts are labeled `Existing Groups`, list existing group names as `<name> (edit)` for up/down selection, and include an `add new group` entry; selecting an existing group updates it, selecting `add new group` asks for the new name
+- interactive name prompts are labeled `Existing Groups`, list existing group names as plain `<name>` values for up/down selection, and include an `add new group` entry; selecting an existing group opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new group` asks for the new name
 - selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - if required fields are omitted in an interactive create flow, the command prompts for the group name and access map in a single-line format with minimal wording
@@ -289,7 +289,7 @@ Rules and behavior:
 - one flag may contain comma-separated route rules for one API, such as `--api-access projects:get:*,post:/projects`; use another flag for another API, such as `--api-access billing:*:*`
 - adds or updates one client entry by name
 - `-d` / `--delete` deletes one existing client entry instead of add-or-update
-- interactive name prompts are labeled `Existing Clients`, list existing client names as `<name> (edit)` for up/down selection, and include an `add new client` entry; selecting an existing client updates it, selecting `add new client` asks for the new name
+- interactive name prompts are labeled `Existing Clients`, list existing client names as plain `<name>` values for up/down selection, and include an `add new client` entry; selecting an existing client opens an action prompt with `edit`, `delete`, and `cancel`; selecting `add new client` asks for the new name
 - selecting the add-new entry prompts for the name afterward
 - when updating interactively, current values become prompt defaults; blank answers keep those defaults
 - when required fields are omitted in an interactive create flow, the command prompts for them; API access prompts are labeled `Api access` and list existing APIs as `<api> (edit permissions)` plus `Done`, then each API's rule screen offers `Add new rule`, existing rules as delete actions, and `Go back`
