@@ -190,7 +190,7 @@ Validation expectations:
 
 ## Sample config
 
-`.secrets.example` is the runnable local/dev sample:
+`.secrets.dev` is the runnable local/dev sample:
 
 ```toml
 [groups.default]
@@ -228,7 +228,7 @@ timeout_ms = 5000
 
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
 
-This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
+This sample is intentionally distinct from fresh `config init` output. `.secrets.dev` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
 
 ## CLI-assisted config management
 
@@ -257,7 +257,7 @@ Behavior:
   - `Server port (default: 8787)`
 - when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
 
-Fresh init keeps `groups.default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
+Fresh init keeps `groups.default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.dev`, which is committed with populated sample API definitions and matching sample route access.
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions

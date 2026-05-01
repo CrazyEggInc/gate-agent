@@ -1,0 +1,11 @@
+[apis.datadog]
+base_url = "https://api.datadoghq.com"
+docs_url = "https://docs.datadoghq.com/api/latest"
+headers = { dd-api-key = "<api-key>", dd-application-key = "<application-key>" }
+timeout_ms = 5000
+
+[apis.honeybadger]
+base_url = "https://app.honeybadger.io"
+docs_url = "https://docs.honeybadger.io/api/getting-started/"
+timeout_ms = 5000
+basic_auth = { username = "<api-key>" }
