@@ -504,6 +504,7 @@ fn should_prompt_for_config_api_args(args: &ConfigApiArgs) -> bool {
     !args.delete
         && args.name.is_none()
         && args.base_url.is_none()
+        && !args.basic_auth
         && args.header.is_empty()
         && args.timeout_ms.is_none()
 }

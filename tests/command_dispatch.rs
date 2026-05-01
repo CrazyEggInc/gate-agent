@@ -861,6 +861,46 @@ fn config_command_dispatch_api_partial_flags_report_missing_name()
 }
 
 #[test]
+fn config_command_dispatch_basic_auth_flag_reports_missing_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[] as &[&str])?,
+        );
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: None,
+            base_url: None,
+            basic_auth: true,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))
+    .expect_err("basic auth flag should report missing name");
+
+    assert_eq!(error.to_string(), "Missing required fields: --name");
+
+    Ok(())
+}
+
+#[test]
 fn config_command_dispatch_api_partial_flags_report_missing_base_url_on_create()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()

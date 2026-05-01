@@ -352,7 +352,10 @@ Behavior:
 
 Interactive questionnaire flow:
 
-- `API name:`
+- `Existing Apis` up/down selector showing existing names as plain `<name>` values and an `add new api` entry
+- delete-only selectors list existing APIs only and omit `add new api`
+- choosing an existing API immediately opens an action prompt with `edit`, `delete`, and `cancel`
+- choosing `add new api` prompts for `API name:` afterward
 - `Base URL (example: https://projects.internal.example/api):`
 - `Headers (example: x-api-key=secret; leave empty for no headers):`
 - optional Basic auth follow-up after headers

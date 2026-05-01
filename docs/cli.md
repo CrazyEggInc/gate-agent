@@ -186,8 +186,10 @@ Behavior:
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - `config api` runs the optional interactive questionnaire only when no API-management flags are supplied
-- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, and `--delete`
-- when any API-management flag is supplied, omitted flags are treated as non-interactive omissions and preserve existing values on update
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, `--delete`, and `--basic-auth`
+- when any API-management flag is supplied, the interactive questionnaire is disabled and omitted flags are treated as non-interactive omissions
+- when using any API-management flag to create a new API, callers must supply `--name`, `--base-url`, and any other required values; partial create attempts fail with missing-field errors instead of prompting
+- in non-interactive update mode, omitted fields preserve existing values
 - `--basic-auth` selects upstream Basic auth mode and still prompts for credentials because the flag explicitly requests that auth flow
 - `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
 - `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
