@@ -8,7 +8,7 @@
 - upstream credentials stay in server-side config
 - bearer tokens are simple to issue and rotate
 - config is file-based, explicit, and easy to inspect
-- agentic coding tools can call these apis without knowing the actual remote api credentials
+- agentic coding tools can call these APIs without knowing the actual remote API credentials
 
 ## Install
 
@@ -44,7 +44,7 @@ gate-agent config api \
 
 gate-agent config group \
   --name default \
-  --api-access cats:get:*
+  --api-access "cats:get:*"
 
 gate-agent start
 
@@ -55,7 +55,7 @@ curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
 
 ## MCP client setup
 
-Use one of these config shapes.
+`gate-agent` also works as an MCP server for your preferred agentic tool. You can configure it as either a remote or local MCP server.
 
 ### MCP Remote Config (recommended)
 
@@ -89,24 +89,19 @@ Less safe: `GATE_AGENT_PASSWORD` must be hardcoded in the client config.
 }
 ```
 
-## Development
+## Deployment modes
 
-Use Cargo only for repo-local development:
+You can use `gate-agent` as a local tool, or deploy it to a remote server to make it available to others. In that scenario, set up a separate client token for each user. The example [Dockerfile](examples/docker/Dockerfile) installs `gate-agent` and starts it with [start.sh](examples/docker/start.sh). Update the script for your own environment. For example, you could make it fetch configuration from your preferred secrets service.
 
-```sh
-cargo run -- start --config=.secrets --log-level=debug
-cargo test
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-```
+## Example API configurations
 
-### Example with a test server
+See [examples/apis.toml](examples/apis.toml) for sample upstream API configurations.
 
-Uses the committed sample config and dummy api server.
+## Development example with a test server
 
 ```sh
 # setup local files and dummy upstream
-cp .secrets.example .secrets
+cp .secrets.dev .secrets
 docker compose up -d dummy-upstream
 
 # smoke test the dummy upstream
@@ -114,24 +109,19 @@ curl -i http://127.0.0.1:18081/healthz
 curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
 
+# use cargo only for local development
+cargo run -- start --config=.secrets --log-level=debug
+cargo test
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+
 # start gate-agent
 cargo run -- start --config=.secrets --log-level=info
 
-# call gate-agent with the sample local bearer token and broad local projects access
+# call example upstream api
 export GATE_AGENT_TOKEN='default.s3cr3t'
 curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
-
-# initialize MCP over HTTP
-curl -i http://127.0.0.1:8787/mcp \
-  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {}
-  }'
 
 # list MCP tools
 curl -sS http://127.0.0.1:8787/mcp \
@@ -177,9 +167,7 @@ curl -sS http://127.0.0.1:8787/mcp \
   }' | jq
 ```
 
-If you create a fresh config with `gate-agent config init`, the command prints the default client bearer token once. Save it then; the config file only stores the token id, hash, and expiry.
-
-See `docs/local-testing.md` for the full local workflow, `docs/mcp.md` for the MCP contract, and `docs/pending.md` for intentionally deferred work.
+See `docs/local-testing.md` for the full local workflow.
 
 ## Release process
 

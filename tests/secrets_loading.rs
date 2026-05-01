@@ -293,8 +293,8 @@ timeout_ms = 5000
 }
 
 #[test]
-fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::Error>> {
-    let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".secrets.example");
+fn secrets_dev_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".secrets.dev");
     let sample_contents = std::fs::read_to_string(&sample_path)?;
     let config = SecretsConfig::load_from_file(&sample_path)?;
     let client = config

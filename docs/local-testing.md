@@ -19,7 +19,7 @@ The local environment consists of:
 
 - the `gate-agent` process started with `cargo run -- start`
 - the `dummy-upstream` service started with `docker compose`
-- a local config file derived from `.secrets.example` or created with `config init`
+- a local config file derived from `.secrets.dev` or created with `config init`
 
 ## Dummy upstream
 
@@ -33,7 +33,7 @@ Expected properties:
 
 ## Local config
 
-`.secrets.example` is ready-to-run local sample config.
+`.secrets.dev` is ready-to-run local sample config.
 
 Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "default"`, `groups.default` grants `api_access = { projects = [{ method = "get", path = "*" }] }`, and `projects` points at dummy upstream with `headers = { authorization = "Bearer local-upstream-token" }`. If you create fresh config instead, prefer `config init` and save printed token immediately.
 
@@ -54,14 +54,14 @@ export GATE_AGENT_TOKEN='default.s3cr3t'
 Typical setup:
 
 ```sh
-cp .secrets.example .secrets
+cp .secrets.dev .secrets
 cargo run -- start --config .secrets --log-level info
 ```
 
 Stdin-backed startup is also supported:
 
 ```sh
-cat .secrets.example | cargo run -- start --log-level info
+cat .secrets.dev | cargo run -- start --log-level info
 ```
 
 If you create fresh config instead, `config init` prints generated default bearer token once. Save it immediately; only token id, hash, and expiry are persisted.
@@ -192,7 +192,7 @@ cargo run -- config validate --config .secrets
 Stdin-backed example:
 
 ```sh
-cat .secrets.example | cargo run -- config validate
+cat .secrets.dev | cargo run -- config validate
 ```
 
 Expected behavior:
@@ -295,7 +295,7 @@ Delete fails when target would leave config with no clients.
 ## Recommended local smoke test
 
 ```sh
-cp .secrets.example .secrets
+cp .secrets.dev .secrets
 docker compose up -d dummy-upstream
 curl -i http://127.0.0.1:18081/healthz
 cargo run -- start --config .secrets
