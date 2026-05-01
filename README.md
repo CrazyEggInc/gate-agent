@@ -43,7 +43,7 @@ gate-agent config api \
   --header "x-api-key=$THE_CAT_API_KEY"
 
 gate-agent config group \
-  --name local-default \
+  --name default \
   --api-access cats:get:*
 
 gate-agent start

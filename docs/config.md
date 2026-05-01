@@ -193,14 +193,14 @@ Validation expectations:
 `.secrets.example` is the runnable local/dev sample:
 
 ```toml
-[groups.local-default]
+[groups.default]
 api_access = { projects = [{ method = "get", path = "*" }] }
 
 [clients.default]
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
 bearer_token_expires_at = "2036-10-08T12:00:00Z"
-group = "local-default"
+group = "default"
 
 [apis.projects]
 base_url = "http://127.0.0.1:18081/api"
@@ -228,7 +228,7 @@ timeout_ms = 5000
 
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
 
-This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.local-default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
+This sample is intentionally distinct from fresh `config init` output. `.secrets.example` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
 
 ## CLI-assisted config management
 
@@ -244,11 +244,11 @@ Behavior:
 - creates parent directories as needed
 - writes a minimal config with:
   - explicit `[server]` settings for bind and port
-  - explicit `[groups]` with `[groups.local-default]`
-  - `groups.local-default.api_access = {}`
+  - explicit `[groups]` with `[groups.default]`
+  - `groups.default.api_access = {}`
   - generated `clients.default` bearer token metadata
   - generated `bearer_token_expires_at` about 180 days in the future
-  - `clients.default.group = "local-default"`
+  - `clients.default.group = "default"`
   - empty `[apis]`
 - prints the generated default client bearer token once to stdout
 - persists only the token id, hash, and expiry
@@ -257,7 +257,7 @@ Behavior:
   - `Server port (default: 8787)`
 - when bind or port is not supplied outside the questionnaire flow, uses the same defaults and writes them explicitly into `[server]`
 
-Fresh init keeps `groups.local-default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
+Fresh init keeps `groups.default.api_access = {}` empty on purpose. New configs start with no `[apis.*]`, so granting a `projects` route rule there would point at an API that does not exist yet and would fail runtime validation. That differs from `.secrets.example`, which is committed with populated sample API definitions and matching sample route access.
 
 - when `--encrypted` is omitted in an interactive session, prompts whether to encrypt the file and defaults that choice to yes
 - explicit `--config`, `--encrypted`, and password inputs keep the command non-interactive for those decisions

@@ -309,8 +309,8 @@ fn secrets_example_matches_dev_sample_contract() -> Result<(), Box<dyn std::erro
     assert!(sample_contents.contains("bearer_token_id = \"default\""));
     assert!(sample_contents.contains("bearer_token_hash"));
     assert!(sample_contents.contains("bearer_token_expires_at = \"2036-10-08T12:00:00Z\""));
-    assert!(sample_contents.contains("group = \"local-default\""));
-    assert!(sample_contents.contains("[groups.local-default]"));
+    assert!(sample_contents.contains("group = \"default\""));
+    assert!(sample_contents.contains("[groups.default]"));
     assert!(
         sample_contents.contains("api_access = { projects = [{ method = \"*\", path = \"*\" }] }")
     );

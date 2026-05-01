@@ -378,17 +378,14 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
             .and_then(Value::as_str)
             .is_some()
     );
-    assert_eq!(
-        client.get("group").and_then(Value::as_str),
-        Some("local-default")
-    );
+    assert_eq!(client.get("group").and_then(Value::as_str), Some("default"));
     assert!(client.get("api_access").is_none());
     assert!(written.get("clients").and_then(Value::as_table).is_some());
     assert!(written.get("groups").and_then(Value::as_table).is_some());
     assert!(
         written
             .get("groups")
-            .and_then(|value| value.get("local-default"))
+            .and_then(|value| value.get("default"))
             .and_then(|value| value.get("api_access"))
             .and_then(Value::as_table)
             .is_some()

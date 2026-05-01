@@ -48,14 +48,14 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 
     assert_eq!(
         find_string_value(default_client, "group").as_deref(),
-        Some("local-default")
+        Some("default")
     );
     assert_eq!(find_inline_table_value(default_client, "api_access"), None);
     assert!(!default_client.contains("api_access ="));
     let bearer_token_id_index = default_client.find("bearer_token_id = ").unwrap();
     let bearer_token_hash_index = default_client.find("bearer_token_hash = ").unwrap();
     let bearer_token_expires_at_index = default_client.find("bearer_token_expires_at = ").unwrap();
-    let group_index = default_client.find("group = \"local-default\"").unwrap();
+    let group_index = default_client.find("group = \"default\"").unwrap();
     assert!(bearer_token_id_index < bearer_token_hash_index);
     assert!(bearer_token_hash_index < bearer_token_expires_at_index);
     assert!(bearer_token_expires_at_index < group_index);
@@ -70,7 +70,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     let groups = section_body(&contents, "groups").unwrap();
     assert!(groups.trim().is_empty());
 
-    let local_default_group = section_body(&contents, "groups.local-default").unwrap();
+    let local_default_group = section_body(&contents, "groups.default").unwrap();
     assert_eq!(
         find_inline_table_value(local_default_group, "api_access"),
         Some(vec![])
@@ -87,7 +87,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
             .and_then(|value| value.get("default"))
             .and_then(|value| value.get("group"))
             .and_then(toml::Value::as_str),
-        Some("local-default")
+        Some("default")
     );
     assert!(
         parsed
@@ -99,7 +99,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     assert_eq!(
         parsed
             .get("groups")
-            .and_then(|value| value.get("local-default"))
+            .and_then(|value| value.get("default"))
             .and_then(|value| value.get("api_access"))
             .and_then(toml::Value::as_table)
             .map(toml::value::Table::len),
@@ -109,7 +109,7 @@ fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
     let default_client_index = contents.find("[clients.default]\n").unwrap();
     let server_index = contents.find("[server]\n").unwrap();
     let groups_index = contents.find("[groups]\n").unwrap();
-    let local_default_group_index = contents.find("[groups.local-default]\n").unwrap();
+    let local_default_group_index = contents.find("[groups.default]\n").unwrap();
     let apis_index = contents.find("[apis]\n").unwrap();
     assert!(default_client_index < server_index);
     assert!(server_index < groups_index);
@@ -170,9 +170,9 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let loaded = write::load_display_text(&config_path, Some(&password))?;
     assert!(loaded.toml.contains("[clients.default]"));
     assert!(loaded.toml.contains("[server]"));
-    assert!(loaded.toml.contains("group = \"local-default\""));
+    assert!(loaded.toml.contains("group = \"default\""));
     assert!(loaded.toml.contains("[groups]"));
-    assert!(loaded.toml.contains("[groups.local-default]"));
+    assert!(loaded.toml.contains("[groups.default]"));
     assert!(loaded.toml.contains("api_access = {}"));
     assert!(loaded.toml.contains("[apis]"));
     assert!(loaded.toml.contains("bind = \"127.0.0.1\""));
@@ -185,12 +185,12 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let default_client = section_body(&loaded.toml, "clients.default").unwrap();
     assert_eq!(
         find_string_value(default_client, "group").as_deref(),
-        Some("local-default")
+        Some("default")
     );
     assert_eq!(find_inline_table_value(default_client, "api_access"), None);
     assert!(!default_client.contains("api_access ="));
 
-    let local_default_group = section_body(&loaded.toml, "groups.local-default").unwrap();
+    let local_default_group = section_body(&loaded.toml, "groups.default").unwrap();
     assert_eq!(
         find_inline_table_value(local_default_group, "api_access"),
         Some(vec![])

@@ -460,16 +460,16 @@ fn config_init_generates_default_bearer_token_and_persists_only_metadata()
     let default_client = table_at(&config, &["clients", "default"]);
     assert_eq!(
         default_client.get("group").and_then(Value::as_str),
-        Some("local-default")
+        Some("default")
     );
     assert!(default_client.get("api_access").is_none());
     assert!(config.get("server").and_then(Value::as_table).is_some());
     assert!(config.get("apis").and_then(Value::as_table).is_some());
-    let default_group = table_at(&config, &["groups", "local-default"]);
+    let default_group = table_at(&config, &["groups", "default"]);
     let default_group_api_access = default_group
         .get("api_access")
         .and_then(Value::as_table)
-        .expect("groups.local-default.api_access should be table");
+        .expect("groups.default.api_access should be table");
     assert!(default_group_api_access.is_empty());
     assert_eq!(string_at(&config, &["server", "bind"]), "127.0.0.1");
     assert_eq!(
@@ -554,12 +554,12 @@ fn config_client_tty_group_reference_selector_shows_plain_existing_groups()
     );
     assert!(
         !stderr.contains("Group name:")
-            && stderr.contains("local-default")
+            && stderr.contains("default")
             && stderr.contains("partner-readonly")
             && stderr.contains("add new group"),
         "{stderr}"
     );
-    assert!(!stderr.contains("local-default (edit)"), "{stderr}");
+    assert!(!stderr.contains("default (edit)"), "{stderr}");
     assert!(!stderr.contains("partner-readonly (edit)"), "{stderr}");
 
     Ok(())
@@ -613,7 +613,7 @@ fn config_group_tty_manage_selector_keeps_edit_labels_for_existing_groups()
 
     let stderr = String::from_utf8(output.stderr)?.replace("\r", "");
     assert!(
-        stderr.contains("local-default (edit)")
+        stderr.contains("default (edit)")
             && stderr.contains("partner-readonly (edit)")
             && stderr.contains("add new group"),
         "{stderr}"
