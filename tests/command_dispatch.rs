@@ -522,7 +522,7 @@ fn config_command_dispatch_basic_auth_flag_still_requires_interactive_prompts()
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: true,
             header: vec![],
-            timeout_ms: Some(5_000),
+            timeout_ms: None,
         }),
     }))
     .expect_err("basic auth flag should fail without interactive prompts");
@@ -551,7 +551,7 @@ fn config_command_dispatch_basic_auth_flag_prompts_username_and_password()
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "projects-user", "projects-pass"])?,
+            serde_json::to_string(&["projects-user", "projects-pass"])?,
         );
     }
 
@@ -565,7 +565,7 @@ fn config_command_dispatch_basic_auth_flag_prompts_username_and_password()
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: true,
             header: vec![],
-            timeout_ms: Some(5_000),
+            timeout_ms: None,
         }),
     }))?;
 
@@ -746,6 +746,83 @@ fn config_command_dispatch_api_preserves_existing_headers_when_header_omitted()
 }
 
 #[test]
+fn config_command_dispatch_api_flags_disable_optional_prompts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    write_config(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = { projects = [{ method = "*", path = "*" }] }
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+headers = { x-api-key = "secret-key" }
+basic_auth = { username = "projects-user", password = "projects-pass" }
+timeout_ms = 5000
+"#,
+    )?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&["none", "n"])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://projects.internal.example/api/v2".to_owned()),
+            basic_auth: false,
+            header: vec![],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_table)
+        .expect("projects api config");
+
+    assert_eq!(
+        api.get("base_url").and_then(Value::as_str),
+        Some("https://projects.internal.example/api/v2")
+    );
+    assert_eq!(
+        api.get("headers")
+            .and_then(|value| value.get("x-api-key"))
+            .and_then(Value::as_str),
+        Some("secret-key")
+    );
+    assert_eq!(
+        api.get("basic_auth")
+            .and_then(|value| value.get("username"))
+            .and_then(Value::as_str),
+        Some("projects-user")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
@@ -782,14 +859,12 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "none", "n"],
+        &["", "", "none", "n"],
         &[
             "config",
             "api",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
-            "--name",
-            "projects",
         ],
     )?;
 
@@ -916,7 +991,7 @@ fn config_command_dispatch_rejects_malformed_api_prompt_headers()
             base_url: None,
             basic_auth: false,
             header: Vec::new(),
-            timeout_ms: Some(5_000),
+            timeout_ms: None,
         }),
     }))
     .expect_err("malformed prompt header should fail");
@@ -966,14 +1041,12 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "", "n"],
+        &["", "", "", "n"],
         &[
             "config",
             "api",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
-            "--name",
-            "projects",
         ],
     )?;
 
@@ -1092,7 +1165,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "y", "billing-user", "billing-pass"])?,
+            serde_json::to_string(&["", "", "", "y", "billing-user", "billing-pass"])?,
         );
     }
 
@@ -1102,7 +1175,7 @@ timeout_ms = 5000
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
-            name: Some("billing".to_owned()),
+            name: None,
             base_url: None,
             basic_auth: false,
             header: vec![],
@@ -1169,7 +1242,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "billing-user", "billing-pass"])?,
+            serde_json::to_string(&["billing-user", "billing-pass"])?,
         );
     }
 
@@ -1251,14 +1324,12 @@ timeout_ms = 5000
 
     let tty_output = run_gate_agent_in_tty_with_stdin(
         &workspace,
-        &["", "", "y", "", ""],
+        &["", "", "", "y", "", ""],
         &[
             "config",
             "api",
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
-            "--name",
-            "billing",
         ],
     )?;
 
@@ -1323,7 +1394,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "", "n"])?,
+            serde_json::to_string(&["", "", "", "n"])?,
         );
     }
 
@@ -1333,7 +1404,7 @@ timeout_ms = 5000
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
-            name: Some("billing".to_owned()),
+            name: None,
             base_url: None,
             basic_auth: false,
             header: vec![],
@@ -1394,7 +1465,7 @@ timeout_ms = 5000
         std::env::set_var("HOME", temp_dir.path().join("home"));
         std::env::set_var(
             TEST_PROMPT_INPUTS_ENV_VAR,
-            serde_json::to_string(&["", "authorization=Bearer rotated-token", "n"])?,
+            serde_json::to_string(&["", "", "authorization=Bearer rotated-token", "n"])?,
         );
     }
 
@@ -1404,7 +1475,7 @@ timeout_ms = 5000
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             delete: false,
-            name: Some("billing".to_owned()),
+            name: None,
             base_url: None,
             basic_auth: false,
             header: vec![],

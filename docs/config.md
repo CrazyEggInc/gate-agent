@@ -307,6 +307,9 @@ Behavior:
 - creates config if it does not exist yet
 - adds or updates one `[apis.<name>]` entry by default
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
+- runs the optional interactive questionnaire only when no API-management flags are supplied
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, and `--delete`
+- when any API-management flag is supplied, omitted flags are treated as non-interactive omissions and preserve existing values on update
 - on interactive update, current values become prompt defaults and blank answers keep those defaults
 - on non-interactive update, omitted flags preserve current values instead of clearing them
 - `--basic-auth` selects upstream Basic auth mode

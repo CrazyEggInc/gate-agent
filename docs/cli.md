@@ -182,9 +182,10 @@ Behavior:
 - when that bootstrap happens, prints `Generated token for client 'default': <token>` to stdout exactly once so operators and scripts can capture it
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
-- explicitly supplied `config api` inputs such as `--name`, `--base-url`, and any `--header` flags skip their own prompts
-- omitted header input can still prompt in interactive `config api` sessions
-- optional Basic-auth setup can still prompt in interactive `config api` sessions even when `--basic-auth` is omitted
+- `config api` runs the optional interactive questionnaire only when no API-management flags are supplied
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, and `--delete`
+- when any API-management flag is supplied, omitted flags are treated as non-interactive omissions and preserve existing values on update
+- `--basic-auth` selects upstream Basic auth mode and still prompts for credentials because the flag explicitly requests that auth flow
 - `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
 - `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
 - each `--header` value must use `<name>=<value>` format, for example `x-api-key=secret`
@@ -229,7 +230,7 @@ Behavior:
 - any other Basic auth password text stores that text as `basic_auth.password`
 - existing Basic auth password prompt includes `blank clears existing password; enter password to keep or change`
 - new Basic auth password prompt includes `blank stores empty password; enter 'none' for username-only basic auth`
-- explicit `config api` args skip prompts only for their own inputs; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
+- explicit API-management args skip the optional questionnaire; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
 
 ### `config group`
 

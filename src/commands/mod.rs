@@ -354,19 +354,28 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
 }
 
 fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs, CommandError> {
+    let use_interactive_questionnaire = should_prompt_for_config_api_args(&args);
     let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
-    let name = resolve_resource_name(
-        args.name,
-        config::ResourceKind::Api,
-        &names,
-        ResourceSelectionIntent::Manage {
-            existing_only: args.delete,
-        },
-        None,
-        "API name",
-        "config api requires --name in non-interactive sessions",
-    )?;
+    let name = if use_interactive_questionnaire {
+        resolve_resource_name(
+            args.name,
+            config::ResourceKind::Api,
+            &names,
+            ResourceSelectionIntent::Manage {
+                existing_only: args.delete,
+            },
+            None,
+            "API name",
+            "config api requires --name in non-interactive sessions",
+        )?
+    } else {
+        args.name
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CommandError::new("config api requires --name in non-interactive sessions")
+            })?
+    };
 
     if args.delete {
         confirm_delete(config::ResourceKind::Api, &name)?;
@@ -386,7 +395,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
     let existing =
         config::load_existing_api_state(args.config.as_deref(), args.password.clone(), &name)
             .map_err(|error| CommandError::new(error.to_string()))?;
-    let interactive = interactive_questionnaire_available();
+    let interactive = interactive_questionnaire_available() && use_interactive_questionnaire;
 
     let base_url = if args.base_url.is_some() {
         args.base_url
@@ -464,6 +473,14 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         auth: resolved_auth,
         timeout_ms,
     })
+}
+
+fn should_prompt_for_config_api_args(args: &ConfigApiArgs) -> bool {
+    !args.delete
+        && args.name.is_none()
+        && args.base_url.is_none()
+        && args.header.is_empty()
+        && args.timeout_ms.is_none()
 }
 
 fn resolve_prompted_api_auth(

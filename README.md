@@ -1,6 +1,6 @@
 # gate-agent
 
-`gate-agent` is a small local proxy for calling internal upstream APIs through one operator-managed interface.
+`gate-agent` is a small proxy designed to hide authentication information from callers.
 
 ## Why this exists
 
@@ -8,6 +8,7 @@
 - upstream credentials stay in server-side config
 - bearer tokens are simple to issue and rotate
 - config is file-based, explicit, and easy to inspect
+- agentic coding tools can call these apis without knowing the actual remote api credentials
 
 ## Install
 
@@ -25,7 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/heads/m
 
 The installer defaults to `~/.local/bin` and adds it to your shell `PATH` when needed.
 
-## Quickstart
+## Local usage quickstart
+
+We'll setup a remote integration with https://thecatapi.com as an example (you can register for a free key to test).
 
 ```sh
 gate-agent config init
