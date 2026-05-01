@@ -362,7 +362,7 @@ fn map_config_validate_args(args: ConfigValidateArgs) -> config::ConfigValidateA
 }
 
 fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs, CommandError> {
-    let use_interactive_questionnaire = should_prompt_for_config_api_args(&args);
+    let use_interactive_questionnaire = should_prompt_for_config_api_args(&args) || args.delete;
     let names = config::list_api_slugs(args.config.as_deref(), args.password.clone())
         .map_err(|error| CommandError::new(error.to_string()))?;
     let selection = if use_interactive_questionnaire {
