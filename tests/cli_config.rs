@@ -606,18 +606,24 @@ fn config_group_tty_manage_selector_keeps_edit_labels_for_existing_groups()
             "--config",
             config_path.to_str().ok_or("non-utf8 config path")?,
         ],
-        "\n\n",
+        "\n\n\n",
     )?;
 
     assert!(output.status.success(), "{output:?}");
 
     let stderr = String::from_utf8(output.stderr)?.replace("\r", "");
     assert!(
-        stderr.contains("default (edit)")
-            && stderr.contains("partner-readonly (edit)")
+        stderr.contains("default")
+            && stderr.contains("partner-readonly")
             && stderr.contains("add new group"),
         "{stderr}"
     );
+    assert!(stderr.contains("Action for group 'default'"), "{stderr}");
+    assert!(stderr.contains("edit"), "{stderr}");
+    assert!(stderr.contains("delete"), "{stderr}");
+    assert!(stderr.contains("cancel"), "{stderr}");
+    assert!(!stderr.contains("default (edit)"), "{stderr}");
+    assert!(!stderr.contains("partner-readonly (edit)"), "{stderr}");
 
     Ok(())
 }
@@ -2322,7 +2328,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
-                timeout_ms: Some(5_000),
+                timeout_ms: None,
             }),
         },
     ))?;
@@ -2381,7 +2387,7 @@ fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
-                timeout_ms: Some(5_000),
+                timeout_ms: None,
             }),
         },
     ))?;
@@ -2671,7 +2677,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
         timeout_ms: Some(5_000),
     })?;
 
-    set_test_prompt_inputs(&["", "none", ""])?;
+    set_test_prompt_inputs(&["", "", "", "none", ""])?;
 
     gate_agent::commands::run(gate_agent::cli::Command::Config(
         gate_agent::cli::ConfigArgs {
@@ -2680,7 +2686,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
                 password: None,
                 log_level: DEFAULT_LOG_LEVEL.to_owned(),
                 delete: false,
-                name: Some("projects".to_owned()),
+                name: None,
                 base_url: None,
                 basic_auth: false,
                 header: vec![],
@@ -4825,10 +4831,7 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
         group_error.to_string(),
         "config group requires --name in non-interactive sessions"
     );
-    assert_eq!(
-        api_error.to_string(),
-        "config api requires --name in non-interactive sessions"
-    );
+    assert_eq!(api_error.to_string(), "Missing required fields: --name");
 
     Ok(())
 }
