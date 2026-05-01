@@ -24,7 +24,7 @@ const TEST_KEYRING_STORE_FAILURE_ENV_VAR: &str = "GATE_AGENT_TEST_KEYRING_STORE_
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
+const ENCRYPTION_FACTOR_ENV_VAR: &str = "GATE_AGENT_ENCRYPTION_FACTOR";
 
 const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
@@ -89,7 +89,7 @@ impl EnvGuard {
         std::env::set_current_dir(current_dir)?;
         unsafe {
             std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
-            std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
+            std::env::set_var(ENCRYPTION_FACTOR_ENV_VAR, "1");
         }
 
         Ok(Self {
@@ -126,7 +126,7 @@ fn tracked_env_vars() -> Vec<&'static str> {
         TEST_PROMPT_INPUTS_ENV_VAR,
         TEST_PROMPT_PASSWORD_ENV_VAR,
         DISABLE_INTERACTIVE_ENV_VAR,
-        TEST_SCRYPT_WORK_FACTOR_ENV_VAR,
+        ENCRYPTION_FACTOR_ENV_VAR,
     ]
 }
 
@@ -153,7 +153,7 @@ fn write_binary_age_config(
     }
 
     let mut recipient = age::scrypt::Recipient::new(password.clone());
-    recipient.set_work_factor(4);
+    recipient.set_work_factor(1);
     let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as _))?;
     let mut output = Vec::new();
     let mut writer = encryptor.wrap_output(&mut output)?;

@@ -44,6 +44,7 @@ Encrypted read expectations:
 
 - passphrase-encrypted `age` config reads support standard CLI `age` passphrase files in ASCII-armored or binary form
 - encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
+- encrypted writes use scrypt work factor `10` unless `GATE_AGENT_ENCRYPTION_FACTOR` is set
 - wrong-password failures stay concise
 - unsupported `age` modes, malformed or corrupted encrypted files, and excessive scrypt work factors return specific operator-facing errors
 
@@ -94,6 +95,7 @@ Accepted flags:
 
 - `--config <path>`
 - `--encrypted`
+- `--encryption-factor <0-30>`
 - `--password <value>` / `-p <value>`
 - `--log-level <level>`
 
@@ -116,6 +118,7 @@ Behavior:
 - persists only `bearer_token_id`, `bearer_token_hash`, and `bearer_token_expires_at`
 - when encryption is enabled, writes encrypted config and confirms interactive passwords by double entry
 - when encryption is enabled, resolves the initial password from `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
+- when encryption is enabled, `--encryption-factor` overrides `GATE_AGENT_ENCRYPTION_FACTOR`; if neither is set, the scrypt work factor defaults to `10`
 - when encrypted init succeeds, leaves the system keyring empty for the selected config path and removes any stale cached password for that path
 - later successful encrypted reads may also backfill the password for that config path, and later encrypted reads may reuse cached passwords through the standard lookup order
 - explicit args keep the command non-interactive for those inputs

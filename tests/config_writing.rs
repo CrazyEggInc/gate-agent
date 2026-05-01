@@ -7,35 +7,6 @@ use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule};
 use gate_agent::config::write::{self, ApiUpsert, ClientUpsert, GroupUpsert};
 use secrecy::SecretString;
 
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
 #[test]
 fn init_config_writes_minimal_generated_document_and_creates_parent_dirs()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -181,9 +152,15 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("nested/config/gate-agent.secrets");
     let password = SecretString::from("super-secret-passphrase".to_owned());
-    let _env_guard = EnvVarGuard::set(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
 
-    write::init_config(&config_path, true, Some(&password))?;
+    write::init_config_with_default_bearer_token_and_server_and_encryption_factor(
+        &config_path,
+        true,
+        Some(&password),
+        Some(1),
+        "127.0.0.1",
+        8787,
+    )?;
 
     let raw_contents = fs::read_to_string(&config_path)?;
     assert!(raw_contents.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
@@ -218,6 +195,37 @@ fn init_config_writes_encrypted_document_and_reads_it_back()
         find_inline_table_value(local_default_group, "api_access"),
         Some(vec![])
     );
+
+    Ok(())
+}
+
+#[test]
+fn config_init_encryption_factor_flag_overrides_env_var() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.secrets");
+    let password = SecretString::from("super-secret-passphrase".to_owned());
+
+    let output = Command::cargo_bin("gate-agent")?
+        .env("GATE_AGENT_ENCRYPTION_FACTOR", "31")
+        .args([
+            "config",
+            "init",
+            "--config",
+            config_path.to_str().ok_or("non-utf8 config path")?,
+            "--encrypted",
+            "--password",
+            "super-secret-passphrase",
+            "--encryption-factor",
+            "1",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:?}");
+    let loaded = write::load_display_text(&config_path, Some(&password))?;
+
+    assert!(loaded.toml.contains("[clients.default]"));
+    assert!(loaded.toml.contains("[server]"));
 
     Ok(())
 }

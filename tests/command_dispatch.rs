@@ -17,7 +17,7 @@ use toml::Value;
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
-const TEST_SCRYPT_WORK_FACTOR_ENV_VAR: &str = "GATE_AGENT_TEST_SCRYPT_WORK_FACTOR";
+const ENCRYPTION_FACTOR_ENV_VAR: &str = "GATE_AGENT_ENCRYPTION_FACTOR";
 const VERSION_DISPATCH_HELPER_ENV_VAR: &str = "GATE_AGENT_VERSION_DISPATCH_HELPER";
 const VERSION_DISPATCH_HELPER_TEST: &str =
     "version_command_dispatch_skips_tracing_bootstrap_helper";
@@ -177,7 +177,7 @@ fn encrypt_test_config(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut recipient =
         age::scrypt::Recipient::new(age::secrecy::SecretString::from(password.to_owned()));
-    recipient.set_work_factor(4);
+    recipient.set_work_factor(1);
     let encrypted = age::Encryptor::with_recipients(std::iter::once(&recipient as _))?;
     let mut encrypted_bytes = Vec::new();
     {
@@ -264,7 +264,7 @@ struct EnvGuard {
     original_home: Option<String>,
     original_test_prompt_inputs: Option<String>,
     original_disable_interactive: Option<String>,
-    original_test_scrypt_work_factor: Option<String>,
+    original_encryption_factor: Option<String>,
 }
 
 impl EnvGuard {
@@ -273,12 +273,12 @@ impl EnvGuard {
         let original_home = std::env::var("HOME").ok();
         let original_test_prompt_inputs = std::env::var(TEST_PROMPT_INPUTS_ENV_VAR).ok();
         let original_disable_interactive = std::env::var(DISABLE_INTERACTIVE_ENV_VAR).ok();
-        let original_test_scrypt_work_factor = std::env::var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR).ok();
+        let original_encryption_factor = std::env::var(ENCRYPTION_FACTOR_ENV_VAR).ok();
 
         std::env::set_current_dir(current_dir)?;
         unsafe {
             std::env::set_var(DISABLE_INTERACTIVE_ENV_VAR, "1");
-            std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, "4");
+            std::env::set_var(ENCRYPTION_FACTOR_ENV_VAR, "1");
         }
 
         Ok(Self {
@@ -286,7 +286,7 @@ impl EnvGuard {
             original_home,
             original_test_prompt_inputs,
             original_disable_interactive,
-            original_test_scrypt_work_factor,
+            original_encryption_factor,
         })
     }
 }
@@ -311,9 +311,9 @@ impl Drop for EnvGuard {
                 None => std::env::remove_var(DISABLE_INTERACTIVE_ENV_VAR),
             }
 
-            match &self.original_test_scrypt_work_factor {
-                Some(value) => std::env::set_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR, value),
-                None => std::env::remove_var(TEST_SCRYPT_WORK_FACTOR_ENV_VAR),
+            match &self.original_encryption_factor {
+                Some(value) => std::env::set_var(ENCRYPTION_FACTOR_ENV_VAR, value),
+                None => std::env::remove_var(ENCRYPTION_FACTOR_ENV_VAR),
             }
         }
     }
@@ -338,6 +338,7 @@ fn config_command_dispatch_runs_init_subcommand() -> Result<(), Box<dyn std::err
         command: ConfigCommand::Init(ConfigInitArgs {
             config: Some(config_path.clone()),
             encrypted: false,
+            encryption_factor: None,
             password: None,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
         }),

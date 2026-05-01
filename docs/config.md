@@ -46,6 +46,7 @@ Encrypted read expectations:
 
 - passphrase-encrypted `age` reads support standard CLI `age` passphrase files in ASCII-armored or binary form
 - encrypted reads reject files whose scrypt work factor exceeds gate-agent supported maximum; current maximum is `30`
+- encrypted writes use scrypt work factor `10` unless `GATE_AGENT_ENCRYPTION_FACTOR` is set
 
 ## Password sources
 
@@ -265,6 +266,7 @@ When encryption is enabled:
 
 - the generated config is encrypted immediately
 - initial password resolution uses `--password`, then `GATE_AGENT_PASSWORD`, then an interactive prompt
+- encryption work factor resolution uses `--encryption-factor`, then `GATE_AGENT_ENCRYPTION_FACTOR`, then default `10`
 - interactive prompting asks twice and requires an exact match
 - encrypted init leaves the keyring empty for that config path and removes any stale cached password
 

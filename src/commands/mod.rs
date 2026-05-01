@@ -115,8 +115,13 @@ fn run_config(args: ConfigArgs) -> Result<(), CommandError> {
     match args.command {
         ConfigCommand::Init(args) => {
             let resolved = resolve_config_init_args(args)?;
-            config::init_with_server(resolved.args, &resolved.server_bind, resolved.server_port)
-                .map_err(|error| CommandError::new(error.to_string()))?;
+            config::init_with_server(
+                resolved.args,
+                resolved.encryption_factor,
+                &resolved.server_bind,
+                resolved.server_port,
+            )
+            .map_err(|error| CommandError::new(error.to_string()))?;
         }
         ConfigCommand::Show(args) => {
             let contents = config::show(map_config_show_args(args))
@@ -227,6 +232,7 @@ fn run_start(args: StartArgs) -> Result<(), CommandError> {
 
 struct ResolvedConfigInitArgs {
     args: config::ConfigInitArgs,
+    encryption_factor: Option<u8>,
     server_bind: String,
     server_port: u16,
 }
@@ -319,6 +325,7 @@ fn resolve_config_init_args(args: ConfigInitArgs) -> Result<ResolvedConfigInitAr
             password: args.password,
             log_level: args.log_level,
         },
+        encryption_factor: args.encryption_factor,
         server_bind,
         server_port,
     })
