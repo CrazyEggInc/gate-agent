@@ -8,10 +8,10 @@ Your Agents access APIs through Gate Agent instead of accessing them directly. T
 1. You put your API keys and credentials into an encrypted config file managed by Gate Agent. 
 2. You get a Gate Agent Token.
 3. Instead of connecting your Agent directly to an API you connect the Agent to Gate Agent via your Gate Agent Token.
-3. All requests to the API are made through Gate Agent. Your Agent never sees the actual API keys/authenticaiton tokens. It only sees your Gate Agent Token.
+4. All requests to the API are made through Gate Agent. Your Agent never sees the actual API keys/authentication tokens. It only sees your Gate Agent Token.
 
 ## Features
-- **Simple TOML text-file based config** that is explict and easy to manage.
+- **Simple TOML text-file based config** that is explicit and easy to manage.
 - **Single Rust binary**. Run it locally, via Docker, etc.
 - **Encrypted config**. As long as your Agents don't know the password you can even run Gate Agent on the same machine as your Agents.
 - **Groups with different access controls**. Run one Gate Agent for many different Agents with different access needs.
