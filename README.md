@@ -1,14 +1,25 @@
 # gate-agent
 
-`gate-agent` is a small proxy designed to hide authentication information from callers.
+`gate-agent` is a small and secure proxy that protects API/authentication keys from Agents. 
 
-## Why this exists
+Your Agents access APIs through Gate Agent instead of accessing them directly. This keeps your API keys safe from Agents who might do things you don't want them to (such as deciding to share them with people who shouldn't have them). You can also prevent Agents from accessing parts of APIs you don't want them to with no chance of them circumventing their instructions.
 
-- clients authenticate to `gate-agent`, not directly to upstream APIs
-- upstream credentials stay in server-side config
-- bearer tokens are simple to issue and rotate
-- config is file-based, explicit, and easy to inspect
-- agentic coding tools can call these APIs without knowing the actual remote API credentials
+## How it Works
+1. You put your API keys and credentials into an encrypted config file managed by Gate Agent. 
+2. You get a Gate Agent Token.
+3. Instead of connecting your Agent directly to an API you connect the Agent to Gate Agent via your Gate Agent Token.
+3. All requests to the API are made through Gate Agent. Your Agent never sees the actual API keys/authenticaiton tokens. It only sees your Gate Agent Token.
+
+## Features
+- **Simple TOML text-file based config** that is explict and easy to manage.
+- **Single Rust binary**. Run it locally, via Docker, etc.
+- **Encrypted config**. As long as your Agents don't know the password you can even run Gate Agent on the same machine as your Agents.
+- **Groups with different access controls**. Run one Gate Agent for many different Agents with different access needs.
+- **Restrict requests by method (GET, POST, etc) or URL pattern**. This means you can prevent your Agents from connecting to certain API methods even if the 3rd-party API doesn't offer that granular access.
+- **Easily revoke individual Agent access**. If you want to revoke access just revoke the one Gate Agent Token instead of rotating all your API keys. Your other Agents are unaffected.
+- **Log all requests** so you can see which Agents try to access which methods.
+- **Single MCP server** for your Agent that returns all the tools from all the APIs you've connected it to which makes it quick and easy to connect new Agents.
+
 
 ## Install
 
