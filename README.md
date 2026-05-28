@@ -4,11 +4,14 @@
 
 Your Agents access APIs through Gate Agent instead of accessing them directly. This keeps your API keys safe from Agents who might do things you don't want them to (such as deciding to share them with people who shouldn't have them). You can also prevent Agents from accessing parts of APIs you don't want them to with no chance of them circumventing their instructions.
 
+<img width="1448" height="1086" alt="Gate Agent" src="https://github.com/user-attachments/assets/66b1c7c5-f6b0-4054-947e-78bec6dcea04" />
+
 ## How it Works
 1. You put your API keys and credentials into an encrypted config file managed by Gate Agent. 
 2. You get a Gate Agent Token.
 3. Instead of connecting your Agent directly to an API you connect the Agent to Gate Agent via your Gate Agent Token.
 4. All requests to the API are made through Gate Agent. Your Agent never sees the actual API keys/authentication tokens. It only sees your Gate Agent Token.
+
 
 ## Features
 - **Simple TOML text-file based config** that is explicit and easy to manage.
