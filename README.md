@@ -12,6 +12,11 @@ Your Agents access APIs through Gate Agent instead of accessing them directly. T
 3. Instead of connecting your Agent directly to an API you connect the Agent to Gate Agent via your Gate Agent Token.
 4. All requests to the API are made through Gate Agent. Your Agent never sees the actual API keys/authentication tokens. It only sees your Gate Agent Token.
 
+## Demo Video
+Watch: [Gate Agent: Overview/Demo](https://www.youtube.com/watch?v=g2fwaFKT0FQ)
+
+[![Gate Agent: Overview/Demo](http://img.youtube.com/vi/g2fwaFKT0FQ/0.jpg)](http://www.youtube.com/watch?v=g2fwaFKT0FQ "Gate Agent: Overview/Demo")
+
 
 ## Features
 - **Simple TOML text-file based config** that is explicit and easy to manage.
