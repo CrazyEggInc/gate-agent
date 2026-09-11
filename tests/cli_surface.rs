@@ -220,6 +220,8 @@ fn config_api_help_lists_expected_flags() -> Result<(), Box<dyn std::error::Erro
     assert!(stdout.contains("--base-url"));
     assert!(stdout.contains("--basic-auth"));
     assert!(stdout.contains("Configure upstream HTTP Basic auth interactively"));
+    assert!(stdout.contains("--auth"));
+    assert!(stdout.contains("Configure dynamic upstream auth interactively"));
     assert!(stdout.contains("--header"));
     assert!(stdout.contains("name=value"));
     assert!(stdout.contains("x-api-key=secret"));
@@ -258,6 +260,48 @@ fn config_api_accepts_basic_auth_flag() {
         },
         other => panic!("expected config command, got {other:?}"),
     }
+}
+
+#[test]
+fn config_api_accepts_dynamic_auth_flag() {
+    let parsed = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "api",
+        "--name",
+        "billing",
+        "--base-url",
+        "https://billing.internal.example",
+        "--auth",
+    ])
+    .expect("parses");
+
+    match parsed.command() {
+        CliCommand::Config(args) => match &args.command {
+            ConfigCommand::Api(args) => {
+                assert!(args.auth);
+                assert!(!args.basic_auth);
+            }
+            other => panic!("expected api variant, got {other:?}"),
+        },
+        other => panic!("expected config command, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_api_rejects_dynamic_and_basic_auth_together() {
+    let error = Cli::try_parse_from([
+        "gate-agent",
+        "config",
+        "api",
+        "--name",
+        "billing",
+        "--basic-auth",
+        "--auth",
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be used with"));
 }
 
 #[test]

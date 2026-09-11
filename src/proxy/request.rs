@@ -4,11 +4,14 @@ use http::{
     HeaderMap, Method, Request, Uri,
     header::{self, HeaderName, HeaderValue},
 };
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashSet;
 use url::{Position, Url};
 
-use crate::{config::secrets::ApiConfig, error::AppError};
+use crate::{
+    config::secrets::{ApiConfig, RESPONSE_TOKEN_PLACEHOLDER},
+    error::AppError,
+};
 
 use super::{connection_bound_header_names, is_hop_by_hop_header};
 
@@ -62,6 +65,14 @@ pub fn map_forward_request(
     request: ForwardRequest,
     api_config: &ApiConfig,
 ) -> Result<reqwest::Request, AppError> {
+    map_forward_request_with_token(request, api_config, None)
+}
+
+pub fn map_forward_request_with_token(
+    request: ForwardRequest,
+    api_config: &ApiConfig,
+    response_token: Option<&SecretString>,
+) -> Result<reqwest::Request, AppError> {
     let ForwardRequest {
         method,
         path_and_query,
@@ -73,7 +84,7 @@ pub fn map_forward_request(
     let mut outbound_request = reqwest::Request::new(method, url);
 
     *outbound_request.headers_mut() = filter_request_headers(&headers);
-    overlay_configured_headers(outbound_request.headers_mut(), api_config)?;
+    overlay_configured_headers(outbound_request.headers_mut(), api_config, response_token)?;
     overlay_basic_auth(outbound_request.headers_mut(), api_config)?;
     if !matches!(*outbound_request.method(), Method::GET | Method::HEAD) {
         *outbound_request.body_mut() = Some(reqwest::Body::wrap_stream(body.into_data_stream()));
@@ -217,6 +228,7 @@ fn is_client_forwarding_header(name: &HeaderName) -> bool {
 fn overlay_configured_headers(
     headers: &mut HeaderMap,
     api_config: &ApiConfig,
+    response_token: Option<&SecretString>,
 ) -> Result<(), AppError> {
     for (name, value) in &api_config.headers {
         if is_reserved_configured_header(name) {
@@ -225,7 +237,19 @@ fn overlay_configured_headers(
             )));
         }
 
-        let value = HeaderValue::from_str(value.expose_secret()).map_err(|error| {
+        let configured_value = value.expose_secret();
+        let rendered_value = match response_token {
+            Some(token) => {
+                configured_value.replace(RESPONSE_TOKEN_PLACEHOLDER, token.expose_secret())
+            }
+            None if configured_value.contains(RESPONSE_TOKEN_PLACEHOLDER) => {
+                return Err(AppError::UpstreamBuild(
+                    "configured upstream header requires a response token".to_owned(),
+                ));
+            }
+            None => configured_value.to_owned(),
+        };
+        let value = HeaderValue::from_str(&rendered_value).map_err(|error| {
             AppError::UpstreamBuild(format!("invalid configured upstream header: {error}"))
         })?;
         headers.insert(name.clone(), value);

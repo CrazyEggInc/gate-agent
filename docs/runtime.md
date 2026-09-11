@@ -58,6 +58,7 @@ Runtime state must contain:
 - parsed secrets/config
 - an in-memory bearer-token lookup indexed by `bearer_token_id`
 - a shared reqwest client
+- per-API in-memory dynamic-auth token caches
 - startup settings such as bind address, log level, and the explicit config source (`Path(...)` or `Stdin`)
 
 Runtime rules:
@@ -67,10 +68,14 @@ Runtime rules:
 - duplicate configured bearer token identifiers are rejected at state construction time
 - API config lookup is fail-closed
 - bearer-token lookup checks expiration on every proxy request
+- dynamic-auth caches serialize token acquisition per API, retain no token on acquisition failure, and use monotonic expiration deadlines
+- dynamic-auth tokens exist only in memory and are invalidated when the target API returns `401 Unauthorized`
 
 ## HTTP client behavior
 
 Upstream redirects are not followed by the shared outbound HTTP client; redirect responses are returned as upstream responses. Timeouts remain explicit and owned by the proxy.
+
+Dynamic auth endpoint requests use the same shared client and the target API's configured timeout. Successful auth response bodies are limited to 1 MiB before JSON parsing.
 
 ## Error model
 

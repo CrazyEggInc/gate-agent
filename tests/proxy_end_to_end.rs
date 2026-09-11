@@ -5,7 +5,7 @@ use std::time::Duration;
 mod support;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::State,
     http::{Request, Response, StatusCode, header::HeaderValue},
@@ -16,7 +16,12 @@ use gate_agent::{
     commands::config::{
         ConfigApiArgs, ConfigApiAuthSelection, ConfigGroupArgs, apply_api, apply_group,
     },
-    config::{ConfigSource, app_config::AppConfig, secrets::SecretsConfig, write},
+    config::{
+        ConfigSource,
+        app_config::AppConfig,
+        secrets::{BearerTokenHash, SecretsConfig},
+        write,
+    },
     proxy::router::build_router,
 };
 use http_body_util::BodyExt;
@@ -27,7 +32,67 @@ use support::{
     load_test_config_with_billing_timeout, spawn_chunked_upstream, spawn_upstream,
 };
 use tempfile::tempdir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+fn load_dynamic_auth_test_config(
+    base_url: &str,
+    track_expiry: bool,
+) -> Result<(AppConfig, String), Box<dyn std::error::Error>> {
+    load_dynamic_auth_test_config_with_timeout(base_url, track_expiry, 5_000)
+}
+
+fn load_dynamic_auth_test_config_with_timeout(
+    base_url: &str,
+    track_expiry: bool,
+    timeout_ms: u64,
+) -> Result<(AppConfig, String), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    let token = "default.dynamic-secret".to_owned();
+    let expires_in = if track_expiry {
+        ", expires_in = \"expires_in\""
+    } else {
+        ""
+    };
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = {{ service = [{{ method = "*", path = "*" }}] }}
+
+[apis.service]
+base_url = "{base_url}/api"
+headers = {{ authorization = "Bearer {{{{response_token}}}}" }}
+auth = {{ url = "{base_url}/token", method = "POST", content_type = "application/json", headers = {{ accept = "application/json" }}, body = '{{"client_id":"id","client_secret":"secret"}}', response = {{ token = "access_token"{expires_in} }} }}
+timeout_ms = {timeout_ms}
+"#,
+            BearerTokenHash::from_token(&token).as_str(),
+        ),
+    )?;
+    let secrets = SecretsConfig::load_from_file(&config_path)?;
+    Ok((
+        AppConfig::new(
+            "127.0.0.1:0".parse()?,
+            "debug",
+            ConfigSource::Path(config_path),
+            secrets,
+        ),
+        token,
+    ))
+}
+
+fn dynamic_auth_proxy_request(token: &str) -> Request<Body> {
+    Request::builder()
+        .uri("/proxy/service/resource")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("build proxy request")
+}
 
 #[tokio::test]
 async fn health_route_returns_ok_without_auth() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,6 +107,274 @@ async fn health_route_returns_ok_without_auth() -> Result<(), Box<dyn std::error
     let body = response.into_body().collect().await?.to_bytes();
     assert_eq!(body, bytes::Bytes::from_static(b"OK"));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_fetches_caches_and_substitutes_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let auth_hits = Arc::new(AtomicUsize::new(0));
+    let api_tokens = Arc::new(Mutex::new(Vec::new()));
+    let auth_hits_for_route = auth_hits.clone();
+    let api_tokens_for_route = api_tokens.clone();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(move |request: Request<Body>| {
+                let auth_hits = auth_hits_for_route.clone();
+                async move {
+                    auth_hits.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.method(), http::Method::POST);
+                    assert_eq!(
+                        request.headers().get("content-type").unwrap(),
+                        "application/json"
+                    );
+                    assert_eq!(request.headers().get("accept").unwrap(), "application/json");
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    assert_eq!(body, r#"{"client_id":"id","client_secret":"secret"}"#);
+                    Json(serde_json::json!({
+                        "access_token": "dynamic-token",
+                        "expires_in": 3600
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/{*path}",
+            any(move |request: Request<Body>| {
+                let api_tokens = api_tokens_for_route.clone();
+                async move {
+                    api_tokens.lock().await.push(
+                        request
+                            .headers()
+                            .get("authorization")
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    StatusCode::OK
+                }
+            }),
+        );
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config(&base_url, true)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(dynamic_auth_proxy_request(&token))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    assert_eq!(auth_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        api_tokens.lock().await.as_slice(),
+        ["Bearer dynamic-token", "Bearer dynamic-token"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_serializes_concurrent_token_fetches() -> Result<(), Box<dyn std::error::Error>>
+{
+    let auth_hits = Arc::new(AtomicUsize::new(0));
+    let auth_hits_for_route = auth_hits.clone();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(move || {
+                let auth_hits = auth_hits_for_route.clone();
+                async move {
+                    auth_hits.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    Json(serde_json::json!({
+                        "access_token": "dynamic-token",
+                        "expires_in": 3600
+                    }))
+                }
+            }),
+        )
+        .route("/api/{*path}", any(|| async { StatusCode::OK }));
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config(&base_url, true)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let requests = (0..8).map(|_| {
+        let app = app.clone();
+        let request = dynamic_auth_proxy_request(&token);
+        async move { app.oneshot(request).await }
+    });
+    for response in futures_util::future::join_all(requests).await {
+        assert_eq!(response?.status(), StatusCode::OK);
+    }
+    assert_eq!(auth_hits.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_timeout_includes_waiting_for_concurrent_fetch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(|| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Json(serde_json::json!({"access_token": "late-token"}))
+            }),
+        )
+        .route("/api/{*path}", any(|| async { StatusCode::OK }));
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config_with_timeout(&base_url, false, 50)?;
+    let app = build_router(AppState::from_config(&config)?);
+    let started = std::time::Instant::now();
+
+    let requests = (0..8).map(|_| {
+        let app = app.clone();
+        let request = dynamic_auth_proxy_request(&token);
+        async move { app.oneshot(request).await }
+    });
+    for response in futures_util::future::join_all(requests).await {
+        assert_eq!(response?.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+    assert!(started.elapsed() < Duration::from_millis(250));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_refetches_after_configured_expiration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let auth_hits = Arc::new(AtomicUsize::new(0));
+    let auth_hits_for_route = auth_hits.clone();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(move || {
+                let auth_hits = auth_hits_for_route.clone();
+                async move {
+                    auth_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "access_token": "dynamic-token",
+                        "expires_in": 0
+                    }))
+                }
+            }),
+        )
+        .route("/api/{*path}", any(|| async { StatusCode::OK }));
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config(&base_url, true)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    for _ in 0..2 {
+        assert_eq!(
+            app.clone()
+                .oneshot(dynamic_auth_proxy_request(&token))
+                .await?
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(auth_hits.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_invalidates_on_api_401_without_retrying()
+-> Result<(), Box<dyn std::error::Error>> {
+    let auth_hits = Arc::new(AtomicUsize::new(0));
+    let api_hits = Arc::new(AtomicUsize::new(0));
+    let auth_hits_for_route = auth_hits.clone();
+    let api_hits_for_route = api_hits.clone();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(move || {
+                let auth_hits = auth_hits_for_route.clone();
+                async move {
+                    let token_number = auth_hits.fetch_add(1, Ordering::SeqCst) + 1;
+                    Json(serde_json::json!({
+                        "access_token": format!("dynamic-token-{token_number}")
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/{*path}",
+            any(move |request: Request<Body>| {
+                let api_hits = api_hits_for_route.clone();
+                async move {
+                    api_hits.fetch_add(1, Ordering::SeqCst);
+                    if request.headers().get("authorization").unwrap() == "Bearer dynamic-token-1" {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::OK
+                    }
+                }
+            }),
+        );
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config(&base_url, false)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let first = app
+        .clone()
+        .oneshot(dynamic_auth_proxy_request(&token))
+        .await?;
+    assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(auth_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(api_hits.load(Ordering::SeqCst), 1);
+
+    let second = app.oneshot(dynamic_auth_proxy_request(&token)).await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(auth_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(api_hits.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_auth_returns_filtered_auth_endpoint_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let api_hits = Arc::new(AtomicUsize::new(0));
+    let api_hits_for_route = api_hits.clone();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(|| async {
+                Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("content-type", "application/problem+json")
+                    .header("x-auth-error", "rate-limited")
+                    .header("set-cookie", "secret=session")
+                    .body(Body::from(r#"{"error":"rate_limited"}"#))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/api/{*path}",
+            any(move || {
+                let api_hits = api_hits_for_route.clone();
+                async move {
+                    api_hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+    let base_url = spawn_upstream(upstream).await?;
+    let (config, token) = load_dynamic_auth_test_config(&base_url, false)?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app.oneshot(dynamic_auth_proxy_request(&token)).await?;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.headers().get("x-auth-error").unwrap(),
+        "rate-limited"
+    );
+    assert!(response.headers().get("set-cookie").is_none());
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(body, r#"{"error":"rate_limited"}"#);
+    assert_eq!(api_hits.load(Ordering::SeqCst), 0);
     Ok(())
 }
 

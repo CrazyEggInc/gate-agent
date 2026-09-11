@@ -303,6 +303,8 @@ api_access = {}
                 "first-token".to_string(),
             )]),
             basic_auth: None,
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         },
         None,
@@ -335,6 +337,8 @@ api_access = {}
                 "second-token".to_string(),
             )]),
             basic_auth: None,
+            auth: None,
+            replace_auth: true,
             timeout_ms: 7_500,
         },
         None,
@@ -400,6 +404,8 @@ api_access = {}
                 ),
             ]),
             basic_auth: None,
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         },
         None,
@@ -422,6 +428,61 @@ api_access = {}
         "headers = { authorization = \"Bearer upstream-token\", x-zeta-token = \"zeta-secret\" }"
     ));
 
+    Ok(())
+}
+
+#[test]
+fn updating_unrelated_api_fields_preserves_dynamic_auth_formatting()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    fs::write(
+        &config_path,
+        r#"[clients.default]
+bearer_token_id = "default-token"
+bearer_token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bearer_token_expires_at = "2030-01-01T00:00:00Z"
+api_access = {}
+
+[apis.projects]
+base_url = "https://projects.internal.example/api"
+headers = { authorization = "Bearer {{response_token}}" }
+timeout_ms = 5000
+
+# preserve auth comments
+[apis.projects.auth]
+url = "https://auth.internal.example/token"
+method = "POST"
+content_type = "application/json"
+body = '{"client_secret":"secret"}'
+
+[apis.projects.auth.response]
+token = "access_token"
+"#,
+    )?;
+
+    write::upsert_api(
+        &config_path,
+        &ApiUpsert {
+            name: "projects".to_owned(),
+            base_url: "https://projects.internal.example/v2".to_owned(),
+            headers: std::collections::BTreeMap::from([(
+                "authorization".to_owned(),
+                "Bearer {{response_token}}".to_owned(),
+            )]),
+            basic_auth: None,
+            auth: None,
+            replace_auth: false,
+            timeout_ms: 7_500,
+        },
+        None,
+    )?;
+
+    let contents = fs::read_to_string(&config_path)?;
+    assert!(contents.contains("# preserve auth comments"));
+    assert!(contents.contains("[apis.projects.auth]"));
+    assert!(contents.contains("[apis.projects.auth.response]"));
+    assert!(contents.contains("body = '{\"client_secret\":\"secret\"}'"));
     Ok(())
 }
 
@@ -454,6 +515,8 @@ api_access = {}
                 username: "billing-user".to_string(),
                 password: Some("billing-pass".to_string()),
             }),
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         },
         None,
@@ -497,6 +560,8 @@ api_access = {}
                 username: "billing-user".to_string(),
                 password: None,
             }),
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         },
         None,
@@ -531,6 +596,8 @@ fn api_upsert_debug_redacts_basic_auth_password() {
                 username: "billing-user".to_string(),
                 password: Some("billing-pass".to_string()),
             }),
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         }
     );
@@ -576,6 +643,8 @@ timeout_ms = 5000
                 username: "billing-user".to_string(),
                 password: None,
             }),
+            auth: None,
+            replace_auth: true,
             timeout_ms: 5_000,
         },
         None,
@@ -643,6 +712,8 @@ notes = "keep-me"
             base_url: "https://projects.internal.example/v2".to_string(),
             headers: std::collections::BTreeMap::new(),
             basic_auth: None,
+            auth: None,
+            replace_auth: true,
             timeout_ms: 7_500,
         },
         None,

@@ -129,7 +129,6 @@ curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
 
 # use cargo only for local development
-cargo run -- start --config=.secrets --log-level=debug
 cargo test
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings

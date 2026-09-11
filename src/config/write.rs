@@ -46,7 +46,35 @@ pub struct ApiUpsert {
     pub base_url: String,
     pub headers: BTreeMap<String, String>,
     pub basic_auth: Option<ApiBasicAuthUpsert>,
+    pub auth: Option<ApiAuthUpsert>,
+    pub replace_auth: bool,
     pub timeout_ms: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApiAuthUpsert {
+    pub url: String,
+    pub method: String,
+    pub content_type: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
+    pub response_token: String,
+    pub response_expires_in: Option<String>,
+}
+
+impl Debug for ApiAuthUpsert {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiAuthUpsert")
+            .field("url", &self.url)
+            .field("method", &self.method)
+            .field("content_type", &self.content_type)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("body", &"[REDACTED]")
+            .field("response_token", &self.response_token)
+            .field("response_expires_in", &self.response_expires_in)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,10 +225,19 @@ pub fn upsert_api(
         set_string_inline_table(api_table, "headers", &api.headers);
     }
 
-    match &api.basic_auth {
-        Some(basic_auth) => set_basic_auth_inline_table(api_table, basic_auth),
-        None => {
-            api_table.remove("basic_auth");
+    if api.replace_auth {
+        match &api.basic_auth {
+            Some(basic_auth) => set_basic_auth_inline_table(api_table, basic_auth),
+            None => {
+                api_table.remove("basic_auth");
+            }
+        }
+
+        match &api.auth {
+            Some(auth) => set_auth_inline_table(api_table, auth),
+            None => {
+                api_table.remove("auth");
+            }
         }
     }
 
@@ -554,6 +591,35 @@ fn set_basic_auth_inline_table(table: &mut Table, basic_auth: &ApiBasicAuthUpser
         inline.insert("password", toml_edit::Value::from(password));
     }
     table["basic_auth"] = Item::Value(toml_edit::Value::InlineTable(inline));
+}
+
+fn set_auth_inline_table(table: &mut Table, auth: &ApiAuthUpsert) {
+    let mut inline = toml_edit::InlineTable::new();
+    inline.insert("url", toml_edit::Value::from(auth.url.as_str()));
+    inline.insert("method", toml_edit::Value::from(auth.method.as_str()));
+    inline.insert(
+        "content_type",
+        toml_edit::Value::from(auth.content_type.as_str()),
+    );
+    if !auth.headers.is_empty() {
+        let mut headers = toml_edit::InlineTable::new();
+        for (name, value) in &auth.headers {
+            headers.insert(name, toml_edit::Value::from(value.as_str()));
+        }
+        inline.insert("headers", toml_edit::Value::InlineTable(headers));
+    }
+    inline.insert("body", toml_edit::Value::from(auth.body.as_str()));
+
+    let mut response = toml_edit::InlineTable::new();
+    response.insert(
+        "token",
+        toml_edit::Value::from(auth.response_token.as_str()),
+    );
+    if let Some(expires_in) = auth.response_expires_in.as_deref() {
+        response.insert("expires_in", toml_edit::Value::from(expires_in));
+    }
+    inline.insert("response", toml_edit::Value::InlineTable(response));
+    table["auth"] = Item::Value(toml_edit::Value::InlineTable(inline));
 }
 
 fn apply_bearer_metadata(table: &mut Table, metadata: &BearerTokenMetadata) {

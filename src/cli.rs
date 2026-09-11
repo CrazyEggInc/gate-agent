@@ -225,6 +225,13 @@ pub struct ConfigApiArgs {
 
     #[arg(
         long,
+        conflicts_with = "basic_auth",
+        help = "Configure dynamic upstream auth interactively"
+    )]
+    pub auth: bool,
+
+    #[arg(
+        long,
         help = "Upstream headers as name=value pairs (example: x-api-key=secret). Repeat flag to add multiple upstream headers"
     )]
     pub header: Vec<String>,

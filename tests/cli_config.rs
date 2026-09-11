@@ -14,7 +14,9 @@ use gate_agent::config::app_config::DEFAULT_LOG_LEVEL;
 use gate_agent::config::password::PASSWORD_ENV_VAR;
 use gate_agent::config::path::CONFIG_ENV_VAR;
 use gate_agent::config::secrets::{ApiAccessMethod, ApiAccessRule};
-use gate_agent::config::write::{self, ClientAccessUpsert, ClientUpsert, sha256_hex};
+use gate_agent::config::write::{
+    self, ApiAuthUpsert, ClientAccessUpsert, ClientUpsert, sha256_hex,
+};
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::tempdir;
 use toml::Value;
@@ -25,6 +27,43 @@ const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
 const TEST_PROMPT_PASSWORD_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_PASSWORD";
 const DISABLE_INTERACTIVE_ENV_VAR: &str = "GATE_AGENT_DISABLE_INTERACTIVE";
 const ENCRYPTION_FACTOR_ENV_VAR: &str = "GATE_AGENT_ENCRYPTION_FACTOR";
+
+#[test]
+fn config_api_rejects_case_insensitive_duplicate_dynamic_auth_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    let error = apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        name: "projects".to_owned(),
+        delete: false,
+        base_url: Some("https://projects.example.test".to_owned()),
+        headers: Some(vec!["authorization=Bearer {{response_token}}".to_owned()]),
+        auth: ConfigApiAuthSelection::Dynamic(ApiAuthUpsert {
+            url: "https://auth.example.test/token".to_owned(),
+            method: "POST".to_owned(),
+            content_type: "application/json".to_owned(),
+            headers: std::collections::BTreeMap::from([
+                ("X-Client".to_owned(), "one".to_owned()),
+                ("x-client".to_owned(), "two".to_owned()),
+            ]),
+            body: "{}".to_owned(),
+            response_token: "access_token".to_owned(),
+            response_expires_in: None,
+        }),
+        timeout_ms: Some(5_000),
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "auth.headers.x-client duplicates another configured header"
+    );
+    assert!(!config_path.exists());
+    Ok(())
+}
 
 const VALID_BEARER_VALIDATE_CONFIG: &str = r#"
 [clients.default]
@@ -2327,6 +2366,7 @@ fn config_add_api_uses_prompt_seam_for_missing_fields() -> Result<(), Box<dyn st
                 name: None,
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2386,6 +2426,7 @@ fn config_add_api_skips_header_prompts_and_persistence_when_headers_are_none()
                 name: None,
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2449,6 +2490,7 @@ fn config_update_api_interactive_preserves_existing_no_headers_when_prompt_left_
                 name: Some("projects".to_owned()),
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2464,6 +2506,78 @@ fn config_update_api_interactive_preserves_existing_no_headers_when_prompt_left_
     );
     assert!(api.get("headers").is_none());
     assert!(api.get("auth_scheme").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn config_update_api_interactive_preserves_existing_dynamic_auth_when_prompts_left_blank()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let _env = EnvGuard::enter(temp_dir.path())?;
+    unsafe {
+        std::env::remove_var(CONFIG_ENV_VAR);
+    }
+    let config_path = temp_dir.path().join(".secrets");
+
+    init(ConfigInitArgs {
+        config: Some(config_path.clone()),
+        encrypted: false,
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+    })?;
+
+    apply_api(ConfigApiArgs {
+        config: Some(config_path.clone()),
+        password: None,
+        log_level: DEFAULT_LOG_LEVEL.to_owned(),
+        delete: false,
+        name: "projects".to_owned(),
+        base_url: Some("https://projects.internal.example/api".to_owned()),
+        headers: Some(vec!["authorization=Bearer {{response_token}}".to_owned()]),
+        auth: ConfigApiAuthSelection::Dynamic(ApiAuthUpsert {
+            url: "https://auth.example.test/token".to_owned(),
+            method: "POST".to_owned(),
+            content_type: "application/json".to_owned(),
+            headers: std::collections::BTreeMap::new(),
+            body: "{}".to_owned(),
+            response_token: "access_token".to_owned(),
+            response_expires_in: None,
+        }),
+        timeout_ms: Some(5_000),
+    })?;
+
+    set_test_prompt_inputs(&["", "", ""])?;
+
+    gate_agent::commands::run(gate_agent::cli::Command::Config(
+        gate_agent::cli::ConfigArgs {
+            command: gate_agent::cli::ConfigCommand::Api(gate_agent::cli::ConfigApiArgs {
+                config: Some(config_path.clone()),
+                password: None,
+                log_level: DEFAULT_LOG_LEVEL.to_owned(),
+                delete: false,
+                name: Some("projects".to_owned()),
+                base_url: None,
+                basic_auth: false,
+                auth: false,
+                header: vec![],
+                timeout_ms: None,
+            }),
+        },
+    ))?;
+
+    let config = load_toml(&config_path)?;
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "headers", "authorization"]),
+        "Bearer {{response_token}}"
+    );
+    assert_eq!(
+        string_at(&config, &["apis", "projects", "auth", "url"]),
+        "https://auth.example.test/token"
+    );
 
     Ok(())
 }
@@ -2515,6 +2629,7 @@ fn config_update_api_interactive_preserves_existing_header_values_with_commas_wh
                 name: Some("projects".to_owned()),
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2578,6 +2693,7 @@ fn config_update_api_interactive_preserves_existing_regular_table_headers_when_p
                 name: Some("projects".to_owned()),
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -2689,6 +2805,7 @@ fn config_update_api_interactive_clears_existing_headers_when_prompt_is_none()
                 name: None,
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: None,
             }),
@@ -3352,6 +3469,7 @@ fn config_add_api_non_interactive_allows_missing_headers() -> Result<(), Box<dyn
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),
@@ -3740,6 +3858,7 @@ fn config_add_api_rejects_malformed_header_non_interactively()
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
                 basic_auth: false,
+                auth: false,
                 header: vec!["authorization".to_owned()],
                 timeout_ms: Some(5_000),
             }),
@@ -3786,6 +3905,7 @@ fn config_add_api_rejects_duplicate_header_keys_after_normalization()
                 name: Some("projects".to_owned()),
                 base_url: Some("https://projects.internal.example/api".to_owned()),
                 basic_auth: false,
+                auth: false,
                 header: vec![
                     "Authorization=Bearer one".to_owned(),
                     "authorization=Bearer two".to_owned(),
@@ -4816,6 +4936,7 @@ fn config_questionnaire_commands_fail_non_interactively_without_required_input()
                 name: None,
                 base_url: None,
                 basic_auth: false,
+                auth: false,
                 header: vec![],
                 timeout_ms: Some(5_000),
             }),

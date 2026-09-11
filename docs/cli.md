@@ -174,6 +174,7 @@ Accepted flags:
 - `--name`
 - `--base-url`
 - `--basic-auth`
+- `--auth`
 - repeated `--header <name=value>` (for example, `--header x-api-key=secret`)
 - optional `--timeout-ms`
 - `-d` / `--delete`
@@ -186,13 +187,17 @@ Behavior:
 - adds or updates one API entry by name
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - `config api` runs the optional interactive questionnaire only when no API-management flags are supplied
-- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, `--delete`, and `--basic-auth`
+- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, `--delete`, `--basic-auth`, and `--auth`
 - when any API-management flag is supplied, the interactive questionnaire is disabled and omitted flags are treated as non-interactive omissions
 - when using any API-management flag to create a new API, callers must supply `--name`, `--base-url`, and any other required values; partial create attempts fail with missing-field errors instead of prompting
 - in non-interactive update mode, omitted fields preserve existing values
 - `--basic-auth` selects upstream Basic auth mode and still prompts for credentials because the flag explicitly requests that auth flow
 - `--basic-auth` selects upstream Basic auth mode and always triggers credential prompts, so it is not fully non-interactive
 - `--basic-auth` fails non-zero in non-interactive sessions when credential prompts cannot run
+- `--auth` selects dynamic upstream auth and prompts for the auth URL, method, content type, optional headers, hidden raw body, response token field, and optional expiry field
+- `--auth` and `--basic-auth` are mutually exclusive
+- dynamic auth requires an API header containing `{{response_token}}`, such as `--header 'authorization=Bearer {{response_token}}'`
+- `--auth` fails non-zero in non-interactive sessions when its prompts cannot run
 - each `--header` value must use `<name>=<value>` format, for example `x-api-key=secret`
 - repeated `--header` flags replace the stored upstream header map with exactly the provided headers for that invocation, subject to auth-mode rules below
 - repeated `--header` still manages generic upstream headers
@@ -235,7 +240,7 @@ Behavior:
 - any other Basic auth password text stores that text as `basic_auth.password`
 - existing Basic auth password prompt includes `blank clears existing password; enter password to keep or change`
 - new Basic auth password prompt includes `blank stores empty password; enter 'none' for username-only basic auth`
-- explicit API-management args skip the optional questionnaire; `--basic-auth` always prompts for credentials and therefore is not fully non-interactive
+- explicit API-management args skip the optional questionnaire; `--basic-auth` and `--auth` always prompt for credentials and therefore are not fully non-interactive
 
 ### `config group`
 

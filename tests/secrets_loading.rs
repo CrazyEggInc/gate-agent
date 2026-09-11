@@ -302,6 +302,10 @@ fn secrets_dev_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::E
         .get("default")
         .expect("default client config");
     let api = config.apis.get("projects").expect("projects api config");
+    let dynamic_api = config
+        .apis
+        .get("dynamic-projects")
+        .expect("dynamic-projects api config");
 
     assert!(!sample_contents.contains("[auth]"));
     assert!(!sample_contents.contains("api_key"));
@@ -311,9 +315,7 @@ fn secrets_dev_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::E
     assert!(sample_contents.contains("bearer_token_expires_at = \"2036-10-08T12:00:00Z\""));
     assert!(sample_contents.contains("group = \"default\""));
     assert!(sample_contents.contains("[groups.default]"));
-    assert!(
-        sample_contents.contains("api_access = { projects = [{ method = \"*\", path = \"*\" }] }")
-    );
+    assert!(sample_contents.contains("dynamic-projects = [{ method = \"*\", path = \"*\" }]"));
     assert!(
         sample_contents.contains("headers = { authorization = \"Bearer local-upstream-token\" }")
     );
@@ -328,9 +330,12 @@ fn secrets_dev_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::E
     );
     assert_eq!(
         client.api_access,
-        [("projects".to_string(), vec![any_rule("*")])]
-            .into_iter()
-            .collect()
+        [
+            ("dynamic-projects".to_string(), vec![any_rule("*")]),
+            ("projects".to_string(), vec![any_rule("*")]),
+        ]
+        .into_iter()
+        .collect()
     );
     assert_eq!(api.base_url.as_str(), "http://127.0.0.1:18081/api");
     assert_eq!(api.headers.len(), 1);
@@ -342,6 +347,18 @@ fn secrets_dev_matches_dev_sample_contract() -> Result<(), Box<dyn std::error::E
     assert_eq!(api.description, None);
     assert_eq!(api.docs_url, None);
     assert_eq!(api.timeout_ms, 5000);
+    assert_eq!(
+        dynamic_api.base_url.as_str(),
+        "http://127.0.0.1:18081/api/v2"
+    );
+    assert_eq!(
+        dynamic_api.headers[0].1.expose_secret(),
+        "Bearer {{response_token}}"
+    );
+    let auth = dynamic_api.auth.as_ref().expect("dynamic auth config");
+    assert_eq!(auth.url.as_str(), "http://127.0.0.1:18081/auth/token");
+    assert_eq!(auth.response.token, "token");
+    assert_eq!(auth.response.expires_in.as_deref(), Some("expires_in"));
 
     Ok(())
 }
@@ -1670,7 +1687,7 @@ extra_header = "nope"
     assert!(
         error
             .to_string()
-            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `headers`, `basic_auth`, `timeout_ms`")
+            .contains("unknown field `extra_header`, expected one of `base_url`, `description`, `docs_url`, `headers`, `basic_auth`, `auth`, `timeout_ms`")
     );
 
     Ok(())
@@ -1951,6 +1968,97 @@ timeout_ms = 5000
     assert_eq!(basic_auth.username, "billing-user");
     assert_eq!(basic_auth.password.expose_secret(), "billing-pass");
     assert!(api.headers.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_loads_dynamic_api_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = [{ method = "*", path = "*" }] }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { authorization = "Bearer {{response_token}}" }
+auth = { url = "https://auth.internal.example/token", method = "post", content_type = "application/json", headers = { accept = "application/json" }, body = '{"client_id":"id","client_secret":"secret"}', response = { token = "access_token", expires_in = "expires_in" } }
+timeout_ms = 5000
+"#,
+    )?;
+
+    let config = SecretsConfig::load_from_file(&secrets_file)?;
+    let api = config.apis.get("billing").expect("billing api config");
+    let auth = api.auth.as_ref().expect("dynamic auth");
+
+    assert_eq!(auth.url.as_str(), "https://auth.internal.example/token");
+    assert_eq!(auth.method, http::Method::POST);
+    assert_eq!(auth.content_type, "application/json");
+    assert_eq!(auth.headers[0].0, "accept");
+    assert_eq!(auth.headers[0].1.expose_secret(), "application/json");
+    assert_eq!(
+        auth.body.expose_secret(),
+        r#"{"client_id":"id","client_secret":"secret"}"#
+    );
+    assert_eq!(auth.response.token, "access_token");
+    assert_eq!(auth.response.expires_in.as_deref(), Some("expires_in"));
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_dynamic_auth_without_token_placeholder()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = [{ method = "*", path = "*" }] }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { authorization = "Bearer static" }
+auth = { url = "https://auth.internal.example/token", method = "POST", content_type = "application/json", body = "{}", response = { token = "access_token" } }
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "apis.billing.headers must contain {{response_token}} when auth is configured"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn secrets_config_rejects_dynamic_auth_with_basic_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, secrets_file) = write_secrets_file(
+        r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "c1ac6c9bad0a391759c36f9d435d04db39e6f8957809b907c5cf14d113cb5faa"
+bearer_token_expires_at = "2026-10-08T12:00:00Z"
+api_access = { billing = [{ method = "*", path = "*" }] }
+
+[apis.billing]
+base_url = "https://billing.internal.example"
+headers = { x-api-key = "{{response_token}}" }
+basic_auth = { username = "billing-user" }
+auth = { url = "https://auth.internal.example/token", method = "POST", content_type = "application/json", body = "{}", response = { token = "access_token" } }
+"#,
+    )?;
+
+    let error = SecretsConfig::load_from_file(&secrets_file).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "apis.billing cannot set both basic_auth and auth"
+    );
 
     Ok(())
 }

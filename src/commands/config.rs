@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,10 +18,12 @@ use crate::config::password::{
     resolve_for_encrypted_create, resolve_for_encrypted_read_with_source,
 };
 use crate::config::path::{resolve_config_path, resolve_config_path_for_update};
-use crate::config::secrets::{ApiAccessMethod, ApiAccessRule, SecretsConfig};
+use crate::config::secrets::{
+    ApiAccessMethod, ApiAccessRule, RESPONSE_TOKEN_PLACEHOLDER, SecretsConfig,
+};
 use crate::config::write::{
-    self, ApiBasicAuthUpsert, ApiUpsert, ClientAccessUpsert, ClientUpsert, GroupUpsert,
-    WriteConfigError,
+    self, ApiAuthUpsert, ApiBasicAuthUpsert, ApiUpsert, ClientAccessUpsert, ClientUpsert,
+    GroupUpsert, WriteConfigError,
 };
 
 const TEST_PROMPT_INPUTS_ENV_VAR: &str = "GATE_AGENT_TEST_PROMPT_INPUTS";
@@ -130,6 +133,7 @@ pub enum ConfigApiAuthSelection {
         username: String,
         password: Option<String>,
     },
+    Dynamic(ApiAuthUpsert),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +148,12 @@ pub struct ConfigApiArgs {
     pub auth: ConfigApiAuthSelection,
     pub timeout_ms: Option<u64>,
 }
+
+type ResolvedApiAuthState = (
+    BTreeMap<String, String>,
+    Option<ApiBasicAuthUpsert>,
+    Option<ApiAuthUpsert>,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigClientArgs {
@@ -268,6 +278,7 @@ pub struct ExistingApiState {
     pub base_url: String,
     pub headers: BTreeMap<String, String>,
     pub basic_auth: Option<ExistingApiBasicAuthState>,
+    pub auth: Option<ApiAuthUpsert>,
     pub timeout_ms: u64,
 }
 
@@ -450,7 +461,8 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
         None => None,
     };
 
-    let (headers, basic_auth) =
+    let replace_auth = !matches!(args.auth, ConfigApiAuthSelection::Preserve);
+    let (headers, basic_auth, auth) =
         resolve_api_auth_state(&args.name, existing.as_ref(), parsed_headers, &args.auth)?;
 
     let timeout_ms = args
@@ -475,6 +487,8 @@ pub fn apply_api(args: ConfigApiArgs) -> Result<ResourceMutationOutcome, ConfigC
             base_url,
             headers,
             basic_auth,
+            auth,
+            replace_auth,
             timeout_ms,
         },
         prepared.password.as_ref(),
@@ -918,6 +932,19 @@ fn load_existing_api_state_from_prepared(
             ConfigCommandError::new(format!("apis.{api_name}.timeout_ms is required"))
         })?;
 
+    let parsed: toml::Value = toml::from_str(&document.to_string()).map_err(|error| {
+        ConfigCommandError::new(format!(
+            "failed to parse config '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let auth = parsed
+        .get("apis")
+        .and_then(|apis| apis.get(api_name))
+        .and_then(|api| api.get("auth"))
+        .map(|auth| parse_existing_api_auth(auth, api_name))
+        .transpose()?;
+
     Ok(Some(ExistingApiState {
         base_url,
         headers: parse_string_inline_table(
@@ -926,8 +953,74 @@ fn load_existing_api_state_from_prepared(
             &format!("apis.{api_name}.headers"),
         )?,
         basic_auth: parse_api_basic_auth_table(api_table, &format!("apis.{api_name}.basic_auth"))?,
+        auth,
         timeout_ms,
     }))
+}
+
+fn parse_existing_api_auth(
+    value: &toml::Value,
+    api_name: &str,
+) -> Result<ApiAuthUpsert, ConfigCommandError> {
+    let field = format!("apis.{api_name}.auth");
+    let table = value
+        .as_table()
+        .ok_or_else(|| ConfigCommandError::new(format!("{field} must be a table")))?;
+    let required = |name: &str| {
+        table
+            .get(name)
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| ConfigCommandError::new(format!("{field}.{name} must be a string")))
+    };
+    let headers = table
+        .get("headers")
+        .map(|headers| {
+            headers
+                .as_table()
+                .ok_or_else(|| ConfigCommandError::new(format!("{field}.headers must be a table")))?
+                .iter()
+                .map(|(name, value)| {
+                    value
+                        .as_str()
+                        .map(|value| (name.clone(), value.to_owned()))
+                        .ok_or_else(|| {
+                            ConfigCommandError::new(format!(
+                                "{field}.headers.{name} must be a string"
+                            ))
+                        })
+                })
+                .collect()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let response = table
+        .get("response")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ConfigCommandError::new(format!("{field}.response must be a table")))?;
+    let response_token = response
+        .get("token")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| ConfigCommandError::new(format!("{field}.response.token must be a string")))?
+        .to_owned();
+    let response_expires_in = response
+        .get("expires_in")
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ConfigCommandError::new(format!("{field}.response.expires_in must be a string"))
+            })
+        })
+        .transpose()?;
+
+    Ok(ApiAuthUpsert {
+        url: required("url")?,
+        method: required("method")?,
+        content_type: required("content_type")?,
+        headers,
+        body: required("body")?,
+        response_token,
+        response_expires_in,
+    })
 }
 
 fn parse_api_basic_auth_table(
@@ -1015,7 +1108,7 @@ fn resolve_api_auth_state(
     existing: Option<&ExistingApiState>,
     parsed_headers: Option<BTreeMap<String, String>>,
     auth: &ConfigApiAuthSelection,
-) -> Result<(BTreeMap<String, String>, Option<ApiBasicAuthUpsert>), ConfigCommandError> {
+) -> Result<ResolvedApiAuthState, ConfigCommandError> {
     let parsed_headers_have_authorization = parsed_headers
         .as_ref()
         .is_some_and(headers_contain_authorization);
@@ -1025,14 +1118,19 @@ fn resolve_api_auth_state(
             .unwrap_or_default()
     });
 
-    let basic_auth = match auth {
-        ConfigApiAuthSelection::Preserve => existing
-            .and_then(|state| state.basic_auth.as_ref())
-            .map(existing_basic_auth_to_upsert),
-        ConfigApiAuthSelection::Header => None,
+    let (basic_auth, dynamic_auth) = match auth {
+        ConfigApiAuthSelection::Preserve => match existing {
+            Some(state) if state.basic_auth.is_some() => (
+                state.basic_auth.as_ref().map(existing_basic_auth_to_upsert),
+                None,
+            ),
+            Some(state) => (None, state.auth.clone()),
+            None => (None, None),
+        },
+        ConfigApiAuthSelection::Header => (None, None),
         ConfigApiAuthSelection::None => {
             remove_authorization_headers(&mut headers);
-            None
+            (None, None)
         }
         ConfigApiAuthSelection::Basic { username, password } => {
             if parsed_headers_have_authorization {
@@ -1042,11 +1140,15 @@ fn resolve_api_auth_state(
             }
 
             remove_authorization_headers(&mut headers);
-            Some(ApiBasicAuthUpsert {
-                username: trimmed_required("basic_auth.username", username)?,
-                password: password.clone(),
-            })
+            (
+                Some(ApiBasicAuthUpsert {
+                    username: trimmed_required("basic_auth.username", username)?,
+                    password: password.clone(),
+                }),
+                None,
+            )
         }
+        ConfigApiAuthSelection::Dynamic(auth) => (None, Some(validate_api_auth(auth.clone())?)),
     };
 
     if basic_auth.is_some() && headers_contain_authorization(&headers) {
@@ -1055,7 +1157,100 @@ fn resolve_api_auth_state(
         )));
     }
 
-    Ok((headers, basic_auth))
+    if dynamic_auth.is_some()
+        && !headers
+            .values()
+            .any(|value| value.contains(RESPONSE_TOKEN_PLACEHOLDER))
+    {
+        return Err(ConfigCommandError::new(format!(
+            "apis.{slug}.headers must contain {RESPONSE_TOKEN_PLACEHOLDER} when auth is configured"
+        )));
+    }
+    if dynamic_auth.is_none()
+        && headers
+            .values()
+            .any(|value| value.contains(RESPONSE_TOKEN_PLACEHOLDER))
+    {
+        return Err(ConfigCommandError::new(format!(
+            "apis.{slug}.headers cannot contain {RESPONSE_TOKEN_PLACEHOLDER} without auth"
+        )));
+    }
+
+    Ok((headers, basic_auth, dynamic_auth))
+}
+
+fn validate_api_auth(mut auth: ApiAuthUpsert) -> Result<ApiAuthUpsert, ConfigCommandError> {
+    auth.url = trimmed_required("auth.url", &auth.url)?;
+    let url = url::Url::parse(&auth.url)
+        .map_err(|error| ConfigCommandError::new(format!("auth.url is invalid: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ConfigCommandError::new("auth.url must use http or https"));
+    }
+    auth.method = trimmed_required("auth.method", &auth.method)?.to_ascii_uppercase();
+    http::Method::from_bytes(auth.method.as_bytes())
+        .map_err(|error| ConfigCommandError::new(format!("auth.method is invalid: {error}")))?;
+    if auth.content_type.is_empty() {
+        return Err(ConfigCommandError::new("auth.content_type cannot be empty"));
+    }
+    http::HeaderValue::from_str(&auth.content_type).map_err(|error| {
+        ConfigCommandError::new(format!("auth.content_type is invalid: {error}"))
+    })?;
+    if auth.body.is_empty() {
+        return Err(ConfigCommandError::new("auth.body cannot be empty"));
+    }
+    auth.response_token = trimmed_required("auth.response.token", &auth.response_token)?;
+    auth.response_expires_in = auth
+        .response_expires_in
+        .map(|value| trimmed_required("auth.response.expires_in", &value))
+        .transpose()?;
+    if auth.response_expires_in.as_ref() == Some(&auth.response_token) {
+        return Err(ConfigCommandError::new(
+            "auth.response.token and auth.response.expires_in must name different fields",
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for (name, value) in &auth.headers {
+        let parsed_name = http::HeaderName::from_str(name).map_err(|error| {
+            ConfigCommandError::new(format!("auth.headers.{name} is invalid: {error}"))
+        })?;
+        if is_managed_auth_header(&parsed_name) {
+            return Err(ConfigCommandError::new(format!(
+                "auth.headers.{name} is managed by gate-agent"
+            )));
+        }
+        if !names.insert(parsed_name.as_str().to_owned()) {
+            return Err(ConfigCommandError::new(format!(
+                "auth.headers.{name} duplicates another configured header"
+            )));
+        }
+        if value.trim().is_empty() {
+            return Err(ConfigCommandError::new(format!(
+                "auth.headers.{name} is invalid: empty value"
+            )));
+        }
+        http::HeaderValue::from_str(value).map_err(|error| {
+            ConfigCommandError::new(format!("auth.headers.{name} is invalid: {error}"))
+        })?;
+    }
+    Ok(auth)
+}
+
+fn is_managed_auth_header(name: &http::HeaderName) -> bool {
+    name == http::header::HOST
+        || name == http::header::CONTENT_LENGTH
+        || name == http::header::CONTENT_TYPE
+        || matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "proxy-connection"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        )
 }
 
 fn headers_contain_authorization(headers: &BTreeMap<String, String>) -> bool {
@@ -1519,6 +1714,30 @@ pub(crate) fn prompt_optional_text(
     }
 
     Ok(Some(trimmed.to_owned()))
+}
+
+pub(crate) fn prompt_optional_secret_text(
+    prompt: &str,
+    non_interactive_message: &str,
+) -> Result<Option<String>, ConfigCommandError> {
+    let response = if let Some(response) = take_test_prompt_input()? {
+        response
+    } else {
+        if interactive_prompts_disabled()
+            || !std::io::stdin().is_terminal()
+            || !std::io::stderr().is_terminal()
+        {
+            return Err(ConfigCommandError::new(non_interactive_message));
+        }
+        rpassword::prompt_password(format!("{prompt}: ")).map_err(|error| {
+            ConfigCommandError::new(format!("failed to read secret prompt: {error}"))
+        })?
+    };
+    if response.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(response))
+    }
 }
 
 pub(crate) fn prompt_yes_no(

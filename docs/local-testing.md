@@ -28,22 +28,27 @@ Expected properties:
 - start with `docker compose up -d dummy-upstream`
 - binds `127.0.0.1:18081` on the host
 - health endpoint at `http://127.0.0.1:18081/healthz`
-- protected API routes under `http://127.0.0.1:18081/api/...`
-- direct protected requests require `Authorization: Bearer local-upstream-token`
+- static-auth project routes under `http://127.0.0.1:18081/api/v1/...`
+- dynamic-auth project routes under `http://127.0.0.1:18081/api/v2/...`
+- `POST http://127.0.0.1:18081/auth/token` validates local JSON credentials and returns a generated token with `expires_in`
+- v1 requests require `Authorization: Bearer local-upstream-token`
+- v2 requests require an unexpired token returned by `/auth/token`
 
 ## Local config
 
 `.secrets.dev` is ready-to-run local sample config.
 
-Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It already includes populated local access for dummy upstream: `default` uses `group = "default"`, `groups.default` grants `api_access = { projects = [{ method = "get", path = "*" }] }`, and `projects` points at dummy upstream with `headers = { authorization = "Bearer local-upstream-token" }`. If you create fresh config instead, prefer `config init` and save printed token immediately.
+Its committed bearer token metadata uses long-lived sample expiry so documented local flow does not quietly age out during normal development. It includes access to the dummy upstream through both `projects`, which injects a static token into v1 requests, and `dynamic-projects`, which obtains generated tokens from `/auth/token` before calling v2. If you create fresh config instead, prefer `config init` and save the printed token immediately.
 
 Expected committed sample defaults:
 
 - a `default` client is available
 - `default` uses `group = "default"`
-- `groups.default` grants `api_access = { projects = [{ method = "get", path = "*" }] }`
-- `projects` points at dummy upstream
+- `groups.default` grants all routes for `projects` and `dynamic-projects`
+- `projects` points at dummy upstream v1
 - `projects` configures `headers = { authorization = "Bearer local-upstream-token" }`
+- `dynamic-projects` points at dummy upstream v2
+- `dynamic-projects` obtains tokens from the dummy `/auth/token` endpoint and injects them through `headers.authorization`
 
 The committed sample config stores only bearer token metadata. For local testing, the matching bearer token is:
 
@@ -66,7 +71,7 @@ cat .secrets.dev | cargo run -- start --log-level info
 
 If you create fresh config instead, `config init` prints generated default bearer token once. Save it immediately; only token id, hash, and expiry are persisted.
 
-Fresh configs created with `config init` now use same group-backed structure as committed sample, but they intentionally start with `clients.default.group = "default"` and `groups.default.api_access = {}`. Fresh init does not pre-authorize `projects`; add APIs first, then update group access or assign different group access before using proxy flow.
+Fresh configs created with `config init` use the same group-backed structure as the committed sample, but they intentionally start with `clients.default.group = "default"` and `groups.default.api_access = {}`. Fresh init does not pre-authorize any API; add APIs first, then update group access or assign different group access before using proxy flow.
 
 Fresh configs created with `config init` also write an explicit `[server]` section. The questionnaire prompts for bind and port, defaults to `127.0.0.1:8787`, and remote-access setups should use `0.0.0.0` for the bind value.
 
@@ -85,6 +90,22 @@ Expected behavior:
 - the request carries `Authorization: Bearer <token>` to the proxy
 - the proxy authorizes the selected API slug and required method access
 - the proxy forwards configured upstream headers from config before sending request upstream
+
+Exercise dynamic upstream auth against the dummy v2 API:
+
+```sh
+curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  http://127.0.0.1:8787/proxy/dynamic-projects/projects/1/tasks
+```
+
+Expected behavior:
+
+- gate-agent posts the configured JSON credentials to `/auth/token`
+- the dummy returns a generated token and a 60-second lifetime
+- gate-agent caches the token and sends it to `/api/v2/projects/1/tasks`
+- repeated requests reuse the token until gate-agent refreshes it near expiration
+
+To exercise auth failure forwarding, change `client_secret` in the local `dynamic-projects.auth.body`. The proxy returns the dummy auth endpoint's `401` response and does not call the v2 API.
 
 ## MCP request workflow
 
@@ -165,6 +186,27 @@ curl -sS http://127.0.0.1:8787/mcp \
   }' | jq
 ```
 
+Call the dynamic-auth v2 API through MCP:
+
+```sh
+curl -sS http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "tools/call",
+    "params": {
+      "name": "call_api",
+      "arguments": {
+        "api": "dynamic-projects",
+        "method": "GET",
+        "path": "/projects/1/tasks"
+      }
+    }
+  }' | jq
+```
+
 That MCP smoke flow verifies:
 
 - bearer-token auth on `/mcp`
@@ -176,10 +218,10 @@ If an MCP client such as Claude Code, Codex, or OpenCode supports configuring a 
 
 Method access rules during local testing:
 
-- `GET`, `HEAD`, `OPTIONS` require `read`
-- `POST`, `PUT`, `PATCH`, `DELETE` require `write`
-- `TRACE` is rejected before forwarding regardless of access level
-- any other HTTP method also requires `write`
+- each configured API uses an explicit method/path route whitelist
+- method `*` matches every method except `TRACE`
+- path `*` matches every upstream suffix path
+- `TRACE` is always rejected before forwarding
 
 ## Config validation workflow
 
@@ -237,6 +279,16 @@ cargo run -- config api --config .secrets \
   --name projects \
   --base-url 'http://127.0.0.1:18081/api' \
   --header 'authorization=Bearer local-upstream-token'
+```
+
+Configure a dynamic-auth API by adding `--auth` and a token-template header. The command prompts for the auth request and response fields; the raw request body is entered through a hidden prompt:
+
+```sh
+cargo run -- config api --config .secrets \
+  --name dynamic-service \
+  --base-url 'https://api.internal.example' \
+  --header 'authorization=Bearer {{response_token}}' \
+  --auth
 ```
 
 Upsert a group:
@@ -304,6 +356,9 @@ export GATE_AGENT_TOKEN='default.s3cr3t'
 curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   http://127.0.0.1:8787/proxy/projects/v1/projects/1/tasks
 
+curl -i -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
+  http://127.0.0.1:8787/proxy/dynamic-projects/projects/1/tasks
+
 curl -sS http://127.0.0.1:8787/mcp \
   -H "Authorization: Bearer $GATE_AGENT_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -321,6 +376,7 @@ This verifies:
 - bearer-token auth is working
 - proxy authorization is working
 - upstream auth injection is working
+- dynamic token acquisition and injection are working
 - proxy path forwarding is working
 - MCP direct bearer auth is working
 - MCP tool discovery is working
@@ -332,6 +388,13 @@ When debugging proxy behavior, compare the proxied request with a direct upstrea
 ```sh
 curl -i -H 'Authorization: Bearer local-upstream-token' \
   http://127.0.0.1:18081/api/v1/projects/1/tasks
+
+DYNAMIC_TOKEN=$(curl -sS http://127.0.0.1:18081/auth/token \
+  -H 'Content-Type: application/json' \
+  --data '{"client_id":"local-client","client_secret":"local-secret"}' \
+  | jq -r .token)
+curl -i -H "Authorization: Bearer $DYNAMIC_TOKEN" \
+  http://127.0.0.1:18081/api/v2/projects/1/tasks
 ```
 
 ## Shutdown

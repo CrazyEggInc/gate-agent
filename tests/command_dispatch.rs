@@ -81,6 +81,7 @@ fn api_args(config: PathBuf, headers: &[&str]) -> ConfigApiArgs {
         name: Some("projects".to_owned()),
         base_url: Some("https://example.test/api".to_owned()),
         basic_auth: false,
+        auth: false,
         header: headers.iter().map(|header| (*header).to_owned()).collect(),
         timeout_ms: Some(5_000),
     }
@@ -519,6 +520,7 @@ fn config_command_dispatch_basic_auth_flag_still_requires_interactive_prompts()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: true,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -562,6 +564,7 @@ fn config_command_dispatch_basic_auth_flag_prompts_username_and_password()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: true,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -592,6 +595,139 @@ fn config_command_dispatch_basic_auth_flag_prompts_username_and_password()
 }
 
 #[test]
+fn config_command_dispatch_dynamic_auth_flag_prompts_and_writes_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+    let config_path = workspace.join("nested/secrets.toml");
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[
+                "https://auth.example.test/token",
+                "post",
+                "",
+                "x-client=id;x-secret=secret",
+                r#"{"client_id":"id","client_secret":"secret"}"#,
+                "",
+                "expires_in",
+            ])?,
+        );
+    }
+
+    gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(config_path.clone()),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: false,
+            auth: true,
+            header: vec!["authorization=Bearer {{response_token}}".to_owned()],
+            timeout_ms: None,
+        }),
+    }))?;
+
+    let written: Value = std::fs::read_to_string(&config_path)?.parse()?;
+    let api = written
+        .get("apis")
+        .and_then(|value| value.get("projects"))
+        .expect("projects api config");
+    let auth = api.get("auth").expect("dynamic auth config");
+    assert_eq!(
+        auth.get("url").and_then(Value::as_str),
+        Some("https://auth.example.test/token")
+    );
+    assert_eq!(auth.get("method").and_then(Value::as_str), Some("POST"));
+    assert_eq!(
+        auth.get("headers")
+            .and_then(|headers| headers.get("x-client"))
+            .and_then(Value::as_str),
+        Some("id")
+    );
+    assert_eq!(
+        auth.get("headers")
+            .and_then(|headers| headers.get("x-secret"))
+            .and_then(Value::as_str),
+        Some("secret")
+    );
+    assert_eq!(
+        auth.get("body").and_then(Value::as_str),
+        Some(r#"{"client_id":"id","client_secret":"secret"}"#)
+    );
+    assert_eq!(
+        auth.get("response")
+            .and_then(|response| response.get("token"))
+            .and_then(Value::as_str),
+        Some("access_token")
+    );
+    assert_eq!(
+        api.get("headers")
+            .and_then(|headers| headers.get("authorization"))
+            .and_then(Value::as_str),
+        Some("Bearer {{response_token}}")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_command_dispatch_dynamic_auth_rejects_duplicate_prompt_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempdir()?;
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let _env = EnvGuard::enter(&workspace)?;
+
+    unsafe {
+        std::env::set_var("HOME", temp_dir.path().join("home"));
+        std::env::set_var(
+            TEST_PROMPT_INPUTS_ENV_VAR,
+            serde_json::to_string(&[
+                "https://auth.example.test/token",
+                "POST",
+                "application/json",
+                "x-client=one;x-client=two",
+            ])?,
+        );
+    }
+
+    let error = gate_agent::commands::run(Command::Config(ConfigArgs {
+        command: ConfigCommand::Api(ConfigApiArgs {
+            config: Some(workspace.join("secrets.toml")),
+            password: None,
+            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            delete: false,
+            name: Some("projects".to_owned()),
+            base_url: Some("https://example.test/api".to_owned()),
+            basic_auth: false,
+            auth: true,
+            header: vec!["authorization=Bearer {{response_token}}".to_owned()],
+            timeout_ms: None,
+        }),
+    }))
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Auth header x-client duplicates another configured header"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
 -> Result<(), Box<dyn std::error::Error>> {
     let _lock = env_lock()
@@ -616,6 +752,7 @@ fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec!["authorization=Bearer top-secret".to_owned()],
             timeout_ms: Some(9_000),
         }),
@@ -630,6 +767,7 @@ fn config_command_dispatch_api_preserves_existing_timeout_when_omitted()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api/v2".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec!["authorization=Bearer rotated-secret".to_owned()],
             timeout_ms: None,
         }),
@@ -687,6 +825,7 @@ fn config_command_dispatch_api_preserves_existing_headers_when_header_omitted()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![
                 "authorization=Bearer top-secret".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -704,6 +843,7 @@ fn config_command_dispatch_api_preserves_existing_headers_when_header_omitted()
             name: Some("projects".to_owned()),
             base_url: Some("https://example.test/api/v2".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -788,6 +928,7 @@ timeout_ms = 5000
             name: Some("projects".to_owned()),
             base_url: Some("https://projects.internal.example/api/v2".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -849,6 +990,7 @@ fn config_command_dispatch_api_partial_flags_report_missing_name()
             name: None,
             base_url: Some("https://projects.internal.example/api".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -889,6 +1031,7 @@ fn config_command_dispatch_basic_auth_flag_reports_missing_name()
             name: None,
             base_url: None,
             basic_auth: true,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -938,6 +1081,7 @@ bearer_token_expires_at = "2030-01-02T03:04:05Z"
             name: Some("projects".to_owned()),
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -991,6 +1135,7 @@ timeout_ms = 5000
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1049,6 +1194,7 @@ timeout_ms = 5000
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1214,6 +1360,7 @@ fn config_command_dispatch_interactive_api_prompt_none_clears_existing_headers()
             name: Some("projects".to_owned()),
             base_url: Some("https://projects.internal.example/api".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![
                 "authorization=Bearer top-secret".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -1355,6 +1502,7 @@ fn config_command_dispatch_rejects_malformed_api_prompt_headers()
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: Vec::new(),
             timeout_ms: None,
         }),
@@ -1396,6 +1544,7 @@ fn config_command_dispatch_interactive_api_prompt_round_trips_header_values_with
             name: Some("projects".to_owned()),
             base_url: Some("https://projects.internal.example/api".to_owned()),
             basic_auth: false,
+            auth: false,
             header: vec![
                 "authorization=Bearer token,with,commas".to_owned(),
                 "x-api-key=secret-key".to_owned(),
@@ -1480,6 +1629,7 @@ fn config_command_dispatch_interactive_api_basic_auth_create_persists_prompted_c
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1543,6 +1693,7 @@ timeout_ms = 5000
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1620,6 +1771,7 @@ timeout_ms = 5000
             name: Some("billing".to_owned()),
             base_url: None,
             basic_auth: true,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1772,6 +1924,7 @@ timeout_ms = 5000
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
@@ -1843,6 +1996,7 @@ timeout_ms = 5000
             name: None,
             base_url: None,
             basic_auth: false,
+            auth: false,
             header: vec![],
             timeout_ms: None,
         }),
