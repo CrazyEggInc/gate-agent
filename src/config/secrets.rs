@@ -3,7 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use http::header::{HeaderName, HeaderValue};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -20,6 +20,7 @@ use super::password::{
 pub const DEFAULT_API_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
 pub const DEFAULT_SERVER_PORT: u16 = 8787;
+pub const RESPONSE_TOKEN_PLACEHOLDER: &str = "{{response_token}}";
 
 pub(crate) fn is_valid_slug(value: &str) -> bool {
     !value.is_empty()
@@ -77,6 +78,7 @@ pub struct ApiConfig {
     pub base_url: Url,
     pub headers: Vec<(HeaderName, SecretString)>,
     pub basic_auth: Option<ApiBasicAuth>,
+    pub auth: Option<ApiAuth>,
     pub description: Option<String>,
     pub docs_url: Option<Url>,
     pub timeout_ms: u64,
@@ -86,6 +88,22 @@ pub struct ApiConfig {
 pub struct ApiBasicAuth {
     pub username: String,
     pub password: SecretString,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiAuth {
+    pub url: Url,
+    pub method: http::Method,
+    pub content_type: HeaderValue,
+    pub headers: Vec<(HeaderName, SecretString)>,
+    pub body: SecretString,
+    pub response: ApiAuthResponse,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiAuthResponse {
+    pub token: String,
+    pub expires_in: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +175,7 @@ struct RawApiConfig {
     docs_url: Option<String>,
     headers: Option<BTreeMap<String, String>>,
     basic_auth: Option<RawApiBasicAuth>,
+    auth: Option<RawApiAuth>,
     #[serde(default = "default_api_timeout_ms")]
     timeout_ms: u64,
 }
@@ -166,6 +185,24 @@ struct RawApiConfig {
 struct RawApiBasicAuth {
     username: String,
     password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApiAuth {
+    url: String,
+    method: String,
+    content_type: String,
+    headers: Option<BTreeMap<String, String>>,
+    body: String,
+    response: RawApiAuthResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApiAuthResponse {
+    token: String,
+    expires_in: Option<String>,
 }
 
 fn default_api_timeout_ms() -> u64 {
@@ -536,6 +573,7 @@ impl ApiConfig {
 
         let headers = parse_api_headers(slug, raw_config.headers)?;
         let basic_auth = parse_api_basic_auth(slug, raw_config.basic_auth)?;
+        let auth = parse_api_auth(slug, raw_config.auth)?;
 
         if basic_auth.is_some()
             && headers
@@ -544,6 +582,26 @@ impl ApiConfig {
         {
             return Err(ConfigError::new(format!(
                 "apis.{slug} cannot set both headers.authorization and basic_auth"
+            )));
+        }
+
+        if basic_auth.is_some() && auth.is_some() {
+            return Err(ConfigError::new(format!(
+                "apis.{slug} cannot set both basic_auth and auth"
+            )));
+        }
+
+        let has_token_placeholder = headers
+            .iter()
+            .any(|(_, value)| value.expose_secret().contains(RESPONSE_TOKEN_PLACEHOLDER));
+        if auth.is_some() && !has_token_placeholder {
+            return Err(ConfigError::new(format!(
+                "apis.{slug}.headers must contain {RESPONSE_TOKEN_PLACEHOLDER} when auth is configured"
+            )));
+        }
+        if auth.is_none() && has_token_placeholder {
+            return Err(ConfigError::new(format!(
+                "apis.{slug}.headers cannot contain {RESPONSE_TOKEN_PLACEHOLDER} without auth"
             )));
         }
 
@@ -560,9 +618,105 @@ impl ApiConfig {
             docs_url,
             headers,
             basic_auth,
+            auth,
             timeout_ms: raw_config.timeout_ms,
         })
     }
+}
+
+fn parse_api_auth(slug: &str, auth: Option<RawApiAuth>) -> Result<Option<ApiAuth>, ConfigError> {
+    let Some(auth) = auth else {
+        return Ok(None);
+    };
+    let field = format!("apis.{slug}.auth");
+    let url = Url::parse(&required_string(&format!("{field}.url"), auth.url)?)
+        .map_err(|error| ConfigError::new(format!("{field}.url is invalid: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ConfigError::new(format!(
+            "{field}.url must use http or https"
+        )));
+    }
+
+    let method_text =
+        required_string(&format!("{field}.method"), auth.method)?.to_ascii_uppercase();
+    let method = http::Method::from_bytes(method_text.as_bytes())
+        .map_err(|error| ConfigError::new(format!("{field}.method is invalid: {error}")))?;
+    let content_type_text =
+        required_raw_string(&format!("{field}.content_type"), auth.content_type)?;
+    let content_type = HeaderValue::from_str(&content_type_text)
+        .map_err(|error| ConfigError::new(format!("{field}.content_type is invalid: {error}")))?;
+    let body = required_raw_string(&format!("{field}.body"), auth.body)?;
+    let headers = parse_api_auth_headers(slug, auth.headers)?;
+    let token = required_string(&format!("{field}.response.token"), auth.response.token)?;
+    let expires_in = auth
+        .response
+        .expires_in
+        .map(|value| required_string(&format!("{field}.response.expires_in"), value))
+        .transpose()?;
+    if expires_in.as_ref() == Some(&token) {
+        return Err(ConfigError::new(format!(
+            "{field}.response.token and {field}.response.expires_in must name different fields"
+        )));
+    }
+
+    Ok(Some(ApiAuth {
+        url,
+        method,
+        content_type,
+        headers,
+        body: SecretString::from(body),
+        response: ApiAuthResponse { token, expires_in },
+    }))
+}
+
+fn parse_api_auth_headers(
+    slug: &str,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<Vec<(HeaderName, SecretString)>, ConfigError> {
+    let Some(headers) = headers else {
+        return Ok(Vec::new());
+    };
+    let mut validated = Vec::with_capacity(headers.len());
+    let mut names = BTreeSet::new();
+
+    for (key, value) in headers {
+        let field = format!("apis.{slug}.auth.headers.{key}");
+        let name = HeaderName::from_str(&key)
+            .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))?;
+        if name == http::header::HOST
+            || name == http::header::CONTENT_LENGTH
+            || name == http::header::CONTENT_TYPE
+            || matches!(
+                name.as_str(),
+                "connection"
+                    | "keep-alive"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "proxy-connection"
+                    | "te"
+                    | "trailer"
+                    | "transfer-encoding"
+                    | "upgrade"
+            )
+        {
+            return Err(ConfigError::new(format!(
+                "{field} is managed by gate-agent"
+            )));
+        }
+        if value.trim().is_empty() {
+            return Err(ConfigError::new(format!("{field} is invalid: empty value")));
+        }
+        HeaderValue::from_str(&value)
+            .map_err(|error| ConfigError::new(format!("{field} is invalid: {error}")))?;
+        if !names.insert(name.as_str().to_owned()) {
+            return Err(ConfigError::new(format!(
+                "{field} duplicates another configured header"
+            )));
+        }
+        validated.push((name, SecretString::from(value)));
+    }
+
+    Ok(validated)
 }
 
 fn parse_api_basic_auth(

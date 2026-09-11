@@ -131,6 +131,8 @@ Forwarding expectations:
 - client-supplied bearer auth is not forwarded upstream as client auth
 - client topology headers are not forwarded upstream
 - safe client headers may be forwarded when allowed by the proxy contract
+- dynamic upstream auth uses the same token acquisition, caching, expiry, and invalidation behavior as `/proxy`
+- a non-success auth endpoint response is represented through the normal `call_api` upstream-response result and the target API is not called
 
 ## call_api response contract
 

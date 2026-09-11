@@ -106,6 +106,8 @@ Each API may configure zero, one, or many upstream request headers to inject.
 
 Each API may also configure `basic_auth` for upstream HTTP basic authentication.
 
+Each API may instead configure dynamic upstream auth. Gate-agent executes the configured auth request lazily, extracts a token from the configured top-level JSON response field, caches it in memory per API, and substitutes it for `{{response_token}}` in configured API header values.
+
 Configured API headers are applied as header overlay on top of filtered client headers.
 
 If configured API header name collides with forwarded client header name, configured API header wins and overwrites forwarded value.
@@ -118,6 +120,8 @@ If `basic_auth.password` is omitted, the proxy still injects basic auth and enco
 
 `basic_auth` and configured `headers.authorization` are mutually exclusive on same API config.
 
+Dynamic `auth` and `basic_auth` are mutually exclusive. Dynamic auth may be used with configured headers because those headers carry the token template.
+
 The proxy does not pass client-supplied topology headers upstream.
 
 ## Upstream execution
@@ -127,6 +131,15 @@ Each configured API carries a `timeout_ms`. When omitted in config, it defaults 
 Behavior:
 
 - outbound requests run under the configured upstream timeout
+- dynamic auth requests use the same per-API timeout
+- concurrent requests for an API share one token acquisition operation
+- when `auth.response.expires_in` is configured, gate-agent checks the cached token lifetime before every API call and reacquires shortly before expiration
+- when expiration is not configured, the token remains cached until the target API returns `401 Unauthorized`
+- a target API `401 Unauthorized` invalidates the token used by that request and is returned without retrying the API request
+- non-success auth endpoint responses stop forwarding and are returned to the caller with their status and body after normal response-header filtering
+- authorized callers can therefore observe auth endpoint error bodies; operators must treat the auth endpoint as part of the API's caller-visible trust boundary
+- auth endpoint redirects are not followed and are returned to the caller
+- auth endpoint transport failures, timeouts, malformed successful JSON responses, missing tokens, and invalid expiry values use the normal safe upstream error model
 - upstream timeouts surface distinctly from other upstream failures
 - upstream redirects are not followed automatically
 - redirect responses are returned to the caller as upstream responses
@@ -150,6 +163,7 @@ Proxy completion logs must include:
 - safe upstream metadata for proxied requests: API slug, outbound method, outbound URL, upstream status, and timeout
 - `error_code` only when the response came from an application error
 - no bearer token values, token identifiers, hashes, or upstream secrets
+- no dynamic auth request bodies, acquired tokens, or auth response bodies
 
 ## Hop-by-hop header logic
 

@@ -723,6 +723,83 @@ async fn mcp_route_call_api_uses_shared_forwarding_logic_for_json_requests()
 }
 
 #[tokio::test]
+async fn mcp_route_call_api_uses_dynamic_upstream_auth() -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, rx) = capture_channel();
+    let upstream = Router::new()
+        .route(
+            "/token",
+            any(|| async { axum::Json(serde_json::json!({"access_token": "mcp-dynamic-token"})) }),
+        )
+        .route(
+            "/api/{*path}",
+            any(
+                |axum::extract::State(sender): axum::extract::State<support::CaptureSender>,
+                 request: Request<Body>| async move {
+                    capture_request(axum::extract::State(sender), request).await;
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"ok":true}"#))
+                        .unwrap()
+                },
+            ),
+        )
+        .with_state(sender);
+    let base_url = spawn_upstream(upstream).await?;
+    let temp_dir = tempfile::tempdir()?;
+    let config_path = temp_dir.path().join("gate-agent.toml");
+    let token = "default.dynamic-mcp-secret";
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[clients.default]
+bearer_token_id = "default"
+bearer_token_hash = "{}"
+bearer_token_expires_at = "2030-01-02T03:04:05Z"
+api_access = {{ service = [{{ method = "*", path = "*" }}] }}
+
+[apis.service]
+base_url = "{base_url}/api"
+headers = {{ authorization = "Bearer {{{{response_token}}}}" }}
+auth = {{ url = "{base_url}/token", method = "POST", content_type = "application/json", body = "{{}}", response = {{ token = "access_token" }} }}
+timeout_ms = 5000
+"#,
+            BearerTokenHash::from_token(token).as_str()
+        ),
+    )?;
+    let config = AppConfig::new(
+        "127.0.0.1:0".parse()?,
+        "debug",
+        ConfigSource::Path(config_path.clone()),
+        SecretsConfig::load_from_file(&config_path)?,
+    );
+    let app = build_router(AppState::from_config(&config)?);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_api","arguments":{"api":"service","method":"GET","path":"/resource"}}}"#,
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = json_body(response).await?;
+    assert_eq!(payload["result"]["isError"], false);
+    let captured = rx.await?;
+    assert_eq!(
+        captured.headers.get("authorization").unwrap(),
+        "Bearer mcp-dynamic-token"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_route_call_api_enforces_route_rules_for_method_and_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream = axum::Router::new().route(

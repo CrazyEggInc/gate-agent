@@ -7,6 +7,7 @@ pub mod request;
 pub mod response;
 pub mod router;
 pub mod upstream;
+pub mod upstream_auth;
 
 pub(crate) fn connection_bound_header_names(headers: &HeaderMap) -> HashSet<HeaderName> {
     headers

@@ -160,6 +160,7 @@ Required fields:
 - `base_url: String`
 - `headers: TOML table or inline table of <header-name> = <value> pairs | omitted`
 - `basic_auth: TOML table or inline table with username and optional password | omitted`
+- `auth: TOML table or inline table with dynamic auth request and response settings | omitted`
 - `timeout_ms: u64 | omitted`
 - `description: Option<String>`
 - `docs_url: Option<String>`
@@ -176,6 +177,17 @@ Validation expectations:
 - `basic_auth`, when present, must be a TOML table or inline table with non-empty `username`
 - `basic_auth.password` is optional; when omitted, config stores username-only Basic auth and upstream Basic auth uses an empty password
 - `basic_auth` and `headers.authorization` cannot both be configured on same API
+- `auth`, when present, requires `url`, `method`, `content_type`, `body`, and `response.token`; `headers` and `response.expires_in` are optional
+- `auth.url` must use `http` or `https`; operators should use `https` when the request contains credentials
+- `auth.method` must be a valid HTTP method
+- `auth.content_type` must be a valid HTTP header value
+- `auth.headers` values must be non-empty valid HTTP header values and cannot configure connection-specific or request-framing headers
+- `auth.body` is sent verbatim and must be non-empty
+- `auth.response.token` names a required top-level JSON string field in a successful auth response
+- `auth.response.expires_in`, when configured, names a required top-level unsigned-integer field containing the token lifetime in seconds
+- `auth.response.token` and `auth.response.expires_in` must name different fields
+- `auth` requires at least one API header value containing `{{response_token}}`; every occurrence is replaced with the acquired token
+- `auth` and `basic_auth` cannot both be configured on the same API
 - optional `description`, when present, must be non-empty
 - optional `docs_url`, when present, must parse as a URL and use `http` or `https`
 - omitted `timeout_ms` falls back to `5000`
@@ -194,7 +206,7 @@ Validation expectations:
 
 ```toml
 [groups.default]
-api_access = { projects = [{ method = "get", path = "*" }] }
+api_access = { projects = [{ method = "*", path = "*" }], dynamic-projects = [{ method = "*", path = "*" }] }
 
 [clients.default]
 bearer_token_id = "default"
@@ -206,6 +218,21 @@ group = "default"
 base_url = "http://127.0.0.1:18081/api"
 headers = { authorization = "Bearer local-upstream-token" }
 timeout_ms = 5000
+
+[apis.dynamic-projects]
+base_url = "http://127.0.0.1:18081/api/v2"
+headers = { authorization = "Bearer {{response_token}}" }
+timeout_ms = 5000
+
+[apis.dynamic-projects.auth]
+url = "http://127.0.0.1:18081/auth/token"
+method = "POST"
+content_type = "application/json"
+body = '{"client_id":"local-client","client_secret":"local-secret"}'
+
+[apis.dynamic-projects.auth.response]
+token = "token"
+expires_in = "expires_in"
 ```
 
 Another valid upstream auth shape is HTTP basic auth:
@@ -226,9 +253,33 @@ basic_auth = { username = "user" }
 timeout_ms = 5000
 ```
 
+Dynamic upstream auth obtains and caches a token from a configured endpoint:
+
+```toml
+[apis.dynamic-service]
+base_url = "https://api.internal.example"
+headers = { authorization = "Bearer {{response_token}}" }
+timeout_ms = 5000
+
+[apis.dynamic-service.auth]
+url = "https://auth.internal.example/token"
+method = "POST"
+content_type = "application/json"
+body = '{"client_id":"service-client","client_secret":"service-secret"}'
+
+[apis.dynamic-service.auth.headers]
+accept = "application/json"
+
+[apis.dynamic-service.auth.response]
+token = "token"
+expires_in = "expires_in"
+```
+
+Dynamic auth request bodies commonly contain credentials. Encrypted config storage is recommended for these entries.
+
 For the committed sample config, the matching local bearer token is `default.s3cr3t`.
 
-This sample is intentionally distinct from fresh `config init` output. `.secrets.dev` is committed as runnable local/dev config, so it includes a `projects` route rule together with `[apis.projects]` and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
+This sample is intentionally distinct from fresh `config init` output. `.secrets.dev` is committed as runnable local/dev config, so it includes static `projects` and dynamic-auth `dynamic-projects` route rules with matching API definitions, and relies on runtime defaults for omitted optional fields like `[server]`. Fresh init bootstraps the same group-backed shape but writes explicit `[server]`, keeps `groups.default.api_access = {}`, and leaves `[apis]` empty until operator adds APIs and route rules.
 
 ## CLI-assisted config management
 
@@ -293,12 +344,14 @@ When encryption is enabled:
 - static `headers.authorization`
 - `basic_auth = { username = ..., password = ... }`
 - `basic_auth = { username = ... }`
+- dynamic `auth = { ... }` with an API header containing `{{response_token}}`
 
 Accepted flags:
 
 - `--name`
 - `--base-url`
 - `--basic-auth`
+- `--auth`
 - repeated `--header <name=value>`
 - optional `--timeout-ms`
 - `-d` / `--delete`
@@ -310,13 +363,17 @@ Behavior:
 - adds or updates one `[apis.<name>]` entry by default
 - `-d` / `--delete` deletes one existing API entry instead of add-or-update
 - runs the optional interactive questionnaire only when no API-management flags are supplied
-- API-management flags include `--name`, `--base-url`, any `--header`, `--timeout-ms`, and `--delete`
+- API-management flags include `--name`, `--base-url`, `--basic-auth`, `--auth`, any `--header`, `--timeout-ms`, and `--delete`
 - when any API-management flag is supplied, omitted flags are treated as non-interactive omissions and preserve existing values on update
 - on interactive update, current values become prompt defaults and blank answers keep those defaults
 - on non-interactive update, omitted flags preserve current values instead of clearing them
 - `--basic-auth` selects upstream Basic auth mode
 - `--basic-auth` never accepts credentials on command line
 - `--basic-auth` still prompts for username and password
+- `--auth` selects dynamic upstream auth mode and prompts for URL, method, content type, optional auth headers, raw body, token field, and optional expiry field
+- `--auth` and `--basic-auth` are mutually exclusive
+- the dynamic auth body prompt is hidden; blank keeps the existing body during update
+- dynamic auth requires a configured API header containing `{{response_token}}`, commonly supplied as `--header 'authorization=Bearer {{response_token}}'`
 - parses each `--header` value as `<name>=<value>` and stores them in `headers = { ... }`
 - when reading an existing API entry, accepts `headers` and `basic_auth` as regular TOML tables or inline tables; CLI-managed updates write those fields as inline tables
 - repeated `--header` flags are merged into one header map
@@ -337,6 +394,7 @@ Behavior:
 - after headers, CLI offers optional Basic auth setup
 - enabling Basic auth removes only `headers.authorization`; unrelated headers stay configured
 - `basic_auth` and `headers.authorization` cannot coexist on same API
+- dynamic `auth` and `basic_auth` cannot coexist on same API
 - switching from header auth to Basic auth removes only `headers.authorization`; unrelated headers stay configured
 - uses `5000` when `--timeout-ms` is omitted during create or when no stored value exists yet
 - preserves encrypted-vs-plaintext format on update

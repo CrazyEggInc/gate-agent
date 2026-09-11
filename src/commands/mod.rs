@@ -13,6 +13,7 @@ use crate::config::app_config::AppConfig;
 use crate::config::app_config::DEFAULT_LOG_LEVEL;
 use crate::config::secrets::{
     ApiAccessMethod, ApiAccessRule, DEFAULT_SERVER_BIND, DEFAULT_SERVER_PORT,
+    RESPONSE_TOKEN_PLACEHOLDER,
 };
 use crate::error::AppError;
 use crate::telemetry::init_tracing;
@@ -435,7 +436,7 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
         None
     };
 
-    let header_default_auth = if args.basic_auth {
+    let header_default_auth = if args.basic_auth || args.auth {
         config::ConfigApiAuthSelection::None
     } else {
         config::ConfigApiAuthSelection::Preserve
@@ -471,6 +472,8 @@ fn resolve_config_api_args(args: ConfigApiArgs) -> Result<config::ConfigApiArgs,
 
     let resolved_auth = if args.basic_auth {
         prompt_basic_auth(existing.as_ref())?
+    } else if args.auth {
+        prompt_dynamic_auth(existing.as_ref())?
     } else if interactive {
         resolve_prompted_api_auth(existing.as_ref(), headers.as_ref())?
     } else {
@@ -505,8 +508,128 @@ fn should_prompt_for_config_api_args(args: &ConfigApiArgs) -> bool {
         && args.name.is_none()
         && args.base_url.is_none()
         && !args.basic_auth
+        && !args.auth
         && args.header.is_empty()
         && args.timeout_ms.is_none()
+}
+
+fn prompt_dynamic_auth(
+    existing: Option<&config::ExistingApiState>,
+) -> Result<config::ConfigApiAuthSelection, CommandError> {
+    let existing = existing.and_then(|state| state.auth.as_ref());
+    let required = |label: &str, default: Option<&str>| {
+        config::prompt_required_text(
+            &config::prompt_message(label, None, default, None, None, None),
+            default,
+            "config api --auth requires interactive prompts",
+        )
+        .map_err(|error| CommandError::new(error.to_string()))
+    };
+    let url = required("Auth URL", existing.map(|auth| auth.url.as_str()))?;
+    let method = required(
+        "Auth method",
+        existing.map_or(Some("POST"), |auth| Some(auth.method.as_str())),
+    )?;
+    let content_type = required(
+        "Auth content type",
+        existing.map_or(Some("application/json"), |auth| {
+            Some(auth.content_type.as_str())
+        }),
+    )?;
+    let headers = config::prompt_optional_secret_text(
+        &config::prompt_message(
+            "Auth headers",
+            None,
+            None,
+            None,
+            None,
+            Some("input hidden; separate with semicolons; blank keeps current; enter 'none' to clear"),
+        ),
+        "config api --auth requires interactive prompts",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?
+    .map(|headers| {
+        if headers.eq_ignore_ascii_case("none") {
+            Ok(std::collections::BTreeMap::new())
+        } else {
+            parse_dynamic_auth_headers(&headers)
+        }
+    })
+    .transpose()?
+    .or_else(|| existing.map(|auth| auth.headers.clone()))
+    .unwrap_or_default();
+    let body = config::prompt_optional_secret_text(
+        &config::prompt_message(
+            "Auth body",
+            None,
+            None,
+            None,
+            None,
+            existing.map(|_| "input hidden; blank keeps current body"),
+        ),
+        "config api --auth requires interactive body prompt",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?
+    .or_else(|| existing.map(|auth| auth.body.clone()))
+    .ok_or_else(|| CommandError::new("Auth body cannot be empty"))?;
+    let response_token = required(
+        "Auth response token field",
+        existing.map_or(Some("access_token"), |auth| {
+            Some(auth.response_token.as_str())
+        }),
+    )?;
+    let response_expires_in = config::prompt_optional_text(
+        &config::prompt_message(
+            "Auth response expires-in field",
+            None,
+            existing.and_then(|auth| auth.response_expires_in.as_deref()),
+            Some("expires_in"),
+            None,
+            Some("blank keeps current field; enter 'none' to disable"),
+        ),
+        existing.and_then(|auth| auth.response_expires_in.as_deref()),
+        "config api --auth requires interactive prompts",
+    )
+    .map_err(|error| CommandError::new(error.to_string()))?
+    .filter(|value| !value.eq_ignore_ascii_case("none"));
+
+    Ok(config::ConfigApiAuthSelection::Dynamic(
+        crate::config::write::ApiAuthUpsert {
+            url,
+            method,
+            content_type,
+            headers,
+            body,
+            response_token,
+            response_expires_in,
+        },
+    ))
+}
+
+fn parse_dynamic_auth_headers(value: &str) -> Result<BTreeMap<String, String>, CommandError> {
+    let mut headers = BTreeMap::<String, String>::new();
+
+    for header in value
+        .split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let (name, value) = header
+            .split_once('=')
+            .ok_or_else(|| CommandError::new("Auth headers must use name=value syntax"))?;
+        let name = name.trim();
+        if headers
+            .keys()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            return Err(CommandError::new(format!(
+                "Auth header {name} duplicates another configured header"
+            )));
+        }
+        headers.insert(name.to_owned(), value.trim().to_owned());
+    }
+
+    Ok(headers)
 }
 
 fn resolve_prompted_api_auth(
@@ -532,6 +655,12 @@ fn resolve_prompted_api_auth(
 
     if configure_basic_auth {
         return prompt_basic_auth(existing);
+    }
+
+    if existing.is_some_and(|state| state.auth.is_some())
+        && headers_contain_dynamic_authorization(headers)
+    {
+        return Ok(config::ConfigApiAuthSelection::Preserve);
     }
 
     if headers_contain_authorization(headers) {
@@ -600,6 +729,17 @@ fn headers_contain_authorization(headers: Option<&Vec<String>>) -> bool {
     })
 }
 
+fn headers_contain_dynamic_authorization(headers: Option<&Vec<String>>) -> bool {
+    headers.is_some_and(|headers| {
+        headers.iter().any(|header| {
+            header.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("authorization")
+                    && value.contains(RESPONSE_TOKEN_PLACEHOLDER)
+            })
+        })
+    })
+}
+
 fn strip_authorization_header_entries(headers: &mut Option<Vec<String>>) {
     if let Some(headers) = headers {
         headers.retain(|header| {
@@ -631,7 +771,9 @@ fn render_api_headers_for_prompt(
     let mut headers = state.headers.clone();
 
     match auth {
-        config::ConfigApiAuthSelection::None | config::ConfigApiAuthSelection::Basic { .. } => {
+        config::ConfigApiAuthSelection::None
+        | config::ConfigApiAuthSelection::Basic { .. }
+        | config::ConfigApiAuthSelection::Dynamic(_) => {
             headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
         }
         config::ConfigApiAuthSelection::Preserve | config::ConfigApiAuthSelection::Header => {}

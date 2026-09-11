@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use crate::config::ConfigSource;
 use crate::config::app_config::AppConfig;
 use crate::config::secrets::{ApiAccessRule, ApiConfig, ClientConfig, SecretsConfig};
 use crate::error::AppError;
+use crate::proxy::upstream_auth::ApiAuthState;
 
 #[derive(Clone, Debug)]
 pub struct StartupSettings {
@@ -20,6 +22,7 @@ pub struct StartupSettings {
 pub struct AppState {
     secrets: Arc<SecretsConfig>,
     client: Client,
+    api_auth: Arc<BTreeMap<String, ApiAuthState>>,
     startup: StartupSettings,
 }
 
@@ -39,6 +42,15 @@ impl AppState {
         Ok(Self {
             secrets: Arc::new(config.secrets().clone()),
             client,
+            api_auth: Arc::new(
+                config
+                    .secrets()
+                    .apis
+                    .iter()
+                    .filter(|(_, api)| api.auth.is_some())
+                    .map(|(slug, _)| (slug.clone(), ApiAuthState::default()))
+                    .collect(),
+            ),
             startup: StartupSettings::from(config),
         })
     }
@@ -49,6 +61,10 @@ impl AppState {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub(crate) fn api_auth_state(&self, api: &str) -> Option<&ApiAuthState> {
+        self.api_auth.get(api)
     }
 
     pub fn startup(&self) -> &StartupSettings {
