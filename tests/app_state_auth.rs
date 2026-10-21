@@ -10,6 +10,7 @@ use gate_agent::{
     error::AppError,
 };
 use tempfile::tempdir;
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 fn write_secrets_file(
     contents: &str,
@@ -21,7 +22,9 @@ fn write_secrets_file(
 }
 
 fn load_state(contents: &str) -> Result<AppState, Box<dyn std::error::Error>> {
-    let (_temp_dir, config_file) = write_secrets_file(contents)?;
+    let expires_at = (OffsetDateTime::now_utc() + Duration::days(1)).format(&Rfc3339)?;
+    let contents = contents.replace("VALID_TOKEN_EXPIRES_AT", &expires_at);
+    let (_temp_dir, config_file) = write_secrets_file(&contents)?;
 
     let config = AppConfig::new(
         "127.0.0.1:0".parse()?,
@@ -51,13 +54,13 @@ const VALID_SECRETS: &str = r#"
 [clients.default]
 bearer_token_id = "default"
 bearer_token_hash = "2db0c3448853c76dd5d546e11bc41a309a283a7726b034705dcd65e433c9744d"
-bearer_token_expires_at = "2026-10-08T12:00:00Z"
+bearer_token_expires_at = "VALID_TOKEN_EXPIRES_AT"
 api_access = { projects = [{ method = "*", path = "*" }], billing = [{ method = "*", path = "*" }] }
 
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
-bearer_token_expires_at = "2026-10-09T12:00:00Z"
+bearer_token_expires_at = "VALID_TOKEN_EXPIRES_AT"
 api_access = { projects = [{ method = "*", path = "*" }] }
 
 [apis.projects]
@@ -106,7 +109,7 @@ fn app_state_exposes_group_derived_client_access() -> Result<(), Box<dyn std::er
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
-bearer_token_expires_at = "2026-10-09T12:00:00Z"
+bearer_token_expires_at = "VALID_TOKEN_EXPIRES_AT"
 group = "shared-read"
 
 [groups.shared-read]
@@ -173,7 +176,7 @@ fn app_state_lists_effective_client_api_access_entries_for_discovery()
 [clients.partner]
 bearer_token_id = "partner"
 bearer_token_hash = "5773afbb04744f0a04a8534d53d0ab41546e9f6ca1e5c6b32a58cf6fc2f6fb77"
-bearer_token_expires_at = "2026-10-09T12:00:00Z"
+bearer_token_expires_at = "VALID_TOKEN_EXPIRES_AT"
 group = "shared-read"
 
 [groups.shared-read]
