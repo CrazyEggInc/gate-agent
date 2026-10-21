@@ -10,7 +10,7 @@ RUN mkdir /.aws && chown nobody /.aws
 
 # install
 RUN apk add --no-cache --update \
-  aws-cli jq curl coreutils bash \
+  'ca-certificates>=20261020-r0' aws-cli jq curl coreutils bash \
   && rm -rf /var/cache/apk/*
 
 # install
