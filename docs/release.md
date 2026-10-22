@@ -121,3 +121,26 @@ gh release view vX.Y.Z --json tagName,targetCommitish,assets
 curl -fsSL "https://raw.githubusercontent.com/CrazyEggInc/gate-agent/refs/tags/${TAG}/install.sh" | VERSION="$TAG" GATE_AGENT_INSTALL_DIR="$(pwd)/verify-bin" sh
 ./verify-bin/gate-agent version
 ```
+
+## Container verification
+
+The root Dockerfile builds the checked-out source using the locked dependencies and a pinned Rust
+builder. Its runtime contains only the binary and CA certificates, runs as `nobody` by default, and
+expects a readable configuration mounted at `/app/.secrets`. Run with the non-root host user's UID
+and GID to read a host-owned `0600` configuration. Configure `server.bind = "0.0.0.0"` for access
+through a published container port.
+
+```sh
+docker build --platform linux/amd64 -t gate-agent:local .
+docker run --rm gate-agent:local version
+docker run --rm --user "$(id -u):$(id -g)" -p 127.0.0.1:8787:8787 -v "$PWD/.secrets:/app/.secrets:ro" gate-agent:local
+```
+
+The `examples/docker` image remains a released-binary deployment template with AWS CLI and shell
+tools for custom configuration setup. Build from that directory with `--build-arg VERSION=X.Y.Z`;
+the installer and archive both come from that release tag. Its default is 0.0.8, so it will not
+contain later source dependency fixes until a new release is published and selected explicitly.
+
+Direct Cargo dependencies use exact version requirements; keep Cargo.toml and Cargo.lock synchronized.
+The minimum supported Rust version is 1.88 because the patched `time` dependency requires it;
+the development/build toolchain remains pinned to 1.94.1.
