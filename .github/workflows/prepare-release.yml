@@ -39,7 +39,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install cargo-edit
-        run: cargo install cargo-edit --locked
+        run: cargo install cargo-edit --version 0.13.13 --locked
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
