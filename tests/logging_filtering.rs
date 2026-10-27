@@ -879,6 +879,9 @@ async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log(
         find_string(completion, &["upstream_api"]).as_deref(),
         Some("billing")
     );
+    assert_eq!(completion["requested_api"], "billing");
+    assert_eq!(completion["requested_method"], "GET");
+    assert_eq!(completion["requested_path"], "/v1/projects/1/tasks");
     assert_eq!(
         find_string(completion, &["upstream_method"]).as_deref(),
         Some("GET")
@@ -916,6 +919,175 @@ async fn successful_mcp_call_api_requests_include_payload_api_in_completion_log(
         logs.raw
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_call_api_failures_log_safe_attempt_metadata() -> Result<(), Box<dyn std::error::Error>>
+{
+    let unavailable = tokio::net::TcpSocket::new_v4()?;
+    unavailable.bind("127.0.0.1:0".parse()?)?;
+    let config = load_test_config(&format!("http://{}", unavailable.local_addr()?))?;
+    let app = build_router(AppState::from_config(&config)?);
+
+    for (api, path, expected_code) in [
+        ("projects", "/v1/tasks", "forbidden_api"),
+        (
+            "billing",
+            "/v1/tasks?jwt=query-secret#fragment-secret",
+            "bad_request",
+        ),
+        ("billing", "/v1/tasks", "upstream_request"),
+    ] {
+        let logs = captured_dispatch("info", || async {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
+                        .body(Body::from(
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "call_api", "arguments": {
+                                    "api": api, "method": "GET", "path": path,
+                                    "headers": {"x-secret": "header-secret"},
+                                    "body": "body-secret"
+                                }}
+                            })
+                            .to_string(),
+                        ))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await?.to_bytes();
+            let payload: Value = serde_json::from_slice(&body)?;
+            assert_eq!(payload["result"]["isError"], true);
+            assert_eq!(
+                payload["result"]["structuredContent"]["code"],
+                expected_code
+            );
+            Ok(())
+        })
+        .await?;
+
+        let completion = assert_mcp_completion_present(&logs.entries, "tools/call", "call_api");
+        assert_eq!(completion["requested_api"], api);
+        assert_eq!(completion["requested_method"], "GET");
+        assert_eq!(completion["requested_path"], "/v1/tasks");
+        assert!(!contains_key(completion, "upstream_api"));
+        assert!(!contains_key(completion, "upstream_ms"));
+        for secret in [
+            DEFAULT_TOKEN,
+            "query-secret",
+            "fragment-secret",
+            "header-secret",
+            "body-secret",
+        ] {
+            assert!(!logs.raw.contains(secret), "{}", logs.raw);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_attempt_metadata_is_absent_for_other_tools_and_unauthenticated_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_test_config("http://127.0.0.1:1")?;
+    let app = build_router(AppState::from_config(&config)?);
+    for (token, method, params, status) in [
+        (
+            DEFAULT_TOKEN,
+            "tools/call",
+            serde_json::json!({"name": "list_apis", "arguments": {"api": "billing", "method": "GET", "path": "/private"}}),
+            StatusCode::OK,
+        ),
+        (
+            DEFAULT_TOKEN,
+            "notifications/initialized",
+            serde_json::json!({}),
+            StatusCode::OK,
+        ),
+        (
+            "invalid.token",
+            "tools/call",
+            serde_json::json!({"name": "call_api", "arguments": {"api": "billing", "method": "GET", "path": "/private"}}),
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let logs = captured_dispatch("info", || async {
+            let payload = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(payload.to_string()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), status);
+            Ok(())
+        })
+        .await?;
+        let completion = assert_completion_present(&logs.entries, "POST", "/mcp");
+        for field in ["requested_api", "requested_method", "requested_path"] {
+            assert!(!contains_key(completion, field), "{}", logs.raw);
+        }
+        if status == StatusCode::UNAUTHORIZED {
+            assert_eq!(completion["error_code"], "invalid_token");
+            assert!(!contains_key(completion, "mcp_method"));
+            assert!(!contains_key(completion, "client"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_attempt_metadata_omits_invalid_values_individually()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_test_config("http://127.0.0.1:1")?;
+    let app = build_router(AppState::from_config(&config)?);
+    for arguments in [
+        serde_json::json!({}),
+        serde_json::json!({"api": 42, "method": [], "path": false}),
+        serde_json::json!({"api": "user:api-secret@host", "method": "GET\nmethod-secret", "path": "https://user:url-secret@host/private"}),
+        serde_json::json!({"api": null, "method": null, "path": "//user:authority-secret@host/private"}),
+        serde_json::json!({"api": "billing", "method": null, "path": "relative/path"}),
+    ] {
+        let logs = captured_dispatch("info", || async {
+            let payload = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "call_api", "arguments": arguments}
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("authorization", format!("Bearer {DEFAULT_TOKEN}"))
+                        .body(Body::from(payload.to_string()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            Ok(())
+        })
+        .await?;
+        let completion = assert_mcp_completion_present(&logs.entries, "tools/call", "call_api");
+        if arguments["api"] == "billing" {
+            assert_eq!(completion["requested_api"], "billing");
+        } else {
+            assert!(!contains_key(completion, "requested_api"));
+        }
+        assert!(!contains_key(completion, "requested_method"));
+        assert!(!contains_key(completion, "requested_path"));
+        assert!(!logs.raw.contains("secret"), "{}", logs.raw);
+    }
     Ok(())
 }
 

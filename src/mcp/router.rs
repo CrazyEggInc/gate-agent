@@ -11,6 +11,7 @@ use crate::{
     auth::bearer::{
         AuthorizedRequest, extract_authorization_header, validate_bearer_authorized_request,
     },
+    config::secrets::is_valid_slug,
     error::AppError,
     telemetry::{
         GATE_AGENT_REQUEST_ID_HEADER, LoggedClient, LoggedMcpRequest, LoggedRequestContext,
@@ -127,9 +128,35 @@ async fn handle_mcp_request(
 }
 
 fn logged_mcp_request(method: &str, params: &Option<Value>) -> LoggedMcpRequest {
+    let name = mcp_name(params);
+    let arguments = if method == "tools/call" && name == "call_api" {
+        params.as_ref().and_then(|params| params.get("arguments"))
+    } else {
+        None
+    };
+    let argument = |key| {
+        arguments
+            .and_then(|args| args.get(key))
+            .and_then(Value::as_str)
+    };
+    let requested_api = argument("api")
+        .filter(|api| is_valid_slug(api))
+        .map(str::to_owned);
+    let requested_method = argument("method")
+        .and_then(|method| http::Method::from_bytes(method.as_bytes()).ok())
+        .map(|method| method.to_string());
+    let requested_path = argument("path")
+        .filter(|path| path.starts_with('/') && !path.starts_with("//"))
+        .and_then(|path| path.split(['?', '#']).next())
+        .and_then(|path| path.parse::<http::Uri>().ok())
+        .map(|uri| sanitize_request_uri_for_logs(&uri));
+
     LoggedMcpRequest {
         mcp_method: method.to_owned(),
-        mcp_name: mcp_name(params),
+        mcp_name: name,
+        requested_api,
+        requested_method,
+        requested_path,
     }
 }
 

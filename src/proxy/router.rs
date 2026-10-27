@@ -84,9 +84,19 @@ fn log_response(default_method: &str, default_uri: &str, response: &Response) {
     macro_rules! completion {
         ($($field:tt)*) => {
             if logs_at_info(uri) {
-                info!($($field)*)
+                info!(
+                    requested_api = mcp_request.and_then(|request| request.requested_api.as_deref()),
+                    requested_method = mcp_request.and_then(|request| request.requested_method.as_deref()),
+                    requested_path = mcp_request.and_then(|request| request.requested_path.as_deref()),
+                    $($field)*
+                )
             } else {
-                debug!($($field)*)
+                debug!(
+                    requested_api = mcp_request.and_then(|request| request.requested_api.as_deref()),
+                    requested_method = mcp_request.and_then(|request| request.requested_method.as_deref()),
+                    requested_path = mcp_request.and_then(|request| request.requested_path.as_deref()),
+                    $($field)*
+                )
             }
         };
     }
