@@ -25,6 +25,9 @@ pub(crate) struct LoggedRequestContext {
 pub(crate) struct LoggedMcpRequest {
     pub mcp_method: String,
     pub mcp_name: String,
+    pub requested_api: Option<String>,
+    pub requested_method: Option<String>,
+    pub requested_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]

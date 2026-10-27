@@ -145,6 +145,8 @@ Expected logging behavior:
 - authenticated proxy completion logs must include the authorized client slug as the top-level `client` field
 - authenticated `/mcp` request completion logs must also remain attributable to the authorized client
 - authenticated `/mcp` request completion logs must include `mcp_method` and `mcp_name`; requests without a tool name use `mcp_name: "-"`
+- authenticated MCP `tools/call` requests for `call_api` must include available attempted-request metadata as `requested_api`, `requested_method`, and `requested_path`, even when validation, authorization, or upstream execution fails. These describe caller intent, not proof that an upstream request occurred. API values must be syntactically valid slugs, methods must be valid HTTP method tokens, and paths must be parseable absolute paths (not URLs or authority references), with query strings and fragments removed; missing, incorrectly typed, or unsafe values are omitted individually. Other MCP methods and tools do not emit these fields.
+- authentication failures do not include MCP method, tool, or attempted API metadata: unauthenticated request bodies are not parsed. Initialization and discovery traffic do not select an upstream API.
 - proxy and MCP `call_api` completion logs must include safe upstream metadata only when an upstream request is performed and upstream metadata is available: upstream API slug as `upstream_api`, outbound method, outbound URL, upstream status, upstream duration as `upstream_ms`, and timeout
 - for the `call_api` completion log contract, `upstream_ms` must be present only for requests that call a configured remote upstream API
 - completion logs must include `error_code` only when the response came from an application error
