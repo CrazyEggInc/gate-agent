@@ -9,7 +9,7 @@ fn prepare_release_workflow_is_manual_and_writes_version_bump_only_after_validat
     assert!(workflow.contains("version:"));
     assert!(workflow.contains("dry_run:"));
     assert!(workflow.contains("permissions:\n  contents: write\n  actions: write"));
-    assert!(workflow.contains("cargo install cargo-edit --locked"));
+    assert!(workflow.contains("cargo install cargo-edit --version 0.13.13 --locked"));
     assert!(workflow.contains("cargo fmt --all --check"));
     assert!(workflow.contains("cargo clippy --all-targets --all-features -- -D warnings"));
     assert!(workflow.contains("cargo test --all-targets --all-features"));
