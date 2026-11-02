@@ -505,10 +505,10 @@ fn parse_content_length(headers: &[u8]) -> Result<usize, Box<dyn std::error::Err
     let headers = String::from_utf8_lossy(headers);
 
     for line in headers.lines() {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                return Ok(value.trim().parse()?);
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            return Ok(value.trim().parse()?);
         }
     }
 

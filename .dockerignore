@@ -1,0 +1,6 @@
+.git
+.claude
+target
+.secrets*
+.env*
+*.log
